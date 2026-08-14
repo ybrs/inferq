@@ -11,6 +11,51 @@ use super::{deltanet::recurrent_delta_step, norm::rms_norm_gated};
 pub struct QuantizedDeltaState {
     conv: Vec<f32>,
     recurrent: Vec<f32>,
+    scratch: Box<QuantizedDeltaScratch>,
+}
+
+#[derive(Debug, Clone)]
+struct QuantizedDeltaScratch {
+    q: Vec<f32>,
+    k: Vec<f32>,
+    v: Vec<f32>,
+    mixed: Vec<f32>,
+    convolved: Vec<f32>,
+    q_repeated: Vec<f32>,
+    k_repeated: Vec<f32>,
+    beta: Vec<f32>,
+    decay: Vec<f32>,
+    recurrent_output: Vec<f32>,
+}
+
+impl QuantizedDeltaScratch {
+    fn new(
+        key_heads: usize,
+        value_heads: usize,
+        key_head_dim: usize,
+        value_head_dim: usize,
+    ) -> Self {
+        let key_dim = key_heads * key_head_dim;
+        let value_dim = value_heads * value_head_dim;
+        let conv_dim = key_dim * 2 + value_dim;
+        Self {
+            q: vec![0.; key_dim],
+            k: vec![0.; key_dim],
+            v: vec![0.; value_dim],
+            mixed: vec![0.; conv_dim],
+            convolved: vec![0.; conv_dim],
+            q_repeated: vec![0.; value_heads * key_head_dim],
+            k_repeated: vec![0.; value_heads * key_head_dim],
+            beta: vec![0.; value_heads],
+            decay: vec![0.; value_heads],
+            recurrent_output: Vec::new(),
+        }
+    }
+
+    fn prepare_output(&mut self, len: usize) {
+        self.recurrent_output.resize(len, 0.);
+        self.recurrent_output.fill(0.);
+    }
 }
 
 impl QuantizedDeltaState {
@@ -26,6 +71,12 @@ impl QuantizedDeltaState {
                     * config.linear_key_head_dim
                     * config.linear_value_head_dim
             ],
+            scratch: Box::new(QuantizedDeltaScratch::new(
+                config.linear_num_key_heads,
+                config.linear_num_value_heads,
+                config.linear_key_head_dim,
+                config.linear_value_head_dim,
+            )),
         }
     }
 }
@@ -160,6 +211,12 @@ impl QuantizedDeltaLayer {
         QuantizedDeltaState {
             conv: vec![0.; (key_dim * 2 + value_dim) * (self.conv_kernel - 1)],
             recurrent: vec![0.; self.value_heads * self.key_head_dim * self.value_head_dim],
+            scratch: Box::new(QuantizedDeltaScratch::new(
+                self.key_heads,
+                self.value_heads,
+                self.key_head_dim,
+                self.value_head_dim,
+            )),
         }
     }
 
@@ -177,13 +234,13 @@ impl QuantizedDeltaLayer {
         let flat = xs.to_dtype(DType::F32)?.reshape((seq, self.hidden_size))?;
         let mut timings = QuantizedDeltaTimings::default();
         let projection_started = Instant::now();
-        let projected = self.qkv.forward(&flat)?.to_vec2::<f32>()?;
-        let gates = self.z.forward(&flat)?.to_vec2::<f32>()?;
+        let projected = self.qkv.forward(&flat)?.flatten_all()?.to_vec1::<f32>()?;
+        let gates = self.z.forward(&flat)?.flatten_all()?.to_vec1::<f32>()?;
         let projected_ba = self
             .beta_alpha
             .forward(&flat)?
-            .reshape((seq, self.key_heads, 2 * self.value_heads / self.key_heads))?
-            .to_vec3::<f32>()?;
+            .flatten_all()?
+            .to_vec1::<f32>()?;
         timings.projections = projection_started.elapsed();
 
         let key_dim = self.key_heads * self.key_head_dim;
@@ -198,94 +255,108 @@ impl QuantizedDeltaLayer {
             state.recurrent.len() == self.value_heads * self.key_head_dim * self.value_head_dim,
             "invalid recurrent state"
         );
-        let mut recurrent_output = vec![0.; seq * value_dim];
+        state.scratch.prepare_output(seq * value_dim);
+        let QuantizedDeltaState {
+            conv,
+            recurrent,
+            scratch,
+        } = state;
         for token in 0..seq {
-            let mut q = projected[token][..key_dim].to_vec();
-            let mut k = projected[token][key_dim..key_dim * 2].to_vec();
-            let mut v = projected[token][key_dim * 2..].to_vec();
+            let projected = &projected[token * conv_dim..(token + 1) * conv_dim];
+            scratch.q.copy_from_slice(&projected[..key_dim]);
+            scratch.k.copy_from_slice(&projected[key_dim..key_dim * 2]);
+            scratch.v.copy_from_slice(&projected[key_dim * 2..]);
             let convolution_started = Instant::now();
-            let mut mixed = Vec::with_capacity(conv_dim);
-            mixed.extend_from_slice(&q);
-            mixed.extend_from_slice(&k);
-            mixed.extend_from_slice(&v);
-            let mut convolved = vec![0.; conv_dim];
+            scratch.mixed[..key_dim].copy_from_slice(&scratch.q);
+            scratch.mixed[key_dim..key_dim * 2].copy_from_slice(&scratch.k);
+            scratch.mixed[key_dim * 2..].copy_from_slice(&scratch.v);
             for channel in 0..conv_dim {
-                let history = &state.conv
-                    [channel * (self.conv_kernel - 1)..(channel + 1) * (self.conv_kernel - 1)];
-                let mut sum = self.conv_weight[channel][self.conv_kernel - 1] * mixed[channel];
+                let history =
+                    &conv[channel * (self.conv_kernel - 1)..(channel + 1) * (self.conv_kernel - 1)];
+                let mut sum =
+                    self.conv_weight[channel][self.conv_kernel - 1] * scratch.mixed[channel];
                 for (tap, previous) in history.iter().enumerate() {
                     sum += self.conv_weight[channel][tap] * previous;
                 }
-                convolved[channel] = silu(sum);
+                scratch.convolved[channel] = silu(sum);
             }
             if self.conv_kernel > 1 {
-                for (channel, &current) in mixed.iter().enumerate() {
-                    let history = &mut state.conv
+                for (channel, &current) in scratch.mixed.iter().enumerate() {
+                    let history = &mut conv
                         [channel * (self.conv_kernel - 1)..(channel + 1) * (self.conv_kernel - 1)];
                     history.rotate_left(1);
                     history[self.conv_kernel - 2] = current;
                 }
             }
             timings.convolution += convolution_started.elapsed();
-            q.copy_from_slice(&convolved[..key_dim]);
-            k.copy_from_slice(&convolved[key_dim..key_dim * 2]);
-            v.copy_from_slice(&convolved[key_dim * 2..]);
+            scratch.q.copy_from_slice(&scratch.convolved[..key_dim]);
+            scratch
+                .k
+                .copy_from_slice(&scratch.convolved[key_dim..key_dim * 2]);
+            scratch.v.copy_from_slice(&scratch.convolved[key_dim * 2..]);
 
             let recurrence_started = Instant::now();
-            let mut q_repeated = vec![0.; self.value_heads * self.key_head_dim];
-            let mut k_repeated = vec![0.; self.value_heads * self.key_head_dim];
             for key_head in 0..self.key_heads {
-                normalize(&mut q[key_head * self.key_head_dim..(key_head + 1) * self.key_head_dim]);
-                normalize(&mut k[key_head * self.key_head_dim..(key_head + 1) * self.key_head_dim]);
+                normalize(
+                    &mut scratch.q
+                        [key_head * self.key_head_dim..(key_head + 1) * self.key_head_dim],
+                );
+                normalize(
+                    &mut scratch.k
+                        [key_head * self.key_head_dim..(key_head + 1) * self.key_head_dim],
+                );
                 for repeat in 0..ratio {
                     let value_head = key_head * ratio + repeat;
-                    q_repeated
+                    scratch.q_repeated
                         [value_head * self.key_head_dim..(value_head + 1) * self.key_head_dim]
                         .copy_from_slice(
-                            &q[key_head * self.key_head_dim..(key_head + 1) * self.key_head_dim],
+                            &scratch.q
+                                [key_head * self.key_head_dim..(key_head + 1) * self.key_head_dim],
                         );
-                    k_repeated
+                    scratch.k_repeated
                         [value_head * self.key_head_dim..(value_head + 1) * self.key_head_dim]
                         .copy_from_slice(
-                            &k[key_head * self.key_head_dim..(key_head + 1) * self.key_head_dim],
+                            &scratch.k
+                                [key_head * self.key_head_dim..(key_head + 1) * self.key_head_dim],
                         );
                 }
             }
-            let mut beta = vec![0.; self.value_heads];
-            let mut decay = vec![0.; self.value_heads];
-            for (key_head, parameters) in
-                projected_ba[token].iter().enumerate().take(self.key_heads)
-            {
+            let parameters_per_key_head = 2 * ratio;
+            let token_parameters =
+                &projected_ba[token * self.value_heads * 2..(token + 1) * self.value_heads * 2];
+            for key_head in 0..self.key_heads {
+                let parameters = &token_parameters
+                    [key_head * parameters_per_key_head..(key_head + 1) * parameters_per_key_head];
                 for repeat in 0..ratio {
                     let value_head = key_head * ratio + repeat;
-                    beta[value_head] = sigmoid(parameters[repeat]);
+                    scratch.beta[value_head] = sigmoid(parameters[repeat]);
                     let alpha = parameters[ratio + repeat];
-                    decay[value_head] =
+                    scratch.decay[value_head] =
                         self.state_scale[value_head] * softplus(alpha + self.dt_bias[value_head]);
                 }
             }
             recurrent_delta_step(
-                &q_repeated,
-                &k_repeated,
-                &v,
-                &decay,
-                &beta,
+                &scratch.q_repeated,
+                &scratch.k_repeated,
+                &scratch.v,
+                &scratch.decay,
+                &scratch.beta,
                 self.value_heads,
                 self.key_head_dim,
                 self.value_head_dim,
-                &mut state.recurrent,
-                &mut recurrent_output[token * value_dim..(token + 1) * value_dim],
+                recurrent,
+                &mut scratch.recurrent_output[token * value_dim..(token + 1) * value_dim],
             );
             timings.recurrence += recurrence_started.elapsed();
         }
         let norm_started = Instant::now();
-        let output = Tensor::from_vec(
-            recurrent_output,
+        let output = Tensor::from_slice(
+            &scratch.recurrent_output,
             (seq * self.value_heads, self.value_head_dim),
             xs.device(),
         )?;
         let gates = Tensor::from_vec(
-            gates.into_iter().flatten().collect(),
+            gates,
             (seq * self.value_heads, self.value_head_dim),
             xs.device(),
         )?;
@@ -330,6 +401,20 @@ fn normalize(values: &mut [f32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scratch_output_reuses_capacity_and_clears_values() {
+        let mut scratch = QuantizedDeltaScratch::new(2, 4, 8, 8);
+        scratch.prepare_output(64);
+        let capacity = scratch.recurrent_output.capacity();
+        scratch.recurrent_output.fill(1.);
+
+        scratch.prepare_output(32);
+
+        assert_eq!(scratch.recurrent_output.len(), 32);
+        assert_eq!(scratch.recurrent_output.capacity(), capacity);
+        assert!(scratch.recurrent_output.iter().all(|&value| value == 0.));
+    }
 
     #[test]
     fn gguf_state_scale_is_already_negative_exp_a_log() {

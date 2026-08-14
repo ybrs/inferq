@@ -141,8 +141,13 @@ all 216,000 expert requests hitting cache:
 | --- | ---: | ---: | ---: | ---: |
 | Initial native suite | 4.51 s | 3.74 tok/s | 0 MiB | 47,319 MiB |
 | Contiguous DeltaNet + resident cache | 3.15 s | 5.62 tok/s | 0 MiB | 47,263 MiB |
+| Reusable DeltaNet scratch | 3.25 s | 5.77 tok/s | 0 MiB | 47,271 MiB |
 
 All 128 generated token IDs matched the initial artifact exactly. The accepted
 change improves sustained decode by 50.2%; an algebraically equivalent version
 that reassociated floating-point multiplication was rejected after diverging
-at generated token 28.
+at generated token 28. Replacing nested projection readback and per-token
+DeltaNet work-vector allocation with flat, layer-owned scratch preserved all
+128 IDs and reduced sustained decode from 22.59 to 22.01 seconds. DeltaNet
+gated normalization fell from 188 to 132 ms over the run; its quantized
+projections remain the largest DeltaNet operation at 5.06 seconds.

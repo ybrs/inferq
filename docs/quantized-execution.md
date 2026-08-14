@@ -282,7 +282,9 @@ held `3.74 token/s` over 127 sustained decode passes. The next profiled
 optimization changed DeltaNet recurrence to traverse contiguous state rows and
 removed fully-resident LRU bookkeeping. The identical 128 generated token IDs
 then decoded at `5.62 token/s`, with TTFT reduced from `4.51 s` to `3.15 s`.
-All 216,000 expert
+The DeltaNet sequence state now also owns reusable flat projection and
+recurrence work buffers. That allocation-neutral decode path preserved all 128
+IDs and measured `5.77 token/s` in a subsequent sustained run. All 216,000 expert
 requests in the long case hit the pinned cache, measured inference reads were
 zero, and final RSS was `47,263.1 MiB`. This crosses both stretch gates while
 remaining below the 55 GiB memory gate. The earlier sustained numbers above

@@ -362,6 +362,14 @@ inference reads, and 47,263.1 MiB RSS. This crosses both stretch gates on the
 current host; remaining qualification is variance and conversational/tool
 correctness rather than basic throughput.
 
+Layer-owned flat DeltaNet scratch subsequently removed the nested projection
+readback and transient Q/K/V, convolution, repeat-head, beta/decay, and output
+vectors from steady-state decode. The exact 128-token stream remained
+unchanged and decode measured 5.77 token/s (22.01 seconds for 127 passes), with
+DeltaNet accounting for 9.29 seconds. Its input and output quantized
+projections now dominate that stage, while MoE remains the other major
+end-to-end cost.
+
 The next three bounded changes should be:
 
 1. Record a warm repeated variance band for the short cases in the same
