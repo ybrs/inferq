@@ -91,5 +91,7 @@ implemented as the first Stage 2B boundary; see
 complete layer of each type now match their BF16 comparison gates, including a
 two-step full-attention KV-cache comparison. The first complete GGUF runtime is
 also operational and matches the two-token BF16 regression. It currently uses
-the Hugging Face directory for config/tokenizer assets and needs persistent
-expert residency before sustained decode is usable.
+the Hugging Face directory for config/tokenizer assets. Its interactive mode
+keeps loaded weights and sequence state alive across turns and can write a
+per-layer expert census. A bounded expert-residency policy remains necessary
+before sustained decode is usable.

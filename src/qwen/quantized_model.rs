@@ -3,7 +3,11 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, ensure};
 use candle_core::{DType, Device, Tensor};
 
-use crate::{GgufCheckpoint, LayerType, QuantizedEmbedding, QuantizedMatrix, Qwen3NextConfig};
+use crate::{
+    ExpertCacheStats, GgufCheckpoint, LayerType, QuantizedEmbedding, QuantizedMatrix,
+    Qwen3NextConfig,
+    trace::{RoutingRecord, RoutingTrace},
+};
 
 use super::{
     QuantizedAttentionState, QuantizedDeltaState, QuantizedFullLayer, QuantizedLinearLayer,
@@ -36,7 +40,23 @@ pub struct QuantizedForwardTimings {
     pub lm_head: Duration,
 }
 
+impl QuantizedForwardTimings {
+    pub fn accumulate(&mut self, other: &Self) {
+        self.wall += other.wall;
+        self.embedding += other.embedding;
+        if self.layers.len() < other.layers.len() {
+            self.layers.resize(other.layers.len(), Duration::ZERO);
+        }
+        for (total, elapsed) in self.layers.iter_mut().zip(&other.layers) {
+            *total += *elapsed;
+        }
+        self.final_norm += other.final_norm;
+        self.lm_head += other.lm_head;
+    }
+}
+
 pub struct QuantizedModel<'a> {
+    checkpoint: &'a GgufCheckpoint,
     config: Qwen3NextConfig,
     embedding: QuantizedEmbedding,
     layers: Vec<DecoderLayer<'a>>,
@@ -90,6 +110,7 @@ impl<'a> QuantizedModel<'a> {
             lm_head.shape()
         );
         Ok(Self {
+            checkpoint,
             config,
             embedding,
             layers,
@@ -100,6 +121,10 @@ impl<'a> QuantizedModel<'a> {
 
     pub fn config(&self) -> &Qwen3NextConfig {
         &self.config
+    }
+
+    pub fn expert_cache_stats(&self) -> Result<ExpertCacheStats> {
+        self.checkpoint.expert_cache_stats()
     }
 
     pub fn new_state(&self) -> QuantizedModelState {
@@ -122,6 +147,15 @@ impl<'a> QuantizedModel<'a> {
         token_ids: &[u32],
         state: &mut QuantizedModelState,
     ) -> Result<(Tensor, QuantizedForwardTimings)> {
+        self.forward_with_trace(token_ids, state, None)
+    }
+
+    pub fn forward_with_trace(
+        &self,
+        token_ids: &[u32],
+        state: &mut QuantizedModelState,
+        mut trace: Option<&mut dyn RoutingTrace>,
+    ) -> Result<(Tensor, QuantizedForwardTimings)> {
         ensure!(!token_ids.is_empty(), "forward requires at least one token");
         ensure!(
             state.layers.len() == self.layers.len(),
@@ -142,15 +176,36 @@ impl<'a> QuantizedModel<'a> {
             self.layers.iter().zip(state.layers.iter_mut()).enumerate()
         {
             let started = Instant::now();
-            hidden = match (layer, layer_state) {
+            let output = match (layer, layer_state) {
                 (DecoderLayer::Full(layer), DecoderState::Full(layer_state)) => {
-                    layer.forward(&hidden, position, layer_state)?.hidden
+                    layer.forward(&hidden, position, layer_state)?
                 }
                 (DecoderLayer::Linear(layer), DecoderState::Linear(layer_state)) => {
-                    layer.forward(&hidden, layer_state)?.hidden
+                    layer.forward(&hidden, layer_state)?
                 }
                 _ => anyhow::bail!("state type does not match layer {index}"),
             };
+            if let Some(sink) = trace.as_mut() {
+                ensure!(
+                    output.routes.len() == token_ids.len(),
+                    "layer {index} produced {} routes for {} input tokens",
+                    output.routes.len(),
+                    token_ids.len()
+                );
+                for (token_offset, (&token_id, route)) in
+                    token_ids.iter().zip(&output.routes).enumerate()
+                {
+                    sink.record(&RoutingRecord {
+                        token_index: position + token_offset,
+                        token_id,
+                        layer: index,
+                        selected_expert_ids: route.experts.clone(),
+                        router_weights: route.weights.clone(),
+                        router_logits: Some(route.logits.clone()),
+                    })?;
+                }
+            }
+            hidden = output.hidden;
             let elapsed = started.elapsed();
             timings.layers.push(elapsed);
             tracing::info!(

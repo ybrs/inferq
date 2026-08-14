@@ -307,23 +307,35 @@ attention is now complete too: layer 3 matched BF16 routing, produced output
 RMSE 0.0107, took 7.79 ms warm, and passed a two-step persistent-KV comparison.
 Whole-model assembly is now operational: prompt `a` produced the expected
 two-token sequence `[284, 526]`. Warm prefill reached 2.34 token/s, but the next
-decode encountered new cold expert pages and took 20.3 seconds. Persistent
-residency and real-routing census are therefore the next open critical-path
-work.
+decode encountered new cold expert pages and took 20.3 seconds. The runtime now
+has an interactive mode that loads once, preserves sequence state correctly
+across turns, and writes either detailed routes or a compact per-layer census.
+An opt-in global byte-bounded expert LRU now provides per-turn hit/miss/read/
+resident/eviction telemetry while the default remains the page-cache-only
+baseline. Capacity sweeps and census-driven warming are now the open
+critical-path work.
+
+The first controlled warm-route result clarifies the opportunity. A
+zero-capacity three-token run decoded at 0.19 token/s while loading 2610 MiB of
+expert ranges; the identical repeat reached 1.28 token/s once those pages were
+resident. A 1024 MiB explicit LRU achieved 21.5% hits on a two-token
+continuation but was slower than the zero-capacity warm control and thrashed
+with 2008 evictions. These are narrow smoke measurements, but they support
+page-cache-first census warming rather than enabling the explicit LRU by
+default.
 
 The next three bounded changes should be:
 
-1. Add structured profiling and a benchmark artifact schema, then capture a
-   clean warm/cold baseline without another engine competing for page cache.
-2. Add GGUF quantized tensor views plus scalar block-dequantization tests, and
-   execute one projection without whole-matrix F32 materialization.
-3. Integrate a fast Q4_K/Q5_K/Q6_K/Q8_0 GEMV path, initially through a narrow
-   ggml adapter if appropriate, then bring up one complete layer and compare it
-   against BF16 before switching the full model.
+1. Run repeated real prompts in one process, recording layer-qualified expert
+   reuse, expert-load time, faults, RSS, and the routing census.
+2. Sweep the bounded, layer-qualified expert cache capacities that fit below
+   the 55 GiB RSS gate and compare them against the zero-capacity baseline.
+3. Use the census to evaluate page-cache-first warming of only the hottest
+   experts, retaining exact routing and comparing against the no-warmup path.
 
-This ordering attacks the measured weight representation and memory-pressure
-problem first. An expert cache, io_uring, speculative routing, server API, and
-approximate expert counts do not belong on the critical path yet.
+This ordering attacks the observed cold random expert reads while preserving
+exact output. io_uring, speculative routing, a server API, and approximate
+expert counts do not belong on the current HDD critical path.
 
 ## Benchmark and correctness contract
 

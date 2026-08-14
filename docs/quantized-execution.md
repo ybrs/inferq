@@ -129,7 +129,7 @@ Persistent KV decode is compared independently with two sequential steps:
 At the second cached position the attention mixer RMSE was `0.00439`; the
 quantized and BF16 sessions both reused their first-step keys and values. Both
 decoder layer types have now crossed their isolated correctness gate. The next
-work is a 48-layer runtime with quantized embedding, final norm, and LM head.
+work was the 48-layer runtime described below.
 
 ## End-to-end GGUF inference
 
@@ -154,3 +154,50 @@ resident weights in `1.89 s` and prefetched the first token in `0.427 s`
 set of cold expert pages. This is end-to-end correct but not yet sustained
 usable performance: persistent execution plus expert residency/census is now
 the immediate bottleneck.
+
+### Persistent session and routing census
+
+`--interactive` loads the model once and retains attention, DeltaNet, and
+pending-token state across input lines. The input is raw continuation text; use
+`/reset` before starting an independent prompt and `/quit` to exit:
+
+```bash
+./target/release/gguf_infer \
+  --model /data/projects/localllm/models/Qwen3-Coder-Next-UD-Q4_K_M.gguf \
+  --tokenizer-model /data/projects/localllm/models/Qwen3-Coder-Next-SafeTensors \
+  --interactive \
+  --max-new-tokens 2 \
+  --routing-census routing-census.json
+```
+
+Add `--routing-trace routing.jsonl` for individual layer-qualified decisions.
+Full router logits are omitted unless `--trace-router-logits` is supplied. The
+census is cumulative for the process and contains per-layer expert counts plus
+the checkpoint size, quantization types, modification time, and a stable GGUF
+layout fingerprint. The fingerprint avoids a 46 GiB startup hash and is a
+local checkpoint identity, not a cryptographic content digest.
+
+The default expert cache capacity is zero, leaving the OS page cache as the
+baseline. `--expert-cache-mib N` enables a global byte-bounded LRU of compressed
+expert matrices. Each turn reports requests, hits, GGUF range bytes loaded,
+resident bytes, entries, and evictions. Range bytes are application-level
+copies and may come from the OS page cache; they are not physical disk bytes.
+The cache never changes routing or numeric
+formats; it only retains already loaded `gate`, `up`, and `down` matrix ranges.
+Start capacity experiments conservatively (for example, 1024 MiB) because the
+46 GiB model and recurrent state must remain below the 55 GiB RSS gate.
+
+On 2026-08-14, the first three-token `a` run with the zero-capacity baseline
+loaded 2610 MiB of expert ranges across prefill and two decode passes; decode
+was `0.19 token/s`. Repeating the identical command after those routes were in
+the OS page cache produced the same IDs `[284, 526, 5384]` and reached `1.28
+token/s` decode. This crosses the agent-usable gate for that narrow warm trace,
+not yet for varied prompts.
+
+A 1024 MiB in-process LRU recorded 618 hits from 2880 matrix requests (21.5%)
+on the second turn of the `a`, `a` continuation, but its 2.38-second input pass
+was slower than the 1.57-second zero-capacity warm control and caused 2008
+evictions. The default therefore remains zero: this first result agrees with
+Flash-MoE's observation that the OS page cache can beat an explicit cache. More
+capacity and prompt-diversity sweeps are required before retaining the LRU as a
+recommended operating mode.
