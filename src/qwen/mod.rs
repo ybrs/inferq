@@ -5,19 +5,26 @@ mod deltanet;
 mod model;
 mod moe;
 mod norm;
+mod quantized_attention;
 mod quantized_deltanet;
 mod quantized_layer;
 mod quantized_moe;
 
+pub use attention::{ReferenceAttentionState, reference_attention, reference_attention_step};
 pub use deltanet::reference_deltanet;
 pub use model::{
     ForwardTimingReport, ForwardTimings, Model, ModelState, ReferenceLayerOutput,
-    reference_linear_layer,
+    reference_full_layer, reference_linear_layer,
 };
 pub use moe::{Route, reference_routes, reference_sparse_moe, top_k_routes};
 pub use norm::{l2_normalize, rms_norm, rms_norm_gated};
+pub use quantized_attention::{
+    QuantizedAttentionLayer, QuantizedAttentionState, QuantizedAttentionTimings,
+};
 pub use quantized_deltanet::{QuantizedDeltaLayer, QuantizedDeltaState, QuantizedDeltaTimings};
-pub use quantized_layer::{QuantizedLayerOutput, QuantizedLayerTimings, QuantizedLinearLayer};
+pub use quantized_layer::{
+    QuantizedFullLayer, QuantizedLayerOutput, QuantizedLayerTimings, QuantizedLinearLayer,
+};
 pub use quantized_moe::{QuantizedMoeLayer, QuantizedMoeOutput, QuantizedMoeTimings};
 
 use std::time::Instant;

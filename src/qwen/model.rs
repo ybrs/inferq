@@ -391,6 +391,34 @@ pub fn reference_linear_layer(
     })
 }
 
+pub fn reference_full_layer(
+    checkpoint: &Checkpoint,
+    config: &Qwen3NextConfig,
+    layer: usize,
+    xs: &Tensor,
+) -> Result<ReferenceLayerOutput> {
+    ensure!(
+        config.layer_type(layer) == LayerType::FullAttention,
+        "layer {layer} is not a full-attention layer"
+    );
+    let prefix = format!("model.layers.{layer}");
+    let input_norm = checkpoint.load(&format!("{prefix}.input_layernorm.weight"), xs.device())?;
+    let normalized = rms_norm(xs, &input_norm, config.rms_norm_eps)?;
+    let mixed = attention::reference_attention(checkpoint, config, layer, &normalized, 0)?;
+    let hidden = (xs + mixed)?;
+    let post_norm = checkpoint.load(
+        &format!("{prefix}.post_attention_layernorm.weight"),
+        xs.device(),
+    )?;
+    let normalized = rms_norm(&hidden, &post_norm, config.rms_norm_eps)?;
+    let routes = reference_routes(checkpoint, config, layer, &normalized)?;
+    let feed_forward = reference_sparse_moe(checkpoint, config, layer, &normalized)?;
+    Ok(ReferenceLayerOutput {
+        hidden: (hidden + feed_forward)?,
+        routes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

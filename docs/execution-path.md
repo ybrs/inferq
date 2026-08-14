@@ -88,7 +88,8 @@ parsed and validated; this has been exercised against the local 46 GB
 Direct GGUF matrix execution and selected-expert range loading are now
 implemented as the first Stage 2B boundary; see
 [quantized-execution.md](quantized-execution.md). Direct routed MoE and one
-complete quantized linear-attention layer now match their BF16 comparison
-gates. A complete GGUF model runtime and tokenizer construction from GGUF
-metadata are not yet implemented. Full-attention layers, embedding, LM head,
-and whole-model state assembly remain before end-to-end GGUF generation.
+complete layer of each type now match their BF16 comparison gates, including a
+two-step full-attention KV-cache comparison. A complete GGUF model runtime and
+tokenizer construction from GGUF metadata are not yet implemented. Embedding,
+LM head, and whole-model state assembly remain before end-to-end GGUF
+generation.

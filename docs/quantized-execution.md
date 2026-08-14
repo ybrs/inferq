@@ -93,6 +93,40 @@ reference output L2 norm `25.56`. A warm complete layer took `11.0 ms`: about
 `5.97 ms` in DeltaNet and `4.99 ms` in MoE. The DeltaNet scalar recurrent update
 was about `2.01 ms`, making it a later vectorization target.
 
-This closes the one-linear-layer correctness gate. The next architecture work
-is direct quantized full attention for layers 3, 7, and the remaining interval
-layers, followed by a 48-layer runtime with quantized embedding and LM head.
+This closes the one-linear-layer correctness gate.
+
+## Complete full-attention layer
+
+The second layer implementation covers the joint query/gate projection, Q/K
+norms, partial RoPE, persistent grouped-query KV state, causal attention,
+sigmoid output gate, output projection, residuals, and routed MoE. Run its
+complete comparison with:
+
+```bash
+RUSTFLAGS='-C target-cpu=native' cargo build --release --bin gguf_full_layer
+
+./target/release/gguf_full_layer \
+  --model /data/projects/localllm/models/Qwen3-Coder-Next-UD-Q4_K_M.gguf \
+  --reference-model /data/projects/localllm/models/Qwen3-Coder-Next-SafeTensors \
+  --layer 3
+```
+
+The complete layer selected the same ten experts as BF16 and produced maximum
+absolute error `0.0801`, RMSE `0.0107`, and reference output L2 norm `40.59`.
+Warm time was `7.79 ms`: `1.85 ms` attention and `5.87 ms` MoE. A cold-page run
+took `586 ms`, dominated by `575 ms` of selected-expert reads.
+
+Persistent KV decode is compared independently with two sequential steps:
+
+```bash
+./target/release/gguf_attention \
+  --model /data/projects/localllm/models/Qwen3-Coder-Next-UD-Q4_K_M.gguf \
+  --reference-model /data/projects/localllm/models/Qwen3-Coder-Next-SafeTensors \
+  --layer 3 \
+  --steps 2
+```
+
+At the second cached position the attention mixer RMSE was `0.00439`; the
+quantized and BF16 sessions both reused their first-step keys and values. Both
+decoder layer types have now crossed their isolated correctness gate. The next
+work is a 48-layer runtime with quantized embedding, final norm, and LM head.

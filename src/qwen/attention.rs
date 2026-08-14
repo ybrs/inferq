@@ -142,6 +142,42 @@ pub(crate) fn forward(
     Ok(linear_profiled(&output, &o_weight, timings)?.reshape(xs.shape())?)
 }
 
+pub fn reference_attention(
+    checkpoint: &Checkpoint,
+    config: &Qwen3NextConfig,
+    layer: usize,
+    xs: &Tensor,
+    position: usize,
+) -> Result<Tensor> {
+    let mut state = ReferenceAttentionState::default();
+    reference_attention_step(checkpoint, config, layer, xs, position, &mut state)
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ReferenceAttentionState {
+    inner: AttentionState,
+}
+
+pub fn reference_attention_step(
+    checkpoint: &Checkpoint,
+    config: &Qwen3NextConfig,
+    layer: usize,
+    xs: &Tensor,
+    position: usize,
+    state: &mut ReferenceAttentionState,
+) -> Result<Tensor> {
+    let mut timings = ForwardTimings::default();
+    forward(
+        checkpoint,
+        config,
+        layer,
+        xs,
+        position,
+        &mut state.inner,
+        &mut timings,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

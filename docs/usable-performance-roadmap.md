@@ -303,7 +303,9 @@ working. Layer-0 MoE selected the same ten experts as the BF16 oracle and its
 output RMSE was 0.00077 on the deterministic comparison vector. Full
 DeltaNet integration is now complete as well: the whole quantized linear layer
 matched BF16 routing, produced output RMSE 0.00193, and took 11.0 ms warm. Full
-attention and whole-model assembly are the next open parts of item 3 below.
+attention is now complete too: layer 3 matched BF16 routing, produced output
+RMSE 0.0107, took 7.79 ms warm, and passed a two-step persistent-KV comparison.
+Whole-model assembly is the next open part of item 3 below.
 
 The next three bounded changes should be:
 

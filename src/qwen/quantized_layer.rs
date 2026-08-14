@@ -6,6 +6,7 @@ use candle_core::{D, DType, Tensor};
 use crate::{GgufCheckpoint, LayerType, Qwen3NextConfig};
 
 use super::{
+    QuantizedAttentionLayer, QuantizedAttentionState, QuantizedAttentionTimings,
     QuantizedDeltaLayer, QuantizedDeltaState, QuantizedDeltaTimings, QuantizedMoeLayer,
     QuantizedMoeTimings, Route,
 };
@@ -14,6 +15,7 @@ use super::{
 pub struct QuantizedLayerTimings {
     pub wall: Duration,
     pub normalization: Duration,
+    pub attention: QuantizedAttentionTimings,
     pub delta: QuantizedDeltaTimings,
     pub moe: QuantizedMoeTimings,
 }
@@ -102,7 +104,84 @@ impl<'a> QuantizedLinearLayer<'a> {
             timings: QuantizedLayerTimings {
                 wall: wall_started.elapsed(),
                 normalization,
+                attention: QuantizedAttentionTimings::default(),
                 delta,
+                moe: moe.timings,
+            },
+        })
+    }
+}
+
+pub struct QuantizedFullLayer<'a> {
+    eps: f64,
+    input_norm: Tensor,
+    post_attention_norm: Tensor,
+    attention: QuantizedAttentionLayer,
+    moe: QuantizedMoeLayer<'a>,
+}
+
+impl<'a> QuantizedFullLayer<'a> {
+    pub fn load(
+        checkpoint: &'a GgufCheckpoint,
+        config: &Qwen3NextConfig,
+        layer: usize,
+    ) -> Result<Self> {
+        ensure!(
+            config.layer_type(layer) == LayerType::FullAttention,
+            "layer {layer} is not a full-attention layer"
+        );
+        let prefix = format!("blk.{layer}");
+        let input_norm = checkpoint.load_f32_vector(&format!("{prefix}.attn_norm.weight"))?;
+        let post_attention_norm =
+            checkpoint.load_f32_vector(&format!("{prefix}.post_attention_norm.weight"))?;
+        ensure!(
+            input_norm.elem_count() == config.hidden_size
+                && post_attention_norm.elem_count() == config.hidden_size,
+            "invalid layer norm dimensions for layer {layer}"
+        );
+        Ok(Self {
+            eps: config.rms_norm_eps,
+            input_norm,
+            post_attention_norm,
+            attention: QuantizedAttentionLayer::load(checkpoint, config, layer)?,
+            moe: QuantizedMoeLayer::load(
+                checkpoint,
+                layer,
+                config.num_experts_per_tok,
+                config.norm_topk_prob,
+            )?,
+        })
+    }
+
+    pub fn new_state(&self) -> QuantizedAttentionState {
+        self.attention.new_state()
+    }
+
+    pub fn forward(
+        &self,
+        xs: &Tensor,
+        position: usize,
+        state: &mut QuantizedAttentionState,
+    ) -> Result<QuantizedLayerOutput> {
+        let wall_started = Instant::now();
+        let norm_started = Instant::now();
+        let normalized = gguf_rms_norm(xs, &self.input_norm, self.eps)?;
+        let mut normalization = norm_started.elapsed();
+        let (mixed, attention) = self.attention.forward(&normalized, position, state)?;
+        let hidden = (xs.to_dtype(DType::F32)? + mixed)?;
+        let norm_started = Instant::now();
+        let normalized = gguf_rms_norm(&hidden, &self.post_attention_norm, self.eps)?;
+        normalization += norm_started.elapsed();
+        let moe = self.moe.forward(&normalized)?;
+        let hidden = (hidden + &moe.hidden)?;
+        Ok(QuantizedLayerOutput {
+            hidden,
+            routes: moe.routes,
+            timings: QuantizedLayerTimings {
+                wall: wall_started.elapsed(),
+                normalization,
+                attention,
+                delta: QuantizedDeltaTimings::default(),
                 moe: moe.timings,
             },
         })
