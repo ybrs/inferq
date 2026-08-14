@@ -370,6 +370,13 @@ DeltaNet accounting for 9.29 seconds. Its input and output quantized
 projections now dominate that stage, while MoE remains the other major
 end-to-end cost.
 
+Flattening the depthwise-convolution weights and operating directly on the
+contiguous Q/K/V projection then reduced that nested operation by 29.4%, from
+856 to 604 ms over the sustained run, with the 128 generated IDs unchanged.
+The end-to-end result from that single run was inconclusive because unrelated
+attention, MoE, LM-head, and DeltaNet projection timings all regressed together;
+the kernel-level saving is retained while the headline remains 5.77 token/s.
+
 The next three bounded changes should be:
 
 1. Record a warm repeated variance band for the short cases in the same

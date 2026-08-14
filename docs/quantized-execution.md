@@ -290,3 +290,9 @@ zero, and final RSS was `47,263.1 MiB`. This crosses both stretch gates while
 remaining below the 55 GiB memory gate. The earlier sustained numbers above
 came from a different release build configuration and remain useful historical
 measurements, not the current native-build qualification.
+
+The causal depthwise convolution consumes the flat Q/K/V projection in place
+and stores its small F32 weight table flat as well. This removes redundant
+projection concatenation and row-pointer traversal. Its measured sustained
+cost fell from `0.856 s` to `0.604 s` across 127 decode passes while preserving
+the exact 128-token output.

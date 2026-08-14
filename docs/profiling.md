@@ -151,3 +151,12 @@ DeltaNet work-vector allocation with flat, layer-owned scratch preserved all
 128 IDs and reduced sustained decode from 22.59 to 22.01 seconds. DeltaNet
 gated normalization fell from 188 to 132 ms over the run; its quantized
 projections remain the largest DeltaNet operation at 5.06 seconds.
+
+A follow-up flattened the depthwise-convolution weights and consumed the
+already-contiguous Q/K/V projection directly instead of copying it through four
+work vectors. All 128 IDs still matched and the convolution substage fell from
+856 to 604 ms over 4,572 DeltaNet layer calls (29.4%). That run's total decode
+was 22.54 seconds because every unrelated major stage was 2--4% slower, so it
+is recorded as a targeted kernel improvement rather than a new end-to-end
+headline. The final same-channel history-update fold also retained the canonical
+two-token `[284, 526]` smoke result.

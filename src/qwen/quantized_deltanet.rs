@@ -19,7 +19,6 @@ struct QuantizedDeltaScratch {
     q: Vec<f32>,
     k: Vec<f32>,
     v: Vec<f32>,
-    mixed: Vec<f32>,
     convolved: Vec<f32>,
     q_repeated: Vec<f32>,
     k_repeated: Vec<f32>,
@@ -42,7 +41,6 @@ impl QuantizedDeltaScratch {
             q: vec![0.; key_dim],
             k: vec![0.; key_dim],
             v: vec![0.; value_dim],
-            mixed: vec![0.; conv_dim],
             convolved: vec![0.; conv_dim],
             q_repeated: vec![0.; value_heads * key_head_dim],
             k_repeated: vec![0.; value_heads * key_head_dim],
@@ -115,7 +113,7 @@ pub struct QuantizedDeltaLayer {
     z: QuantizedMatrix,
     beta_alpha: QuantizedMatrix,
     output: QuantizedMatrix,
-    conv_weight: Vec<Vec<f32>>,
+    conv_weight: Vec<f32>,
     state_scale: Vec<f32>,
     dt_bias: Vec<f32>,
     norm_weight: Tensor,
@@ -165,7 +163,8 @@ impl QuantizedDeltaLayer {
         let conv_weight = checkpoint
             .load_f32_tensor(&format!("{prefix}.ssm_conv1d.weight"))?
             .reshape((conv_dim, config.linear_conv_kernel_dim))?
-            .to_vec2::<f32>()?;
+            .flatten_all()?
+            .to_vec1::<f32>()?;
         let state_scale = checkpoint
             .load_f32_vector(&format!("{prefix}.ssm_a"))?
             .to_vec1::<f32>()?;
@@ -263,31 +262,14 @@ impl QuantizedDeltaLayer {
         } = state;
         for token in 0..seq {
             let projected = &projected[token * conv_dim..(token + 1) * conv_dim];
-            scratch.q.copy_from_slice(&projected[..key_dim]);
-            scratch.k.copy_from_slice(&projected[key_dim..key_dim * 2]);
-            scratch.v.copy_from_slice(&projected[key_dim * 2..]);
             let convolution_started = Instant::now();
-            scratch.mixed[..key_dim].copy_from_slice(&scratch.q);
-            scratch.mixed[key_dim..key_dim * 2].copy_from_slice(&scratch.k);
-            scratch.mixed[key_dim * 2..].copy_from_slice(&scratch.v);
-            for channel in 0..conv_dim {
-                let history =
-                    &conv[channel * (self.conv_kernel - 1)..(channel + 1) * (self.conv_kernel - 1)];
-                let mut sum =
-                    self.conv_weight[channel][self.conv_kernel - 1] * scratch.mixed[channel];
-                for (tap, previous) in history.iter().enumerate() {
-                    sum += self.conv_weight[channel][tap] * previous;
-                }
-                scratch.convolved[channel] = silu(sum);
-            }
-            if self.conv_kernel > 1 {
-                for (channel, &current) in scratch.mixed.iter().enumerate() {
-                    let history = &mut conv
-                        [channel * (self.conv_kernel - 1)..(channel + 1) * (self.conv_kernel - 1)];
-                    history.rotate_left(1);
-                    history[self.conv_kernel - 2] = current;
-                }
-            }
+            causal_depthwise_conv_step(
+                projected,
+                &self.conv_weight,
+                self.conv_kernel,
+                conv,
+                &mut scratch.convolved,
+            );
             timings.convolution += convolution_started.elapsed();
             scratch.q.copy_from_slice(&scratch.convolved[..key_dim]);
             scratch
@@ -398,6 +380,34 @@ fn normalize(values: &mut [f32]) {
     }
 }
 
+fn causal_depthwise_conv_step(
+    input: &[f32],
+    weights: &[f32],
+    kernel: usize,
+    state: &mut [f32],
+    output: &mut [f32],
+) {
+    debug_assert!(kernel > 0);
+    debug_assert_eq!(weights.len(), input.len() * kernel);
+    debug_assert_eq!(state.len(), input.len() * (kernel - 1));
+    debug_assert_eq!(output.len(), input.len());
+    let history_len = kernel - 1;
+    for channel in 0..input.len() {
+        let weight_base = channel * kernel;
+        let history_base = channel * history_len;
+        let mut sum = weights[weight_base + history_len] * input[channel];
+        let history = &mut state[history_base..history_base + history_len];
+        for (tap, &previous) in history.iter().enumerate() {
+            sum += weights[weight_base + tap] * previous;
+        }
+        output[channel] = silu(sum);
+        if history_len > 0 {
+            history.rotate_left(1);
+            history[history_len - 1] = input[channel];
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,6 +424,35 @@ mod tests {
         assert_eq!(scratch.recurrent_output.len(), 32);
         assert_eq!(scratch.recurrent_output.capacity(), capacity);
         assert!(scratch.recurrent_output.iter().all(|&value| value == 0.));
+    }
+
+    #[test]
+    fn flat_causal_convolution_matches_row_reference() {
+        let input = [0.25, -0.5, 1.25];
+        let weights = [0.1, 0.2, -0.3, 0.4, -0.2, 0.3, 0.5, -0.7, 0.6];
+        let mut state = [0.75, -0.25, 0.5, 1.0, -1.5, 0.2];
+        let mut expected_state = state;
+        let mut expected_output = [0.; 3];
+        for channel in 0..input.len() {
+            let history = &expected_state[channel * 2..(channel + 1) * 2];
+            let row = &weights[channel * 3..(channel + 1) * 3];
+            let mut sum = row[2] * input[channel];
+            for (tap, &previous) in history.iter().enumerate() {
+                sum += row[tap] * previous;
+            }
+            expected_output[channel] = silu(sum);
+        }
+        for (channel, &current) in input.iter().enumerate() {
+            let history = &mut expected_state[channel * 2..(channel + 1) * 2];
+            history.rotate_left(1);
+            history[1] = current;
+        }
+
+        let mut output = [0.; 3];
+        causal_depthwise_conv_step(&input, &weights, 3, &mut state, &mut output);
+
+        assert_eq!(output, expected_output);
+        assert_eq!(state, expected_state);
     }
 
     #[test]
