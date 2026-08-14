@@ -230,6 +230,7 @@ process-owned cache:
   --model /data/projects/localllm/models/Qwen3-Coder-Next-UD-Q4_K_M.gguf \
   --tokenizer-model /data/projects/localllm/models/Qwen3-Coder-Next-SafeTensors \
   --interactive \
+  --chat \
   --max-new-tokens 16 \
   --expert-cache-mib 46000 \
   --warmup-all-experts
@@ -242,3 +243,30 @@ reads or evictions, 1.38 input tok/s, and 1.61 decode tok/s. RSS was 47,194.7
 MiB, below the 55 GiB project gate. This is the recommended persistent mode on
 the 62 GiB machine, but it leaves limited headroom for concurrent memory-heavy
 builds and should not be used on a smaller host.
+
+### Chat and sustained streaming qualification
+
+`--chat` applies the official tokenizer configuration's plain-message,
+no-tools Qwen template. `--system-prompt TEXT` adds a first-turn system message.
+Interactive continuation preserves the exact evaluated assistant state: if the
+model emitted `<|im_end|>`, the next turn adds only the required newline; if a
+token limit stopped generation first, the runtime closes the assistant message
+before appending the next user turn. `/reset` starts a new templated
+conversation.
+
+Generated text is decoded through `tokenizers::DecodeStream` and flushed after
+every complete byte-safe chunk. This avoids both the silence of whole-response
+decoding and the broken whitespace/UTF-8 behavior of decoding tokens
+individually.
+
+Pinned sustained measurements on 2026-08-14 were:
+
+| Case | Prefill | Decode | Expert hits | Physical reads | RSS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 17-token chat + 16 generated | 10.24 s (1.66 tok/s) | 15 passes in 9.73 s (1.54 tok/s) | 46,080/46,080 | 0 MiB | 47,240.8 MiB |
+| 23-token chat + 128 generated | 14.89 s (1.55 tok/s) | 127 passes in 81.75 s (1.55 tok/s) | 216,000/216,000 | 3.8 MiB | 47,263.0 MiB |
+
+The long run reached a 151-token context with zero expert evictions and no
+throughput degradation. Its 22 MiB RSS increase over the short case leaves the
+full process below the 55 GiB gate. The response stopped at the requested token
+cap, so an unfinished final code block is expected and is not a decoder error.

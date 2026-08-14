@@ -30,6 +30,12 @@ struct Args {
     /// Read turns from standard input while retaining model and sequence state.
     #[arg(long)]
     interactive: bool,
+    /// Apply the official Qwen plain-message chat template.
+    #[arg(long)]
+    chat: bool,
+    /// Optional system message for the first chat turn.
+    #[arg(long, requires = "chat")]
+    system_prompt: Option<String>,
     /// Write every layer-qualified routing decision as JSONL.
     #[arg(long)]
     routing_trace: Option<PathBuf>,
@@ -203,8 +209,6 @@ fn report(
     context_tokens: usize,
     process: &ProcessDelta,
 ) -> Result<()> {
-    println!("{}", result.text);
-    io::stdout().flush()?;
     eprintln!("prompt token ids: {:?}", result.prompt_token_ids);
     if result.evaluated_input_token_ids != result.prompt_token_ids {
         eprintln!(
@@ -251,21 +255,74 @@ fn generate_and_report(
     runtime: &mut QuantizedRuntime<'_>,
     prompt: &str,
     options: &GenerationOptions,
-) -> Result<()> {
+) -> Result<QuantizedGenerationResult> {
     let before = ProcessSnapshot::capture()?;
-    let result = runtime.generate(prompt, options)?;
+    let tokenizer = runtime.tokenizer().clone();
+    let mut decoder = tokenizer.decode_stream(true);
+    let result = runtime.generate_with_token_callback(prompt, options, |token| {
+        if let Some(chunk) = decoder(token)? {
+            print!("{chunk}");
+            io::stdout().flush()?;
+        }
+        Ok(())
+    })?;
+    println!();
+    io::stdout().flush()?;
     let process = before.delta(&ProcessSnapshot::capture()?);
-    report(&result, runtime.context_tokens(), &process)
+    report(&result, runtime.context_tokens(), &process)?;
+    Ok(result)
+}
+
+fn user_turn_prompt(
+    runtime: &QuantizedRuntime<'_>,
+    user: &str,
+    chat: bool,
+    first_turn: bool,
+    assistant_closed: bool,
+    system_prompt: Option<&str>,
+) -> Result<String> {
+    if !chat {
+        return Ok(user.to_owned());
+    }
+    if first_turn {
+        runtime.tokenizer().initial_chat_prompt(user, system_prompt)
+    } else {
+        runtime
+            .tokenizer()
+            .chat_continuation(user, assistant_closed)
+    }
+}
+
+fn emitted_im_end(runtime: &QuantizedRuntime<'_>, result: &QuantizedGenerationResult) -> bool {
+    runtime
+        .tokenizer()
+        .token_id("<|im_end|>")
+        .zip(result.generated_token_ids.last().copied())
+        .is_some_and(|(im_end, last)| im_end == last)
 }
 
 fn interactive(
     runtime: &mut QuantizedRuntime<'_>,
     initial_prompt: Option<&str>,
     options: &GenerationOptions,
+    chat: bool,
+    system_prompt: Option<&str>,
 ) -> Result<()> {
     eprintln!("interactive session ready; /reset clears sequence state, /quit exits");
+    let mut first_turn = true;
+    let mut assistant_closed = false;
     if let Some(prompt) = initial_prompt {
-        generate_and_report(runtime, prompt, options)?;
+        let prompt = user_turn_prompt(
+            runtime,
+            prompt,
+            chat,
+            first_turn,
+            assistant_closed,
+            system_prompt,
+        )?;
+        let result = generate_and_report(runtime, &prompt, options)?;
+        assistant_closed = emitted_im_end(runtime, &result);
+        first_turn = false;
     }
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines();
@@ -281,9 +338,23 @@ fn interactive(
             "/quit" | "/exit" => break,
             "/reset" => {
                 runtime.reset();
+                first_turn = true;
+                assistant_closed = false;
                 eprintln!("sequence state reset");
             }
-            _ => generate_and_report(runtime, &line, options)?,
+            _ => {
+                let prompt = user_turn_prompt(
+                    runtime,
+                    &line,
+                    chat,
+                    first_turn,
+                    assistant_closed,
+                    system_prompt,
+                )?;
+                let result = generate_and_report(runtime, &prompt, options)?;
+                assistant_closed = emitted_im_end(runtime, &result);
+                first_turn = false;
+            }
         }
     }
     Ok(())
@@ -363,12 +434,23 @@ fn main() -> Result<()> {
         ..GenerationOptions::default()
     };
     if args.interactive {
-        interactive(&mut runtime, args.prompt.as_deref(), &options)
-    } else {
-        generate_and_report(
+        interactive(
             &mut runtime,
-            args.prompt.as_deref().expect("prompt validated above"),
+            args.prompt.as_deref(),
             &options,
+            args.chat,
+            args.system_prompt.as_deref(),
         )
+    } else {
+        let prompt = user_turn_prompt(
+            &runtime,
+            args.prompt.as_deref().expect("prompt validated above"),
+            args.chat,
+            true,
+            false,
+            args.system_prompt.as_deref(),
+        )?;
+        generate_and_report(&mut runtime, &prompt, &options)?;
+        Ok(())
     }
 }

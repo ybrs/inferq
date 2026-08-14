@@ -261,6 +261,8 @@ Deliverables:
 - page-cache-first hot expert ordering or prefaulting, evaluated without
   duplicating the entire 46 GiB model in heap memory;
 - proper tokenizer chat-template application and newline-safe streaming CLI.
+  The plain-message, no-tools official template and byte-safe incremental
+  decoder are complete; tool rendering remains future work.
 
 Exit gate: agent-usable warm decode of at least 1 token/s and warm TTFT below 30
 seconds, with the process remaining below the memory budget during a 128-token
@@ -335,17 +337,24 @@ RSS, 100% expert hits, zero inference reads, and 1.61 decode token/s on an
 unseen prompt. This crosses the agent-usable decode gate within the memory
 budget.
 
+Sustained qualification also passes. A 17-token chat prompt plus 16 generated
+tokens prefetched at 1.66 token/s and decoded at 1.54 token/s. A 23-token chat
+prompt plus the full 128 generated tokens prefetched at 1.55 token/s and held
+1.55 token/s across 127 decode passes. The latter reached 151 context tokens,
+216,000/216,000 expert hits, zero evictions, and 47,263 MiB RSS. Tokenizer-aware
+incremental output streamed throughout the 81.75-second decode.
+
 The next three bounded changes should be:
 
-1. Run 16- and 128-token generations in the pinned persistent process to check
-   sustained throughput, RSS growth, and state correctness.
-2. Measure a 32-token coding prompt and specialize/batch prefill until warm TTFT
-   is below 30 seconds.
-3. Add proper tokenizer chat-template application and newline-safe incremental
-   output so the pinned runtime can serve real agent turns.
+1. Add a persistent multi-case benchmark mode so 1-, 16-, 32-, and 128-token
+   cases share one expensive expert warmup and emit one structured artifact.
+2. Measure an exact 32-token coding prompt; the 23-token result projects below
+   the 30-second TTFT gate, but the gate still requires a measured case.
+3. Validate multiple templated user/assistant turns, then add the official tool
+   description/call subset needed by an agent harness.
 
 Expert I/O is removed from the recommended pinned decode path. The critical
-path now moves to sustained decode validation, prefill, and the user-facing
+path now moves to repeatable multi-case qualification and the tool-capable
 conversation boundary. io_uring, speculative routing, and approximate expert
 counts remain outside the current path.
 

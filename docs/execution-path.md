@@ -95,5 +95,7 @@ the Hugging Face directory for config/tokenizer assets. Its interactive mode
 keeps loaded weights and sequence state alive across turns and can write a
 resumable per-layer expert census. On the 62 GiB target, its explicit full
 expert residency mode pins all compressed expert matrices at 47.2 GiB process
-RSS and measured 1.61 decode token/s on an unseen prompt. Lower-memory partial
+RSS and measured 1.61 decode token/s on an unseen prompt. A subsequent
+128-token chat generation sustained 1.55 token/s over 127 decode passes while
+streaming byte-safe text and remaining at 47.263 GiB RSS. Lower-memory partial
 residency remains workload-dependent and experimental on the rotational disk.

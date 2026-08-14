@@ -132,6 +132,15 @@ impl<'a> QuantizedRuntime<'a> {
         prompt: &str,
         options: &GenerationOptions,
     ) -> Result<QuantizedGenerationResult> {
+        self.generate_with_token_callback(prompt, options, |_| Ok(()))
+    }
+
+    pub fn generate_with_token_callback(
+        &mut self,
+        prompt: &str,
+        options: &GenerationOptions,
+        mut on_token: impl FnMut(u32) -> Result<()>,
+    ) -> Result<QuantizedGenerationResult> {
         ensure!(
             options.max_new_tokens > 0,
             "max_new_tokens must be at least one"
@@ -156,6 +165,15 @@ impl<'a> QuantizedRuntime<'a> {
             let last = logits.i(logits.dim(0)? - 1)?.to_vec1::<f32>()?;
             let token = sampler.sample(&last)?;
             generated.push(token);
+            if let Err(error) = on_token(token) {
+                // The current sampled token has not been evaluated yet, so it
+                // is the correct pending token if the output sink fails.
+                self.pending_token = Some(token);
+                if let Some(trace) = &mut self.trace {
+                    trace.flush()?;
+                }
+                return Err(error);
+            }
             let is_config_eos = self
                 .model
                 .config()
