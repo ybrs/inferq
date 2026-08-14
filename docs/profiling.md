@@ -142,6 +142,7 @@ all 216,000 expert requests hitting cache:
 | Initial native suite | 4.51 s | 3.74 tok/s | 0 MiB | 47,319 MiB |
 | Contiguous DeltaNet + resident cache | 3.15 s | 5.62 tok/s | 0 MiB | 47,263 MiB |
 | Reusable DeltaNet scratch | 3.25 s | 5.77 tok/s | 0 MiB | 47,271 MiB |
+| Flat convolution + fused QKV/gate | 3.30 s | 5.87 tok/s | 0 MiB | 47,260 MiB |
 
 All 128 generated token IDs matched the initial artifact exactly. The accepted
 change improves sustained decode by 50.2%; an algebraically equivalent version
@@ -160,3 +161,18 @@ was 22.54 seconds because every unrelated major stage was 2--4% slower, so it
 is recorded as a targeted kernel improvement rather than a new end-to-end
 headline. The final same-channel history-update fold also retained the canonical
 two-token `[284, 526]` smoke result.
+
+QKV and gate are both Q8_0 matrices with 2,048 input columns. Concatenating
+their compressed rows once during load preserves each row byte-for-byte and
+reduces the two DeltaNet input projections to one kernel launch. The resulting
+run held 5.87 token/s over 127 decode passes; all 128 IDs matched, all 216,000
+expert requests hit cache, and inference performed no physical reads. Relative
+to the flat-convolution control, DeltaNet projections fell from 5.20 to 5.03
+seconds and total decode from 22.54 to 21.65 seconds. Unrelated stages improved
+by 3--4% in the same run, so only part of the projection delta can be assigned
+confidently to fusion.
+
+A separate 8-Candle/4-Rayon-thread run was rejected as the sustained default.
+It improved DeltaNet projections by 3.7% and LM head by 6.1%, but slowed MoE by
+2.6% and total decode by 0.7% versus the 4/4 control. Four Candle threads remain
+the documented sustained setting on this four-core/eight-thread host.

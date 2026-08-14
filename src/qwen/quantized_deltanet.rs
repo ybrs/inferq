@@ -25,6 +25,7 @@ struct QuantizedDeltaScratch {
     beta: Vec<f32>,
     decay: Vec<f32>,
     recurrent_output: Vec<f32>,
+    gates: Vec<f32>,
 }
 
 impl QuantizedDeltaScratch {
@@ -47,12 +48,14 @@ impl QuantizedDeltaScratch {
             beta: vec![0.; value_heads],
             decay: vec![0.; value_heads],
             recurrent_output: Vec::new(),
+            gates: Vec::new(),
         }
     }
 
     fn prepare_output(&mut self, len: usize) {
         self.recurrent_output.resize(len, 0.);
         self.recurrent_output.fill(0.);
+        self.gates.resize(len, 0.);
     }
 }
 
@@ -109,8 +112,7 @@ pub struct QuantizedDeltaLayer {
     value_head_dim: usize,
     conv_kernel: usize,
     eps: f64,
-    qkv: QuantizedMatrix,
-    z: QuantizedMatrix,
+    qkvz: QuantizedMatrix,
     beta_alpha: QuantizedMatrix,
     output: QuantizedMatrix,
     conv_weight: Vec<f32>,
@@ -152,6 +154,7 @@ impl QuantizedDeltaLayer {
             z.shape() == [value_dim, config.hidden_size],
             "invalid GGUF z shape"
         );
+        let qkvz = qkv.concatenate_rows(&z)?;
         ensure!(
             beta_alpha.shape() == [config.linear_num_value_heads * 2, config.hidden_size],
             "invalid GGUF beta/alpha shape"
@@ -193,8 +196,7 @@ impl QuantizedDeltaLayer {
             value_head_dim: config.linear_value_head_dim,
             conv_kernel: config.linear_conv_kernel_dim,
             eps: config.rms_norm_eps,
-            qkv,
-            z,
+            qkvz,
             beta_alpha,
             output,
             conv_weight,
@@ -231,10 +233,21 @@ impl QuantizedDeltaLayer {
         );
         let seq = xs.elem_count() / self.hidden_size;
         let flat = xs.to_dtype(DType::F32)?.reshape((seq, self.hidden_size))?;
+        let key_dim = self.key_heads * self.key_head_dim;
+        let value_dim = self.value_heads * self.value_head_dim;
+        let conv_dim = key_dim * 2 + value_dim;
+        let projected_width = conv_dim + value_dim;
+        let ratio = self.value_heads / self.key_heads;
         let mut timings = QuantizedDeltaTimings::default();
         let projection_started = Instant::now();
-        let projected = self.qkv.forward(&flat)?.flatten_all()?.to_vec1::<f32>()?;
-        let gates = self.z.forward(&flat)?.flatten_all()?.to_vec1::<f32>()?;
+        let projected = self.qkvz.forward(&flat)?.flatten_all()?.to_vec1::<f32>()?;
+        state.scratch.prepare_output(seq * value_dim);
+        for token in 0..seq {
+            let token_projection =
+                &projected[token * projected_width..(token + 1) * projected_width];
+            state.scratch.gates[token * value_dim..(token + 1) * value_dim]
+                .copy_from_slice(&token_projection[conv_dim..]);
+        }
         let projected_ba = self
             .beta_alpha
             .forward(&flat)?
@@ -242,10 +255,6 @@ impl QuantizedDeltaLayer {
             .to_vec1::<f32>()?;
         timings.projections = projection_started.elapsed();
 
-        let key_dim = self.key_heads * self.key_head_dim;
-        let value_dim = self.value_heads * self.value_head_dim;
-        let conv_dim = key_dim * 2 + value_dim;
-        let ratio = self.value_heads / self.key_heads;
         ensure!(
             state.conv.len() == conv_dim * (self.conv_kernel - 1),
             "invalid convolution state"
@@ -254,14 +263,13 @@ impl QuantizedDeltaLayer {
             state.recurrent.len() == self.value_heads * self.key_head_dim * self.value_head_dim,
             "invalid recurrent state"
         );
-        state.scratch.prepare_output(seq * value_dim);
         let QuantizedDeltaState {
             conv,
             recurrent,
             scratch,
         } = state;
         for token in 0..seq {
-            let projected = &projected[token * conv_dim..(token + 1) * conv_dim];
+            let projected = &projected[token * projected_width..token * projected_width + conv_dim];
             let convolution_started = Instant::now();
             causal_depthwise_conv_step(
                 projected,
@@ -337,8 +345,8 @@ impl QuantizedDeltaLayer {
             (seq * self.value_heads, self.value_head_dim),
             xs.device(),
         )?;
-        let gates = Tensor::from_vec(
-            gates,
+        let gates = Tensor::from_slice(
+            &scratch.gates,
             (seq * self.value_heads, self.value_head_dim),
             xs.device(),
         )?;

@@ -375,7 +375,13 @@ contiguous Q/K/V projection then reduced that nested operation by 29.4%, from
 856 to 604 ms over the sustained run, with the 128 generated IDs unchanged.
 The end-to-end result from that single run was inconclusive because unrelated
 attention, MoE, LM-head, and DeltaNet projection timings all regressed together;
-the kernel-level saving is retained while the headline remains 5.77 token/s.
+the kernel-level saving was retained while the headline remained 5.77 token/s.
+
+The compatible Q8_0 QKV and gate matrices are now joined row-wise during model
+load, preserving compressed row bytes while issuing one projection kernel per
+DeltaNet layer. The exact sustained stream reached a new best 5.87 token/s at
+47,260 MiB RSS. A controlled 8-Candle/4-Rayon thread run did not improve total
+decode, so 4/4 remains the sustained-throughput default on this host.
 
 The next three bounded changes should be:
 

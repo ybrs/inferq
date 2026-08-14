@@ -235,6 +235,36 @@ impl QuantizedMatrix {
         self.storage_bytes
     }
 
+    /// Concatenate two identically quantized matrices along their output rows.
+    /// Quantized GGUF blocks are row-major, so this preserves every row's bytes
+    /// while allowing callers to share one kernel launch for related outputs.
+    pub fn concatenate_rows(&self, other: &Self) -> Result<Self> {
+        ensure!(
+            self.dtype == other.dtype,
+            "cannot concatenate quantized matrices with dtypes {:?} and {:?}",
+            self.dtype,
+            other.dtype
+        );
+        ensure!(
+            self.columns == other.columns,
+            "cannot concatenate quantized matrices with {} and {} columns",
+            self.columns,
+            other.columns
+        );
+        ensure!(
+            self.tensor.device().is_cpu() && other.tensor.device().is_cpu(),
+            "row concatenation currently supports CPU quantized matrices only"
+        );
+        let first = self.tensor.data()?;
+        let second = other.tensor.data()?;
+        let mut data = Vec::with_capacity(first.len() + second.len());
+        data.extend_from_slice(&first);
+        data.extend_from_slice(&second);
+        let storage = QStorage::from_data(Cow::Owned(data), &Device::Cpu, self.dtype)?;
+        let tensor = QTensor::new(storage, (self.rows + other.rows, self.columns))?;
+        Self::new(tensor)
+    }
+
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         ensure!(
             xs.rank() >= 2,
@@ -877,6 +907,42 @@ mod tests {
             QuantizedMatrix::new(QTensor::quantize(&weights, GgmlDType::Q4K).unwrap()).unwrap();
         let input = Tensor::zeros((1, 128), DType::F32, &Device::Cpu).unwrap();
         assert!(matrix.forward(&input).is_err());
+    }
+
+    #[test]
+    fn concatenated_quantized_rows_match_separate_matrices() {
+        let device = Device::Cpu;
+        let first_values: Vec<f32> = (0..2 * 256)
+            .map(|index| (index as f32 % 23. - 11.) / 16.)
+            .collect();
+        let second_values: Vec<f32> = (0..3 * 256)
+            .map(|index| (index as f32 % 17. - 8.) / 12.)
+            .collect();
+        let first = QuantizedMatrix::new(
+            QTensor::quantize(
+                &Tensor::from_vec(first_values, (2, 256), &device).unwrap(),
+                GgmlDType::Q8_0,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let second = QuantizedMatrix::new(
+            QTensor::quantize(
+                &Tensor::from_vec(second_values, (3, 256), &device).unwrap(),
+                GgmlDType::Q8_0,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let input = Tensor::from_vec(vec![0.25; 256], (1, 256), &device).unwrap();
+        let mut expected = first.forward(&input).unwrap().to_vec2::<f32>().unwrap()[0].clone();
+        expected.extend_from_slice(&second.forward(&input).unwrap().to_vec2::<f32>().unwrap()[0]);
+
+        let combined = first.concatenate_rows(&second).unwrap();
+        let actual = combined.forward(&input).unwrap().to_vec2::<f32>().unwrap();
+
+        assert_eq!(combined.shape(), [5, 256]);
+        assert_eq!(actual[0], expected);
     }
 
     #[test]

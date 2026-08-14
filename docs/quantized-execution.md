@@ -296,3 +296,9 @@ and stores its small F32 weight table flat as well. This removes redundant
 projection concatenation and row-pointer traversal. Its measured sustained
 cost fell from `0.856 s` to `0.604 s` across 127 decode passes while preserving
 the exact 128-token output.
+
+At load time, the Q8_0 QKV and gate matrices are concatenated along their output
+rows. This retains the compressed representation and identical per-row dot
+products while sharing one quantized kernel launch. Combined with the flat
+convolution, sustained decode measured `5.87 token/s` with the same 128 IDs,
+zero inference reads, and `47,260 MiB` RSS.
