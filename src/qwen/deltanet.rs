@@ -234,6 +234,17 @@ pub(crate) fn forward(
     Ok(linear_profiled(&output, &out_weight, timings)?.reshape(xs.shape())?)
 }
 
+pub fn reference_deltanet(
+    checkpoint: &Checkpoint,
+    config: &Qwen3NextConfig,
+    layer: usize,
+    xs: &Tensor,
+) -> Result<Tensor> {
+    let mut state = DeltaState::new(config);
+    let mut timings = ForwardTimings::default();
+    forward(checkpoint, config, layer, xs, &mut state, &mut timings)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

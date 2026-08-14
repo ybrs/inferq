@@ -258,15 +258,24 @@ impl GgufCheckpoint {
     }
 
     pub fn load_f32_vector(&self, name: &str) -> Result<Tensor> {
+        let tensor = self.load_f32_tensor(name)?;
+        ensure!(
+            tensor.rank() == 1,
+            "GGUF tensor {name:?} has shape {:?}, expected an F32 vector",
+            tensor.shape()
+        );
+        Ok(tensor)
+    }
+
+    pub fn load_f32_tensor(&self, name: &str) -> Result<Tensor> {
         let info = self
             .content
             .tensor_infos
             .get(name)
             .with_context(|| format!("GGUF is missing tensor {name:?}"))?;
         ensure!(
-            info.shape.rank() == 1 && info.ggml_dtype == GgmlDType::F32,
-            "GGUF tensor {name:?} has shape {:?} and dtype {:?}, expected an F32 vector",
-            info.shape,
+            info.ggml_dtype == GgmlDType::F32,
+            "GGUF tensor {name:?} has dtype {:?}, expected F32",
             info.ggml_dtype
         );
         let mut file = self
@@ -275,7 +284,7 @@ impl GgufCheckpoint {
             .map_err(|_| anyhow::anyhow!("GGUF file lock was poisoned"))?;
         let tensor = info
             .read(&mut *file, self.content.tensor_data_offset, &Device::Cpu)
-            .with_context(|| format!("failed to load GGUF vector {name:?}"))?;
+            .with_context(|| format!("failed to load F32 GGUF tensor {name:?}"))?;
         Ok(tensor.dequantize(&Device::Cpu)?)
     }
 }

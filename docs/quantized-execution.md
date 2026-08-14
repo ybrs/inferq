@@ -68,3 +68,31 @@ selected expert pages warm, the quantized MoE sublayer took 6.4 ms; a prior
 cold-page run took roughly 250 ms, of which 244 ms was expert loading and only
 3.2 ms expert compute. This confirms both the direct-kernel path and the need
 for a persistent page-cache/residency strategy.
+
+## Complete linear-attention layer
+
+The quantized DeltaNet path handles GGUF's optimized global Q/K/V projection,
+separate Z projection, converted `-exp(A_log)` state scale, convolution state,
+recurrent Gated Delta Rule state, gated normalization, and output projection.
+The complete layer adds converted GGUF RMSNorm weights, residuals, and the
+routed MoE:
+
+```bash
+RUSTFLAGS='-C target-cpu=native' cargo build --release --bin gguf_layer
+
+./target/release/gguf_layer \
+  --model /data/projects/localllm/models/Qwen3-Coder-Next-UD-Q4_K_M.gguf \
+  --reference-model /data/projects/localllm/models/Qwen3-Coder-Next-SafeTensors \
+  --layer 0
+```
+
+For the deterministic comparison vector, the DeltaNet mixer alone had maximum
+absolute error `1.78e-5` and RMSE `2.90e-6`. The complete layer selected the
+same ten experts as BF16 and had maximum error `0.0180`, RMSE `0.00193`, and
+reference output L2 norm `25.56`. A warm complete layer took `11.0 ms`: about
+`5.97 ms` in DeltaNet and `4.99 ms` in MoE. The DeltaNet scalar recurrent update
+was about `2.01 ms`, making it a later vectorization target.
+
+This closes the one-linear-layer correctness gate. The next architecture work
+is direct quantized full attention for layers 3, 7, and the remaining interval
+layers, followed by a 48-layer runtime with quantized embedding and LM head.

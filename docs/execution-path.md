@@ -87,8 +87,8 @@ parsed and validated; this has been exercised against the local 46 GB
 `Qwen3-Coder-Next-UD-Q4_K_M.gguf` (F32/Q4K/Q5K/Q6K/Q8_0, 843 tensors).
 Direct GGUF matrix execution and selected-expert range loading are now
 implemented as the first Stage 2B boundary; see
-[quantized-execution.md](quantized-execution.md). A complete GGUF model runtime
-and tokenizer construction from GGUF metadata are not yet implemented. That
-remaining work must account for GGUF's split Q/K/V, split expert gate/up
-tensors, optimized split QKV/Z DeltaNet layout, and direct `-exp(A_log)`
-representation rather than merely renaming tensors.
+[quantized-execution.md](quantized-execution.md). Direct routed MoE and one
+complete quantized linear-attention layer now match their BF16 comparison
+gates. A complete GGUF model runtime and tokenizer construction from GGUF
+metadata are not yet implemented. Full-attention layers, embedding, LM head,
+and whole-model state assembly remain before end-to-end GGUF generation.

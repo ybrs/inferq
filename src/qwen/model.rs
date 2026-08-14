@@ -14,6 +14,8 @@ use super::{
     norm::rms_norm,
 };
 
+use super::moe::{reference_routes, reference_sparse_moe};
+
 #[derive(Debug, Clone)]
 enum LayerState {
     Attention(AttentionState),
@@ -353,6 +355,40 @@ impl Model {
         timings.wall = forward_started.elapsed();
         Ok((logits, timings))
     }
+}
+
+#[derive(Debug)]
+pub struct ReferenceLayerOutput {
+    pub hidden: Tensor,
+    pub routes: Vec<moe::Route>,
+}
+
+pub fn reference_linear_layer(
+    checkpoint: &Checkpoint,
+    config: &Qwen3NextConfig,
+    layer: usize,
+    xs: &Tensor,
+) -> Result<ReferenceLayerOutput> {
+    ensure!(
+        config.layer_type(layer) == LayerType::LinearAttention,
+        "layer {layer} is not a linear-attention layer"
+    );
+    let prefix = format!("model.layers.{layer}");
+    let input_norm = checkpoint.load(&format!("{prefix}.input_layernorm.weight"), xs.device())?;
+    let normalized = rms_norm(xs, &input_norm, config.rms_norm_eps)?;
+    let mixed = deltanet::reference_deltanet(checkpoint, config, layer, &normalized)?;
+    let hidden = (xs + mixed)?;
+    let post_norm = checkpoint.load(
+        &format!("{prefix}.post_attention_layernorm.weight"),
+        xs.device(),
+    )?;
+    let normalized = rms_norm(&hidden, &post_norm, config.rms_norm_eps)?;
+    let routes = reference_routes(checkpoint, config, layer, &normalized)?;
+    let feed_forward = reference_sparse_moe(checkpoint, config, layer, &normalized)?;
+    Ok(ReferenceLayerOutput {
+        hidden: (hidden + feed_forward)?,
+        routes,
+    })
 }
 
 #[cfg(test)]
