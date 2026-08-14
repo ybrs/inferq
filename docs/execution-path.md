@@ -33,6 +33,9 @@ not provide BF16 matmul, projections promote inputs and weights to F32 for the
 operation and cast outputs back to the checkpoint dtype. Routing
 traces are optional JSONL and contain the absolute token index, token ID, layer,
 expert IDs, normalized route weights, and optionally full router logits.
+In the fully resident GGUF path, compatible routed and shared expert gate/up
+matrices are row-concatenated without dequantization. Their row results remain
+identical while one compressed kernel launch produces both projections.
 
 ## End-to-end validation
 

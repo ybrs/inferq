@@ -4,7 +4,7 @@ use anyhow::{Context, Result, ensure};
 use candle_core::{DType, IndexOp, Tensor};
 use candle_nn::ops;
 
-use crate::{GgufCheckpoint, GgufExpertTensor, QuantizedMatrix};
+use crate::{GgufCheckpoint, GgufExpertPair, GgufExpertTensor, QuantizedMatrix};
 
 use super::{Route, top_k_routes};
 
@@ -46,12 +46,10 @@ pub struct QuantizedMoeLayer<'a> {
     experts_per_token: usize,
     normalize_top_k: bool,
     router: QuantizedMatrix,
-    shared_gate: QuantizedMatrix,
-    shared_up: QuantizedMatrix,
+    shared_gate_up: QuantizedMatrix,
     shared_down: QuantizedMatrix,
     shared_selector: Tensor,
-    gate_experts: GgufExpertTensor<'a>,
-    up_experts: GgufExpertTensor<'a>,
+    gate_up_experts: GgufExpertPair<'a>,
     down_experts: GgufExpertTensor<'a>,
 }
 
@@ -128,8 +126,6 @@ impl<'a> QuantizedMoeLayer<'a> {
         let shared_selector = checkpoint
             .load_f32_vector(&format!("{prefix}.ffn_gate_inp_shexp.weight"))?
             .reshape((1, hidden_size))?;
-        let gate_experts = checkpoint.expert_tensor(&gate_experts_name)?;
-        let up_experts = checkpoint.expert_tensor(&format!("{prefix}.ffn_up_exps.weight"))?;
         let down_experts = checkpoint.expert_tensor(&down_experts_name)?;
         ensure!(
             shared_gate.shape()[1] == hidden_size
@@ -137,6 +133,9 @@ impl<'a> QuantizedMoeLayer<'a> {
                 && shared_down.shape() == [hidden_size, shared_gate.shape()[0]],
             "invalid shared expert matrix shapes"
         );
+        let shared_gate_up = shared_gate.concatenate_rows(&shared_up)?;
+        let gate_up_experts =
+            checkpoint.expert_pair(&gate_experts_name, &format!("{prefix}.ffn_up_exps.weight"))?;
         Ok(Self {
             layer,
             hidden_size,
@@ -145,12 +144,10 @@ impl<'a> QuantizedMoeLayer<'a> {
             experts_per_token,
             normalize_top_k,
             router,
-            shared_gate,
-            shared_up,
+            shared_gate_up,
             shared_down,
             shared_selector,
-            gate_experts,
-            up_experts,
+            gate_up_experts,
             down_experts,
         })
     }
@@ -179,12 +176,14 @@ impl<'a> QuantizedMoeLayer<'a> {
             let mut combined = Tensor::zeros((1, self.hidden_size), DType::F32, xs.device())?;
             for (&expert, &route_weight) in route.experts.iter().zip(&route.weights) {
                 let load_started = Instant::now();
-                let gate = self.gate_experts.load(expert)?;
-                let up = self.up_experts.load(expert)?;
+                let gate_up = self.gate_up_experts.load(expert)?;
                 let down = self.down_experts.load(expert)?;
                 timings.expert_load += load_started.elapsed();
                 let compute_started = Instant::now();
-                let activated = ops::silu(&gate.forward(&x)?)?.broadcast_mul(&up.forward(&x)?)?;
+                let gate_up = gate_up.forward(&x)?;
+                let gate = gate_up.narrow(1, 0, self.intermediate_size)?;
+                let up = gate_up.narrow(1, self.intermediate_size, self.intermediate_size)?;
+                let activated = ops::silu(&gate)?.broadcast_mul(&up)?;
                 let value = down.forward(&activated)?;
                 combined = (combined + (value * f64::from(route_weight))?)?;
                 timings.expert_compute += compute_started.elapsed();
@@ -193,8 +192,10 @@ impl<'a> QuantizedMoeLayer<'a> {
         }
         let routed = Tensor::cat(&outputs, 0)?;
         let shared_started = Instant::now();
-        let shared = ops::silu(&self.shared_gate.forward(&flat)?)?
-            .broadcast_mul(&self.shared_up.forward(&flat)?)?;
+        let shared_gate_up = self.shared_gate_up.forward(&flat)?;
+        let shared_gate = shared_gate_up.narrow(1, 0, self.intermediate_size)?;
+        let shared_up = shared_gate_up.narrow(1, self.intermediate_size, self.intermediate_size)?;
+        let shared = ops::silu(&shared_gate)?.broadcast_mul(&shared_up)?;
         let shared = self.shared_down.forward(&shared)?;
         let selector = ops::sigmoid(&flat.matmul(&self.shared_selector.t()?)?)?;
         let hidden = (routed + shared.broadcast_mul(&selector)?)?.reshape(xs.shape())?;

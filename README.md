@@ -194,8 +194,8 @@ RAYON_NUM_THREADS=4 \
 
 Enter one user message per line. `/reset` clears the conversation state and
 `/quit` exits. On the original Intel i7-6700 host, the qualified 23-token prompt
-plus 128 generated tokens reached 5.87 decode token/s with 100% expert-cache
-hits, zero physical inference reads, and about 47,260 MiB RSS.
+plus 128 generated tokens reached 5.99 decode token/s with 100% expert-cache
+hits, zero physical inference reads, and about 47,328 MiB RSS.
 
 The four-thread setting reproduces the current benchmark host. On a different
 CPU, compare it with the number of physical cores using `gguf_bench`; more

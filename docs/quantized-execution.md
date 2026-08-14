@@ -302,3 +302,11 @@ rows. This retains the compressed representation and identical per-row dot
 products while sharing one quantized kernel launch. Combined with the flat
 convolution, sustained decode measured `5.87 token/s` with the same 128 IDs,
 zero inference reads, and `47,260 MiB` RSS.
+
+The same exact row fusion now applies to routed and shared MoE gate/up
+projections. Full pinning preserves sequential GGUF reads, then converts the
+resident gate/up cache entries in memory. The cache still owns `43.5 GiB`, but
+contains 49,152 combined-gate/up and down entries instead of 73,728 separate
+matrices. The exact sustained run made 144,000/144,000 cache hits, reduced MoE
+from `8.46 s` to `8.00 s`, and decoded at `5.99 token/s` with zero physical
+inference reads and `47,328 MiB` RSS.

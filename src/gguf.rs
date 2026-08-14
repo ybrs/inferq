@@ -129,6 +129,14 @@ pub struct GgufExpertTensor<'a> {
     tensor_start: u64,
 }
 
+/// Two compatible fused expert tensors viewed as one row-concatenated matrix
+/// per expert. This preserves each compressed row byte-for-byte.
+pub struct GgufExpertPair<'a> {
+    checkpoint: &'a GgufCheckpoint,
+    first: GgufExpertTensor<'a>,
+    second: GgufExpertTensor<'a>,
+}
+
 impl std::fmt::Debug for GgufExpertTensor<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GgufExpertTensor")
@@ -152,6 +160,32 @@ impl GgufExpertTensor<'_> {
 
     pub fn load(&self, expert: usize) -> Result<QuantizedMatrix> {
         self.checkpoint.load_resolved_expert_matrix(self, expert)
+    }
+
+    pub fn warm(&self, expert: usize) -> Result<usize> {
+        Ok(self.load(expert)?.storage_bytes())
+    }
+}
+
+impl std::fmt::Debug for GgufExpertPair<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GgufExpertPair")
+            .field("first", &self.first.name)
+            .field("second", &self.second.name)
+            .field("expert_count", &self.first.expert_count)
+            .field("rows", &(self.first.rows + self.second.rows))
+            .field("columns", &self.first.columns)
+            .finish_non_exhaustive()
+    }
+}
+
+impl GgufExpertPair<'_> {
+    pub fn expert_count(&self) -> usize {
+        self.first.expert_count
+    }
+
+    pub fn load(&self, expert: usize) -> Result<QuantizedMatrix> {
+        self.checkpoint.load_resolved_expert_pair(self, expert)
     }
 
     pub fn warm(&self, expert: usize) -> Result<usize> {
@@ -304,6 +338,7 @@ struct CachedExpertMatrix {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ExpertMatrixKey {
     tensor_start: u64,
+    second_tensor_start: Option<u64>,
     expert: usize,
 }
 
@@ -425,6 +460,93 @@ impl ExpertMatrixCache {
         self.compact_lru_if_needed();
     }
 
+    fn fuse_pair(&mut self, pair: &GgufExpertPair<'_>) -> Result<usize> {
+        ensure!(
+            self.capacity_bytes > 0,
+            "cannot fuse expert matrices in a disabled cache"
+        );
+        let mut fused_bytes = 0usize;
+        for expert in 0..pair.first.expert_count {
+            let first_key = ExpertMatrixKey {
+                tensor_start: pair.first.tensor_start,
+                second_tensor_start: None,
+                expert,
+            };
+            let second_key = ExpertMatrixKey {
+                tensor_start: pair.second.tensor_start,
+                second_tensor_start: None,
+                expert,
+            };
+            let pair_key = ExpertMatrixKey {
+                tensor_start: pair.first.tensor_start,
+                second_tensor_start: Some(pair.second.tensor_start),
+                expert,
+            };
+            if let Some(existing) = self.entries.get(&pair_key) {
+                fused_bytes = fused_bytes
+                    .checked_add(existing.storage_bytes)
+                    .context("fused expert byte count overflowed")?;
+                continue;
+            }
+            let first = self
+                .entries
+                .get(&first_key)
+                .with_context(|| {
+                    format!(
+                        "expert {expert} from tensor {:?} is not resident for fusion",
+                        pair.first.name
+                    )
+                })?
+                .matrix
+                .clone();
+            let second = self
+                .entries
+                .get(&second_key)
+                .with_context(|| {
+                    format!(
+                        "expert {expert} from tensor {:?} is not resident for fusion",
+                        pair.second.name
+                    )
+                })?
+                .matrix
+                .clone();
+            let combined = first.concatenate_rows(&second)?;
+            let combined_bytes = combined.storage_bytes();
+            ensure!(
+                combined_bytes == first.storage_bytes() + second.storage_bytes(),
+                "fused expert storage changed from {} to {} bytes",
+                first.storage_bytes() + second.storage_bytes(),
+                combined_bytes
+            );
+            let removed_first = self
+                .entries
+                .remove(&first_key)
+                .context("validated first expert cache entry disappeared")?;
+            let removed_second = self
+                .entries
+                .remove(&second_key)
+                .context("validated second expert cache entry disappeared")?;
+            self.resident_bytes = self
+                .resident_bytes
+                .saturating_sub(removed_first.storage_bytes)
+                .saturating_sub(removed_second.storage_bytes);
+            self.access_clock += 1;
+            self.entries.insert(
+                pair_key,
+                CachedExpertMatrix {
+                    matrix: combined,
+                    storage_bytes: combined_bytes,
+                    last_access: self.access_clock,
+                },
+            );
+            self.resident_bytes += combined_bytes;
+            fused_bytes = fused_bytes
+                .checked_add(combined_bytes)
+                .context("fused expert byte count overflowed")?;
+        }
+        Ok(fused_bytes)
+    }
+
     fn mark_fully_resident(&mut self) {
         self.fully_resident = true;
         self.lru.clear();
@@ -542,19 +664,15 @@ impl GgufCheckpoint {
     /// leaves residency decisions to the OS page cache.
     pub fn warm_expert(&self, layer: usize, expert: usize) -> Result<usize> {
         let prefix = format!("blk.{layer}");
-        let mut bytes = 0usize;
-        for tensor in [
-            "ffn_gate_exps.weight",
-            "ffn_up_exps.weight",
-            "ffn_down_exps.weight",
-        ] {
-            let tensor = self.expert_tensor(&format!("{prefix}.{tensor}"))?;
-            let matrix = tensor.load(expert)?;
-            bytes = bytes
-                .checked_add(matrix.storage_bytes())
-                .context("expert warmup byte count overflowed")?;
-        }
-        Ok(bytes)
+        let gate_up = self.expert_pair(
+            &format!("{prefix}.ffn_gate_exps.weight"),
+            &format!("{prefix}.ffn_up_exps.weight"),
+        )?;
+        let down = self.expert_tensor(&format!("{prefix}.ffn_down_exps.weight"))?;
+        gate_up
+            .warm(expert)?
+            .checked_add(down.warm(expert)?)
+            .context("expert warmup byte count overflowed")
     }
 
     /// Load one expert matrix through the configured cache and return its
@@ -708,6 +826,40 @@ impl GgufCheckpoint {
         })
     }
 
+    /// Resolve two compatible `[experts, rows, columns]` tensors whose rows
+    /// can be executed by one quantized matrix multiplication.
+    pub fn expert_pair(&self, first: &str, second: &str) -> Result<GgufExpertPair<'_>> {
+        let first = self.expert_tensor(first)?;
+        let second = self.expert_tensor(second)?;
+        ensure!(
+            first.dtype == second.dtype,
+            "cannot pair expert tensors {:?} and {:?} with dtypes {:?} and {:?}",
+            first.name,
+            second.name,
+            first.dtype,
+            second.dtype
+        );
+        ensure!(
+            first.expert_count == second.expert_count
+                && first.rows == second.rows
+                && first.columns == second.columns,
+            "cannot pair expert tensors {:?} [{}, {}, {}] and {:?} [{}, {}, {}]",
+            first.name,
+            first.expert_count,
+            first.rows,
+            first.columns,
+            second.name,
+            second.expert_count,
+            second.rows,
+            second.columns
+        );
+        Ok(GgufExpertPair {
+            checkpoint: self,
+            first,
+            second,
+        })
+    }
+
     fn load_resolved_expert_matrix(
         &self,
         tensor: &GgufExpertTensor<'_>,
@@ -721,6 +873,7 @@ impl GgufCheckpoint {
         );
         let key = ExpertMatrixKey {
             tensor_start: tensor.tensor_start,
+            second_tensor_start: None,
             expert,
         };
         if let Some(matrix) = self
@@ -754,6 +907,72 @@ impl GgufCheckpoint {
             .map_err(|_| anyhow::anyhow!("expert cache lock was poisoned"))?
             .record_read_and_insert(key, &matrix);
         Ok(matrix)
+    }
+
+    fn load_resolved_expert_pair(
+        &self,
+        pair: &GgufExpertPair<'_>,
+        expert: usize,
+    ) -> Result<QuantizedMatrix> {
+        ensure!(
+            expert < pair.first.expert_count,
+            "expert index {expert} is outside paired tensors with {} experts",
+            pair.first.expert_count
+        );
+        let key = ExpertMatrixKey {
+            tensor_start: pair.first.tensor_start,
+            second_tensor_start: Some(pair.second.tensor_start),
+            expert,
+        };
+        if let Some(matrix) = self
+            .expert_cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("expert cache lock was poisoned"))?
+            .get(key)
+        {
+            return Ok(matrix);
+        }
+        let mut raw = Vec::with_capacity(pair.first.expert_bytes + pair.second.expert_bytes);
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|_| anyhow::anyhow!("GGUF file lock was poisoned"))?;
+        for tensor in [&pair.first, &pair.second] {
+            let expert_offset = expert
+                .checked_mul(tensor.expert_bytes)
+                .context("GGUF expert matrix offset overflowed")?;
+            let start = tensor.tensor_start.saturating_add(expert_offset as u64);
+            file.seek(SeekFrom::Start(start))?;
+            let previous_len = raw.len();
+            raw.resize(previous_len + tensor.expert_bytes, 0);
+            file.read_exact(&mut raw[previous_len..]).with_context(|| {
+                format!(
+                    "failed to read expert {expert} from GGUF tensor {:?}",
+                    tensor.name
+                )
+            })?;
+        }
+        drop(file);
+        let storage = QStorage::from_data(Cow::Owned(raw), &Device::Cpu, pair.first.dtype)?;
+        let matrix = QuantizedMatrix::new(QTensor::new(
+            storage,
+            (pair.first.rows + pair.second.rows, pair.first.columns),
+        )?)?;
+        self.expert_cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("expert cache lock was poisoned"))?
+            .record_read_and_insert(key, &matrix);
+        Ok(matrix)
+    }
+
+    /// Replace separately cached pair members with byte-identical combined
+    /// matrices. Full warmup uses this after sequential file-order loading.
+    pub fn fuse_cached_expert_pair(&self, first: &str, second: &str) -> Result<usize> {
+        let pair = self.expert_pair(first, second)?;
+        self.expert_cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("expert cache lock was poisoned"))?
+            .fuse_pair(&pair)
     }
 
     pub fn load_f32_vector(&self, name: &str) -> Result<Tensor> {
@@ -1018,5 +1237,69 @@ mod tests {
         assert!(!stats.fully_resident);
         assert_eq!(stats.misses, 2);
         assert_eq!(stats.entries, 2);
+    }
+
+    #[test]
+    fn fuses_resident_expert_pairs_without_changing_bytes_or_outputs() {
+        let device = Device::Cpu;
+        let first_values: Vec<f32> = (0..2 * 256)
+            .map(|index| (index as f32 % 23. - 11.) / 8.)
+            .collect();
+        let second_values: Vec<f32> = (0..2 * 256)
+            .map(|index| (index as f32 % 19. - 9.) / 7.)
+            .collect();
+        let first = QTensor::quantize(
+            &Tensor::from_vec(first_values, (2, 1, 256), &device).unwrap(),
+            GgmlDType::Q4K,
+        )
+        .unwrap();
+        let second = QTensor::quantize(
+            &Tensor::from_vec(second_values, (2, 1, 256), &device).unwrap(),
+            GgmlDType::Q4K,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("expert-pair.gguf");
+        let mut file = File::create(&path).unwrap();
+        gguf_file::write(&mut file, &[], &[("first", &first), ("second", &second)]).unwrap();
+        drop(file);
+
+        let checkpoint = GgufCheckpoint::open(path).unwrap();
+        checkpoint.configure_expert_cache(1024 * 1024).unwrap();
+        let first = checkpoint.expert_tensor("first").unwrap();
+        let second = checkpoint.expert_tensor("second").unwrap();
+        for expert in 0..2 {
+            first.warm(expert).unwrap();
+            second.warm(expert).unwrap();
+        }
+        let before = checkpoint.expert_cache_stats().unwrap();
+        assert_eq!(before.entries, 4);
+        let input = Tensor::ones((1, 256), DType::F32, &device).unwrap();
+        let mut expected = first.load(1).unwrap().forward(&input).unwrap();
+        expected = Tensor::cat(
+            &[expected, second.load(1).unwrap().forward(&input).unwrap()],
+            1,
+        )
+        .unwrap();
+
+        let fused_bytes = checkpoint
+            .fuse_cached_expert_pair("first", "second")
+            .unwrap();
+        let after = checkpoint.expert_cache_stats().unwrap();
+        assert_eq!(after.entries, 2);
+        assert_eq!(after.resident_bytes, before.resident_bytes);
+        assert_eq!(after.bytes_loaded, before.bytes_loaded);
+        assert_eq!(fused_bytes, before.resident_bytes);
+        let actual = checkpoint
+            .expert_pair("first", "second")
+            .unwrap()
+            .load(1)
+            .unwrap()
+            .forward(&input)
+            .unwrap();
+        assert_eq!(
+            actual.to_vec2::<f32>().unwrap(),
+            expected.to_vec2::<f32>().unwrap()
+        );
     }
 }

@@ -134,15 +134,15 @@ identical work over contiguous value rows reduced recurrence to 1.42 seconds.
 Pre-resolved numeric expert handles and a fully-resident cache state also
 remove per-token tensor-name allocation and unnecessary LRU maintenance.
 
-On the same 23-input/128-output workload, with the same four native threads and
-all 216,000 expert requests hitting cache:
+On the same 23-input/128-output workload with the same four native threads:
 
-| Revision | TTFT | Decode | Physical reads | RSS |
-| --- | ---: | ---: | ---: | ---: |
-| Initial native suite | 4.51 s | 3.74 tok/s | 0 MiB | 47,319 MiB |
-| Contiguous DeltaNet + resident cache | 3.15 s | 5.62 tok/s | 0 MiB | 47,263 MiB |
-| Reusable DeltaNet scratch | 3.25 s | 5.77 tok/s | 0 MiB | 47,271 MiB |
-| Flat convolution + fused QKV/gate | 3.30 s | 5.87 tok/s | 0 MiB | 47,260 MiB |
+| Revision | TTFT | Decode | Cache hits | Physical reads | RSS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Initial native suite | 4.51 s | 3.74 tok/s | 216,000 | 0 MiB | 47,319 MiB |
+| Contiguous DeltaNet + resident cache | 3.15 s | 5.62 tok/s | 216,000 | 0 MiB | 47,263 MiB |
+| Reusable DeltaNet scratch | 3.25 s | 5.77 tok/s | 216,000 | 0 MiB | 47,271 MiB |
+| Flat convolution + fused QKV/gate | 3.30 s | 5.87 tok/s | 216,000 | 0 MiB | 47,260 MiB |
+| Fused routed/shared expert gate-up | 3.20 s | 5.99 tok/s | 144,000 | 0 MiB | 47,328 MiB |
 
 All 128 generated token IDs matched the initial artifact exactly. The accepted
 change improves sustained decode by 50.2%; an algebraically equivalent version
@@ -176,3 +176,12 @@ A separate 8-Candle/4-Rayon-thread run was rejected as the sustained default.
 It improved DeltaNet projections by 3.7% and LM head by 6.1%, but slowed MoE by
 2.6% and total decode by 0.7% versus the 4/4 control. Four Candle threads remain
 the documented sustained setting on this four-core/eight-thread host.
+
+Routed and shared expert gate/up matrices have the same shape and quantization.
+Full warmup still reads all 144 GGUF tensors sequentially, then replaces each
+resident gate/up pair with one byte-preserving row-concatenated entry. Resident
+expert bytes stay at 43.5 GiB while entries fall from 73,728 to 49,152. Runtime
+cache requests fall from 216,000 to 144,000 and each expert uses one gate/up
+kernel launch instead of two. All 128 IDs matched; MoE fell from 8.46 to 8.00
+seconds, routed compute from 6.30 to 5.87 seconds, and total decode from 21.65
+to 21.21 seconds (5.99 token/s).
