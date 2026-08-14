@@ -1,14 +1,16 @@
 use std::{
     io::{self, BufRead, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Instant,
 };
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use clap::Parser;
 use qwen_engine::{
-    GenerationOptions, GgufCheckpoint, QuantizedGenerationResult, QuantizedRuntime,
-    trace::{JsonRoutingCensus, JsonlRoutingTrace, RoutingTraceSet},
+    GenerationOptions, GgufCheckpoint, GgufModelIdentity, QuantizedGenerationResult,
+    QuantizedRuntime,
+    profile::{ProcessDelta, ProcessSnapshot},
+    trace::{JsonRoutingCensus, JsonlRoutingTrace, RoutingCensusArtifact, RoutingTraceSet},
 };
 
 #[derive(Debug, Parser)]
@@ -37,12 +39,170 @@ struct Args {
     /// Write cumulative per-layer expert counts as a versioned JSON sidecar.
     #[arg(long)]
     routing_census: Option<PathBuf>,
+    /// Continue an existing --routing-census instead of replacing it.
+    #[arg(long, requires = "routing_census")]
+    resume_routing_census: bool,
     /// Retain recently used expert matrices in-process, bounded in MiB.
     #[arg(long, default_value_t = 0)]
     expert_cache_mib: usize,
+    /// Warm the hottest layer-qualified experts from a prior census.
+    #[arg(long)]
+    warmup_census: Option<PathBuf>,
+    /// Number of hottest experts to warm in each observed layer.
+    #[arg(long, default_value_t = 10)]
+    warmup_experts_per_layer: usize,
+    /// Sequentially warm every fused expert tensor into the OS page cache.
+    #[arg(long, conflicts_with = "warmup_census")]
+    warmup_all_experts: bool,
 }
 
-fn report(result: &QuantizedGenerationResult, context_tokens: usize) -> Result<()> {
+fn warm_all_experts(checkpoint: &GgufCheckpoint, runtime: &QuantizedRuntime<'_>) -> Result<()> {
+    let mut tensors = Vec::with_capacity(runtime.model().config().num_hidden_layers * 3);
+    for layer in 0..runtime.model().config().num_hidden_layers {
+        for suffix in [
+            "ffn_gate_exps.weight",
+            "ffn_up_exps.weight",
+            "ffn_down_exps.weight",
+        ] {
+            let name = format!("blk.{layer}.{suffix}");
+            let info = checkpoint
+                .tensor_info(&name)
+                .with_context(|| format!("GGUF is missing expert tensor {name:?}"))?;
+            tensors.push((info.offset, name, info.storage_bytes));
+        }
+    }
+    tensors.sort_unstable_by_key(|(offset, _, _)| *offset);
+    let total_bytes = tensors.iter().try_fold(0usize, |total, (_, _, bytes)| {
+        total
+            .checked_add(*bytes)
+            .ok_or_else(|| anyhow::anyhow!("full expert warmup byte count overflowed"))
+    })?;
+    let cache_before = checkpoint.expert_cache_stats()?;
+    let pin_in_process = cache_before.capacity_bytes > 0;
+    if pin_in_process {
+        ensure!(
+            cache_before.capacity_bytes >= total_bytes,
+            "--warmup-all-experts needs at least {:.1} MiB of --expert-cache-mib capacity to pin all experts; configured {:.1} MiB",
+            total_bytes as f64 / (1024. * 1024.),
+            cache_before.capacity_bytes as f64 / (1024. * 1024.)
+        );
+    }
+    eprintln!(
+        "warming {} expert tensors ({:.1} GiB) in file order into {}; Ctrl-C cancels",
+        tensors.len(),
+        total_bytes as f64 / (1024. * 1024. * 1024.),
+        if pin_in_process {
+            "the pinned expert cache"
+        } else {
+            "the OS page cache"
+        }
+    );
+    let process_before = ProcessSnapshot::capture()?;
+    let started = Instant::now();
+    let mut loaded = 0usize;
+    for (index, (_, name, expected_bytes)) in tensors.iter().enumerate() {
+        let bytes = if pin_in_process {
+            (0..runtime.model().config().num_experts).try_fold(0usize, |total, expert| {
+                total
+                    .checked_add(checkpoint.warm_expert_matrix(name, expert)?)
+                    .ok_or_else(|| anyhow::anyhow!("full expert warmup byte count overflowed"))
+            })?
+        } else {
+            checkpoint.warm_tensor_pages(name)?
+        };
+        ensure!(
+            bytes == *expected_bytes,
+            "warmup byte count changed for {name:?}"
+        );
+        loaded += bytes;
+        if (index + 1).is_multiple_of(3) || index + 1 == tensors.len() {
+            eprintln!(
+                "full warmup: {}/{} tensors, {:.1}/{:.1} GiB",
+                index + 1,
+                tensors.len(),
+                loaded as f64 / (1024. * 1024. * 1024.),
+                total_bytes as f64 / (1024. * 1024. * 1024.)
+            );
+        }
+    }
+    let process = process_before.delta(&ProcessSnapshot::capture()?);
+    let cache = checkpoint
+        .expert_cache_stats()?
+        .activity_since(cache_before);
+    eprintln!(
+        "full expert warmup complete: {:.1} GiB in {:.3}s ({:.1} MiB/s), {:.1} GiB physical reads; {:.1} GiB resident in {} cache entries",
+        loaded as f64 / (1024. * 1024. * 1024.),
+        started.elapsed().as_secs_f64(),
+        loaded as f64 / (1024. * 1024.) / started.elapsed().as_secs_f64(),
+        process.read_bytes.unwrap_or(0) as f64 / (1024. * 1024. * 1024.),
+        cache.resident_bytes as f64 / (1024. * 1024. * 1024.),
+        cache.entries,
+    );
+    Ok(())
+}
+
+fn warm_from_census(
+    checkpoint: &GgufCheckpoint,
+    runtime: &QuantizedRuntime<'_>,
+    identity: &GgufModelIdentity,
+    path: &Path,
+    experts_per_layer: usize,
+) -> Result<()> {
+    ensure!(
+        experts_per_layer > 0,
+        "--warmup-experts-per-layer must be at least one"
+    );
+    let census = RoutingCensusArtifact::from_path(path)?;
+    census.validate_for(
+        identity,
+        runtime.model().config().num_hidden_layers,
+        runtime.model().config().num_experts,
+    )?;
+    let selected = census.hottest_experts(experts_per_layer);
+    ensure!(!selected.is_empty(), "routing census contains no layers");
+    let process_before = ProcessSnapshot::capture()?;
+    let started = Instant::now();
+    let cache_before = checkpoint.expert_cache_stats()?;
+    let mut experts = 0usize;
+    let mut selected_bytes = 0usize;
+    eprintln!(
+        "warming up to {experts_per_layer} experts in {} observed layers; Ctrl-C cancels",
+        selected.len()
+    );
+    for (completed, (layer, layer_experts)) in selected.iter().enumerate() {
+        for expert in layer_experts {
+            selected_bytes = selected_bytes
+                .checked_add(checkpoint.warm_expert(*layer, *expert)?)
+                .ok_or_else(|| anyhow::anyhow!("expert warmup byte count overflowed"))?;
+            experts += 1;
+        }
+        eprintln!(
+            "warmup layer {layer}: {} experts ({}/{})",
+            layer_experts.len(),
+            completed + 1,
+            selected.len()
+        );
+    }
+    let activity = checkpoint
+        .expert_cache_stats()?
+        .activity_since(cache_before);
+    let process = process_before.delta(&ProcessSnapshot::capture()?);
+    eprintln!(
+        "warmup complete: {experts} experts, {:.1} MiB selected, {:.1} MiB loaded in {:.3}s; {} cache hits; {:.1} MiB physical reads",
+        selected_bytes as f64 / (1024. * 1024.),
+        activity.bytes_loaded as f64 / (1024. * 1024.),
+        started.elapsed().as_secs_f64(),
+        activity.hits,
+        process.read_bytes.unwrap_or(0) as f64 / (1024. * 1024.),
+    );
+    Ok(())
+}
+
+fn report(
+    result: &QuantizedGenerationResult,
+    context_tokens: usize,
+    process: &ProcessDelta,
+) -> Result<()> {
     println!("{}", result.text);
     io::stdout().flush()?;
     eprintln!("prompt token ids: {:?}", result.prompt_token_ids);
@@ -76,6 +236,14 @@ fn report(result: &QuantizedGenerationResult, context_tokens: usize) -> Result<(
         cache.entries,
         cache.evictions,
     );
+    eprintln!(
+        "process: physical reads {:.1} MiB; faults {} minor / {} major; RSS {:.1} MiB, peak {:.1} MiB",
+        process.read_bytes.unwrap_or(0) as f64 / (1024. * 1024.),
+        process.minor_faults.unwrap_or(0),
+        process.major_faults.unwrap_or(0),
+        process.resident_bytes_after.unwrap_or(0) as f64 / (1024. * 1024.),
+        process.peak_resident_bytes.unwrap_or(0) as f64 / (1024. * 1024.),
+    );
     Ok(())
 }
 
@@ -84,8 +252,10 @@ fn generate_and_report(
     prompt: &str,
     options: &GenerationOptions,
 ) -> Result<()> {
+    let before = ProcessSnapshot::capture()?;
     let result = runtime.generate(prompt, options)?;
-    report(&result, runtime.context_tokens())
+    let process = before.delta(&ProcessSnapshot::capture()?);
+    report(&result, runtime.context_tokens(), &process)
 }
 
 fn interactive(
@@ -157,6 +327,17 @@ fn main() -> Result<()> {
         identity.layout_fingerprint,
         identity.quantization.join("+")
     );
+    if args.warmup_all_experts {
+        warm_all_experts(&checkpoint, &runtime)?;
+    } else if let Some(path) = &args.warmup_census {
+        warm_from_census(
+            &checkpoint,
+            &runtime,
+            &identity,
+            path,
+            args.warmup_experts_per_layer,
+        )?;
+    }
 
     let mut traces = RoutingTraceSet::default();
     if let Some(path) = args.routing_trace {
@@ -166,7 +347,12 @@ fn main() -> Result<()> {
         )?));
     }
     if let Some(path) = args.routing_census {
-        traces.push(Box::new(JsonRoutingCensus::create(path, identity)));
+        let census = if args.resume_routing_census {
+            JsonRoutingCensus::resume(path, identity)?
+        } else {
+            JsonRoutingCensus::create(path, identity)
+        };
+        traces.push(Box::new(census));
     }
     if !traces.is_empty() {
         runtime.set_trace(Some(Box::new(traces)));

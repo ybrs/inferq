@@ -5,7 +5,7 @@ use std::{
     path::Path,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
 use crate::GgufModelIdentity;
@@ -100,12 +100,86 @@ pub struct LayerRoutingCensus {
     pub expert_counts: BTreeMap<usize, u64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutingCensusArtifact {
     pub schema_version: u32,
     pub model: GgufModelIdentity,
     pub routing_records: u64,
     pub layers: BTreeMap<usize, LayerRoutingCensus>,
+}
+
+impl RoutingCensusArtifact {
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("failed to read routing census {}", path.display()))?;
+        let artifact: Self = serde_json::from_slice(&bytes)
+            .with_context(|| format!("invalid routing census {}", path.display()))?;
+        ensure!(
+            artifact.schema_version == 1,
+            "unsupported routing census schema version {}",
+            artifact.schema_version
+        );
+        Ok(artifact)
+    }
+
+    pub fn validate_for(
+        &self,
+        model: &GgufModelIdentity,
+        layer_count: usize,
+        expert_count: usize,
+    ) -> Result<()> {
+        ensure!(
+            self.model.layout_fingerprint == model.layout_fingerprint
+                && self.model.size_bytes == model.size_bytes
+                && self.model.quantization == model.quantization,
+            "routing census model identity does not match the loaded GGUF"
+        );
+        for (layer, census) in &self.layers {
+            ensure!(
+                *layer < layer_count,
+                "routing census contains invalid layer {layer}; model has {layer_count} layers"
+            );
+            for expert in census.expert_counts.keys() {
+                ensure!(
+                    *expert < expert_count,
+                    "routing census layer {layer} contains invalid expert {expert}; model has {expert_count} experts"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub fn hottest_experts(&self, per_layer: usize) -> Vec<(usize, Vec<usize>)> {
+        self.layers
+            .iter()
+            .map(|(layer, census)| {
+                let mut experts: Vec<_> = census
+                    .expert_counts
+                    .iter()
+                    .map(|(expert, count)| (*expert, *count))
+                    .collect();
+                experts.sort_unstable_by(
+                    |(left_expert, left_count), (right_expert, right_count)| {
+                        right_count
+                            .cmp(left_count)
+                            .then_with(|| left_expert.cmp(right_expert))
+                    },
+                );
+                experts.truncate(per_layer);
+                (
+                    *layer,
+                    experts.into_iter().map(|(expert, _)| expert).collect(),
+                )
+            })
+            .collect()
+    }
+
+    fn matches_model(&self, model: &GgufModelIdentity) -> bool {
+        self.model.layout_fingerprint == model.layout_fingerprint
+            && self.model.size_bytes == model.size_bytes
+            && self.model.quantization == model.quantization
+    }
 }
 
 /// Accumulates real model routes and rewrites a compact JSON sidecar on flush.
@@ -130,6 +204,22 @@ impl JsonRoutingCensus {
     pub fn artifact(&self) -> &RoutingCensusArtifact {
         &self.artifact
     }
+
+    pub fn resume(path: impl AsRef<Path>, model: GgufModelIdentity) -> Result<Self> {
+        let path = path.as_ref();
+        if !path.exists() {
+            return Ok(Self::create(path, model));
+        }
+        let artifact = RoutingCensusArtifact::from_path(path)?;
+        ensure!(
+            artifact.matches_model(&model),
+            "existing routing census model identity does not match the loaded GGUF"
+        );
+        Ok(Self {
+            path: path.to_path_buf(),
+            artifact,
+        })
+    }
 }
 
 impl RoutingTrace for JsonRoutingCensus {
@@ -145,12 +235,25 @@ impl RoutingTrace for JsonRoutingCensus {
     }
 
     fn flush(&mut self) -> Result<()> {
-        let file = File::create(&self.path)
-            .with_context(|| format!("failed to create routing census {}", self.path.display()))?;
+        let temporary = self.path.with_extension("census.tmp");
+        let file = File::create(&temporary).with_context(|| {
+            format!(
+                "failed to create temporary routing census {}",
+                temporary.display()
+            )
+        })?;
         let mut writer = BufWriter::new(file);
         serde_json::to_writer_pretty(&mut writer, &self.artifact)?;
         writer.write_all(b"\n")?;
         writer.flush()?;
+        drop(writer);
+        std::fs::rename(&temporary, &self.path).with_context(|| {
+            format!(
+                "failed to replace routing census {} from {}",
+                self.path.display(),
+                temporary.display()
+            )
+        })?;
         Ok(())
     }
 }
@@ -190,6 +293,26 @@ mod tests {
         assert_eq!(census.artifact().layers[&0].expert_counts[&1], 2);
         assert_eq!(census.artifact().layers[&1].expert_counts[&1], 1);
         census.flush().unwrap();
+        let artifact =
+            RoutingCensusArtifact::from_path(directory.path().join("census.json")).unwrap();
+        assert_eq!(
+            artifact.hottest_experts(2),
+            [(0, vec![1, 3]), (1, vec![1, 4])]
+        );
+        artifact.validate_for(&identity(), 2, 5).unwrap();
+        let mut resumed =
+            JsonRoutingCensus::resume(directory.path().join("census.json"), identity()).unwrap();
+        resumed
+            .record(&RoutingRecord {
+                token_index: 1,
+                token_id: 11,
+                layer: 0,
+                selected_expert_ids: vec![1],
+                router_weights: vec![1.],
+                router_logits: None,
+            })
+            .unwrap();
+        assert_eq!(resumed.artifact().routing_records, 4);
         let value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(directory.path().join("census.json")).unwrap())
                 .unwrap();

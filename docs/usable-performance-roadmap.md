@@ -250,10 +250,12 @@ Usability requires keeping expensive state alive.
 Deliverables:
 
 - an interactive process that loads once and retains model mappings and session
-  state across turns;
-- an optional model warmup with explicit progress and cancellation;
-- residency/page-fault telemetry for non-expert weights and expert pages;
-- a per-layer routing census sidecar keyed by model hash and quantization;
+  state across turns (complete);
+- optional census and full-expert warmup with progress and Ctrl-C cancellation
+  (complete);
+- RSS, fault, physical-read, and expert-cache telemetry (complete);
+- an atomically resumable per-layer routing census sidecar keyed by local model
+  identity and quantization (complete);
 - optional expert-local `qcpu` repack files with contiguous gate/up/down blocks,
   alignment, checksums, and source-model identity;
 - page-cache-first hot expert ordering or prefaulting, evaluated without
@@ -312,8 +314,7 @@ has an interactive mode that loads once, preserves sequence state correctly
 across turns, and writes either detailed routes or a compact per-layer census.
 An opt-in global byte-bounded expert LRU now provides per-turn hit/miss/read/
 resident/eviction telemetry while the default remains the page-cache-only
-baseline. Capacity sweeps and census-driven warming are now the open
-critical-path work.
+baseline. Census resumption and census/full warmup are operational.
 
 The first controlled warm-route result clarifies the opportunity. A
 zero-capacity three-token run decoded at 0.19 token/s while loading 2610 MiB of
@@ -324,18 +325,29 @@ with 2008 evictions. These are narrow smoke measurements, but they support
 page-cache-first census warming rather than enabling the explicit LRU by
 default.
 
+Broader measurements changed the operating recommendation. A five-prompt
+census covered 41.9% of an unseen route; a resumed 17-token census and 6 GiB
+cache reached 76.9% hits, but the remaining 400 MiB of random physical reads
+still limited decode to 0.19 token/s. Warming all experts into page cache also
+failed because eviction order left route holes. Pinning the entire compressed
+expert set succeeded: 43.5 GiB loaded in 276.5 seconds, 47,194.7 MiB process
+RSS, 100% expert hits, zero inference reads, and 1.61 decode token/s on an
+unseen prompt. This crosses the agent-usable decode gate within the memory
+budget.
+
 The next three bounded changes should be:
 
-1. Run repeated real prompts in one process, recording layer-qualified expert
-   reuse, expert-load time, faults, RSS, and the routing census.
-2. Sweep the bounded, layer-qualified expert cache capacities that fit below
-   the 55 GiB RSS gate and compare them against the zero-capacity baseline.
-3. Use the census to evaluate page-cache-first warming of only the hottest
-   experts, retaining exact routing and comparing against the no-warmup path.
+1. Run 16- and 128-token generations in the pinned persistent process to check
+   sustained throughput, RSS growth, and state correctness.
+2. Measure a 32-token coding prompt and specialize/batch prefill until warm TTFT
+   is below 30 seconds.
+3. Add proper tokenizer chat-template application and newline-safe incremental
+   output so the pinned runtime can serve real agent turns.
 
-This ordering attacks the observed cold random expert reads while preserving
-exact output. io_uring, speculative routing, a server API, and approximate
-expert counts do not belong on the current HDD critical path.
+Expert I/O is removed from the recommended pinned decode path. The critical
+path now moves to sustained decode validation, prefill, and the user-facing
+conversation boundary. io_uring, speculative routing, and approximate expert
+counts remain outside the current path.
 
 ## Benchmark and correctness contract
 

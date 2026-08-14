@@ -93,5 +93,7 @@ two-step full-attention KV-cache comparison. The first complete GGUF runtime is
 also operational and matches the two-token BF16 regression. It currently uses
 the Hugging Face directory for config/tokenizer assets. Its interactive mode
 keeps loaded weights and sequence state alive across turns and can write a
-per-layer expert census. A bounded expert-residency policy remains necessary
-before sustained decode is usable.
+resumable per-layer expert census. On the 62 GiB target, its explicit full
+expert residency mode pins all compressed expert matrices at 47.2 GiB process
+RSS and measured 1.61 decode token/s on an unseen prompt. Lower-memory partial
+residency remains workload-dependent and experimental on the rotational disk.

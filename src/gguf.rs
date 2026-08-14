@@ -15,7 +15,7 @@ use candle_core::{
         gguf_file::{Content, Value},
     },
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GgufSummary {
@@ -41,7 +41,7 @@ pub struct GgufTensorInfo {
     pub storage_bytes: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GgufModelIdentity {
     pub path: String,
     pub size_bytes: u64,
@@ -414,6 +414,59 @@ impl GgufCheckpoint {
         Ok(cache.stats())
     }
 
+    /// Read the three compressed matrices for one layer-qualified expert.
+    /// With a zero-capacity explicit cache, dropping the returned matrix views
+    /// leaves residency decisions to the OS page cache.
+    pub fn warm_expert(&self, layer: usize, expert: usize) -> Result<usize> {
+        let prefix = format!("blk.{layer}");
+        let mut bytes = 0usize;
+        for tensor in [
+            "ffn_gate_exps.weight",
+            "ffn_up_exps.weight",
+            "ffn_down_exps.weight",
+        ] {
+            let matrix = self.load_expert_matrix(&format!("{prefix}.{tensor}"), expert)?;
+            bytes = bytes
+                .checked_add(matrix.storage_bytes())
+                .context("expert warmup byte count overflowed")?;
+        }
+        Ok(bytes)
+    }
+
+    /// Load one expert matrix through the configured cache and return its
+    /// compressed storage size.
+    pub fn warm_expert_matrix(&self, name: &str, expert: usize) -> Result<usize> {
+        Ok(self.load_expert_matrix(name, expert)?.storage_bytes())
+    }
+
+    /// Stream one tensor through a bounded buffer to populate the OS page
+    /// cache without retaining a second copy in the process heap.
+    pub fn warm_tensor_pages(&self, name: &str) -> Result<usize> {
+        const BUFFER_BYTES: usize = 8 * 1024 * 1024;
+        let info = self
+            .content
+            .tensor_infos
+            .get(name)
+            .with_context(|| format!("GGUF is missing tensor {name:?}"))?;
+        let storage_bytes =
+            info.shape.elem_count() / info.ggml_dtype.block_size() * info.ggml_dtype.type_size();
+        let start = self.content.tensor_data_offset.saturating_add(info.offset);
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|_| anyhow::anyhow!("GGUF file lock was poisoned"))?;
+        file.seek(SeekFrom::Start(start))?;
+        let mut buffer = vec![0u8; BUFFER_BYTES.min(storage_bytes)];
+        let mut remaining = storage_bytes;
+        while remaining > 0 {
+            let chunk = remaining.min(buffer.len());
+            file.read_exact(&mut buffer[..chunk])
+                .with_context(|| format!("failed to warm GGUF tensor {name:?}"))?;
+            remaining -= chunk;
+        }
+        Ok(storage_bytes)
+    }
+
     pub fn tensor_infos(&self) -> Vec<GgufTensorInfo> {
         let mut infos: Vec<_> = self
             .content
@@ -747,6 +800,10 @@ mod tests {
             .to_vec2::<f32>()
             .unwrap();
         let checkpoint = GgufCheckpoint::open(path).unwrap();
+        assert_eq!(
+            checkpoint.warm_tensor_pages("experts").unwrap(),
+            quantized.storage_size_in_bytes()
+        );
         checkpoint.configure_expert_cache(1024 * 1024).unwrap();
         let expert = checkpoint.load_expert_matrix("experts", 1).unwrap();
         assert!(expert.storage_bytes() < quantized.storage_size_in_bytes());

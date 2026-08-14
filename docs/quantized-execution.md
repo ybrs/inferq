@@ -152,8 +152,7 @@ BF16 regression. With pages left warm by the first run, a new process loaded
 resident weights in `1.89 s` and prefetched the first token in `0.427 s`
 (`2.34 token/s`). The next decode pass took `20.3 s` because it routed to a new
 set of cold expert pages. This is end-to-end correct but not yet sustained
-usable performance: persistent execution plus expert residency/census is now
-the immediate bottleneck.
+usable performance without one of the residency modes described below.
 
 ### Persistent session and routing census
 
@@ -171,6 +170,9 @@ pending-token state across input lines. The input is raw continuation text; use
 ```
 
 Add `--routing-trace routing.jsonl` for individual layer-qualified decisions.
+Add `--resume-routing-census` to update an existing census atomically across
+processes instead of replacing it. Resumption rejects a sidecar from a
+different checkpoint.
 Full router logits are omitted unless `--trace-router-logits` is supplied. The
 census is cumulative for the process and contains per-layer expert counts plus
 the checkpoint size, quantization types, modification time, and a stable GGUF
@@ -201,3 +203,42 @@ evictions. The default therefore remains zero: this first result agrees with
 Flash-MoE's observation that the OS page cache can beat an explicit cache. More
 capacity and prompt-diversity sweeps are required before retaining the LRU as a
 recommended operating mode.
+
+### Expert warmup and the usable high-memory mode
+
+`--warmup-census PATH --warmup-experts-per-layer N` validates a prior census
+against the loaded GGUF and warms its hottest experts independently per layer.
+With a nonzero expert cache these matrices remain pinned; with the default
+zero-capacity cache only the OS page cache retains them. A five-prompt census
+covered 41.9% of an unseen `struct` route, and a 17-token census plus 6 GiB
+cache reached 76.9% hits on unseen `await`. Both were still about `0.19
+token/s` when the uncovered route caused 358--400 MiB of random HDD reads.
+Partial residency is therefore experimental on this host: high hit rate is not
+enough when misses seek on rotational storage.
+
+Page-cache-only `--warmup-all-experts` streamed all 43.5 GiB in 220.8 seconds,
+but an unseen prompt still decoded at `0.19 token/s`; the kernel did not retain
+the entire set in a useful eviction order. Repeating that route immediately
+reached `1.15 token/s`. This mode is retained as an explicit negative
+experiment, not a recommendation.
+
+The current usable configuration pins every compressed expert matrix in the
+process-owned cache:
+
+```bash
+./target/release/gguf_infer \
+  --model /data/projects/localllm/models/Qwen3-Coder-Next-UD-Q4_K_M.gguf \
+  --tokenizer-model /data/projects/localllm/models/Qwen3-Coder-Next-SafeTensors \
+  --interactive \
+  --max-new-tokens 16 \
+  --expert-cache-mib 46000 \
+  --warmup-all-experts
+```
+
+The command refuses to start full pinning unless the configured cache can hold
+all expert bytes. On this host it loaded 73,728 matrices (43.5 GiB) in 276.5
+seconds. An unseen `match` prompt then had 4,320/4,320 cache hits, zero physical
+reads or evictions, 1.38 input tok/s, and 1.61 decode tok/s. RSS was 47,194.7
+MiB, below the 55 GiB project gate. This is the recommended persistent mode on
+the 62 GiB machine, but it leaves limited headroom for concurrent memory-heavy
+builds and should not be used on a smaller host.
