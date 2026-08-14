@@ -5,6 +5,7 @@ pub mod gguf;
 pub mod loader;
 pub mod profile;
 pub mod qwen;
+pub mod residency;
 pub mod runtime;
 pub mod sampling;
 pub mod tokenizer;
@@ -16,6 +17,9 @@ pub use gguf::{
     QuantizedEmbedding, QuantizedMatrix, inspect_gguf,
 };
 pub use loader::{Checkpoint, ModelSummary, TensorInfo};
+pub use residency::{
+    FullExpertWarmupMode, FullExpertWarmupProgress, FullExpertWarmupReport, warm_all_experts,
+};
 pub use runtime::{
     GenerationMetrics, GenerationOptions, GenerationResult, QuantizedGenerationMetrics,
     QuantizedGenerationResult, QuantizedRuntime, Runtime,

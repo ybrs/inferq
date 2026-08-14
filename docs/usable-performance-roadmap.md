@@ -344,17 +344,31 @@ prompt plus the full 128 generated tokens prefetched at 1.55 token/s and held
 216,000/216,000 expert hits, zero evictions, and 47,263 MiB RSS. Tokenizer-aware
 incremental output streamed throughout the 81.75-second decode.
 
+The persistent multi-case benchmark is now implemented. It validates all
+rendered token counts before model load, performs one shared full-expert
+warmup, resets sequence state per repetition, and emits source, host, model,
+warmup, correctness, timing, cache, RSS, fault, and physical-I/O data in one
+JSONL artifact. Its manifest includes the greedy regression, 16-token decode,
+an exactly 32-token templated coding prompt, and sustained 128-token decode.
+
+The first complete `target-cpu=native` suite measured the exact 32-token TTFT
+at 6.20 seconds. The 128-token case decoded its 127 passes at 3.74 token/s,
+with 216,000/216,000 expert hits, zero physical inference reads, and 47,318.8
+MiB final RSS. The greedy `[284, 526]` regression passed. This crosses both
+stretch gates on the current host; the remaining qualification work is
+variance and conversational/tool correctness rather than basic throughput.
+
 The next three bounded changes should be:
 
-1. Add a persistent multi-case benchmark mode so 1-, 16-, 32-, and 128-token
-   cases share one expensive expert warmup and emit one structured artifact.
-2. Measure an exact 32-token coding prompt; the 23-token result projects below
-   the 30-second TTFT gate, but the gate still requires a measured case.
-3. Validate multiple templated user/assistant turns, then add the official tool
+1. Record a warm repeated variance band for the short cases in the same
+   persistent process.
+2. Validate multiple templated user/assistant turns, then add the official tool
    description/call subset needed by an agent harness.
+3. Profile native-build layer timings and prioritize the remaining prefill and
+   decode work only where it improves real agent workloads or memory headroom.
 
 Expert I/O is removed from the recommended pinned decode path. The critical
-path now moves to repeatable multi-case qualification and the tool-capable
+path now moves to variance qualification and the tool-capable
 conversation boundary. io_uring, speculative routing, and approximate expert
 counts remain outside the current path.
 

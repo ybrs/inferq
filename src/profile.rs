@@ -6,6 +6,28 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
+pub struct SourceInfo {
+    pub git_commit: Option<String>,
+    pub git_dirty: Option<bool>,
+}
+
+impl SourceInfo {
+    pub fn detect() -> Self {
+        let git_commit = command_output("git", &["rev-parse", "HEAD"]);
+        let git_dirty = Command::new("git")
+            .args(["status", "--porcelain"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| !output.stdout.is_empty());
+        Self {
+            git_commit,
+            git_dirty,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct HostInfo {
     pub cpu_model: Option<String>,
     pub logical_cpus: usize,
@@ -209,5 +231,11 @@ mod tests {
     #[test]
     fn parses_status_values_with_kib_suffix() {
         assert_eq!(kib_value("VmRSS:\t  123 kB\n", "VmRSS:"), Some(125_952));
+    }
+
+    #[test]
+    fn source_detection_is_best_effort() {
+        let source = SourceInfo::detect();
+        assert_eq!(source.git_commit.is_some(), source.git_dirty.is_some());
     }
 }

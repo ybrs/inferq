@@ -57,3 +57,62 @@ Exact allocator call counts are not yet in schema version 1. RSS and fault/I/O
 counters are session-owned observations; an allocator-count implementation
 must also be explicitly owned and opt-in rather than a hidden process-global
 counter.
+
+## Persistent GGUF qualification
+
+`gguf_bench` is the quantized counterpart. It opens the GGUF once, pins all
+expert matrices once, resets sequence state before each measured generation,
+and writes one JSONL record per case. The default manifest contains the exact
+greedy regression, a 16-token generation, an exactly 32-token templated prompt
+for the TTFT gate, and a 128-token sustained generation. Prompt counts are
+validated before the GGUF is opened.
+
+Build and run the complete pinned suite with:
+
+```bash
+RUSTFLAGS='-C target-cpu=native' cargo build --release --bin gguf_bench
+
+./target/release/gguf_bench \
+  --model /data/projects/localllm/models/Qwen3-Coder-Next-UD-Q4_K_M.gguf \
+  --tokenizer-model /data/projects/localllm/models/Qwen3-Coder-Next-SafeTensors \
+  --prompts benchmarks/gguf-prompts.json \
+  --expert-cache-mib 46000 \
+  --warmup-all-experts true \
+  --output artifacts/gguf-pinned-suite.jsonl
+```
+
+The output path is created with no-overwrite semantics. Each record embeds the
+source revision, host and storage metadata, local GGUF identity, combined load
+telemetry, the shared warmup report, rendered prompt and token IDs, greedy
+correctness status, TTFT/decode rates, per-layer forward timings, expert-cache
+activity, RSS, faults, and physical I/O counters.
+
+Check or edit prompt cases without loading the 46 GiB GGUF:
+
+```bash
+./target/release/gguf_bench \
+  --tokenizer-model /data/projects/localllm/models/Qwen3-Coder-Next-SafeTensors \
+  --validate-prompts-only
+```
+
+For a bounded rerun, add `--only chat-prefill-32`. The full expert pinning is
+still performed because the measured case must have the same residency state
+as the complete suite. `--warmup-all-experts false --expert-cache-mib 0`
+retains the cold/page-cache experimental path, and the artifact labels that
+state explicitly.
+
+The first complete native-CPU suite on 2026-08-14 produced four valid records:
+
+| Workload | Input | Output | TTFT | Decode | Expert hits | Physical reads | RSS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `greedy-regression` | 1 | 2 | 0.35 s | 3.72 tok/s | 2,880/2,880 | 0 MiB | 47,259 MiB |
+| `chat-decode-16` | 17 | 16 | 3.35 s | 3.87 tok/s | 46,080/46,080 | 0 MiB | 47,306 MiB |
+| `chat-prefill-32` | 32 | 1 | 6.20 s | n/a | 46,080/46,080 | 0 MiB | 47,309 MiB |
+| `chat-sustained-128` | 23 | 128 | 4.51 s | 3.74 tok/s | 216,000/216,000 | 0 MiB | 47,319 MiB |
+
+The shared warmup loaded 43.5 GiB into 73,728 cache entries in 227.3 seconds.
+The exact greedy IDs were `[284, 526]`; the 32-token TTFT and sustained decode
+both exceed the project's stretch gates. These numbers came from a
+`target-cpu=native` build on the host recorded in the artifact. Do not compare
+them to a generic x86-64 release binary as though the build configuration were
+the same.

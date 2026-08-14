@@ -2,7 +2,6 @@ use std::{
     fs::{self, OpenOptions},
     io::{self, BufWriter, Write},
     path::{Path, PathBuf},
-    process::Command,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -11,7 +10,7 @@ use clap::{Parser, ValueEnum};
 use qwen_engine::{
     GenerationOptions, Runtime,
     loader::ModelSummary,
-    profile::{HostInfo, ProcessDelta, ProcessSnapshot},
+    profile::{HostInfo, ProcessDelta, ProcessSnapshot, SourceInfo},
     qwen::ForwardTimingReport,
 };
 use serde::{Deserialize, Serialize};
@@ -61,12 +60,6 @@ struct Prompt {
     max_new_tokens: usize,
     #[serde(default)]
     expected_token_prefix: Option<Vec<u32>>,
-}
-
-#[derive(Debug, Serialize)]
-struct SourceInfo {
-    git_commit: Option<String>,
-    git_dirty: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -165,7 +158,7 @@ fn main() -> Result<()> {
         None => Box::new(BufWriter::new(io::stdout().lock())),
     };
     let host = HostInfo::detect(&args.model);
-    let source = source_info();
+    let source = SourceInfo::detect();
     let load_before = ProcessSnapshot::capture()?;
     let load_started = Instant::now();
     let mut runtime = Runtime::load(&args.model)?;
@@ -263,20 +256,6 @@ fn correctness<'a>(expected: Option<&'a [u32]>, actual: &[u32]) -> CorrectnessIn
     }
 }
 
-fn source_info() -> SourceInfo {
-    let git_commit = command_output("git", &["rev-parse", "HEAD"]);
-    let git_dirty = Command::new("git")
-        .args(["status", "--porcelain"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| !output.stdout.is_empty());
-    SourceInfo {
-        git_commit,
-        git_dirty,
-    }
-}
-
 fn model_revision(model: &Path) -> Option<String> {
     let metadata = model.join(".cache/huggingface/download/config.json.metadata");
     fs::read_to_string(metadata)
@@ -284,15 +263,6 @@ fn model_revision(model: &Path) -> Option<String> {
         .lines()
         .next()
         .map(ToOwned::to_owned)
-}
-
-fn command_output(program: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(program).args(args).output().ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        .filter(|value| !value.is_empty())
 }
 
 #[cfg(test)]

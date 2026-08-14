@@ -270,3 +270,17 @@ The long run reached a 151-token context with zero expert evictions and no
 throughput degradation. Its 22 MiB RSS increase over the short case leaves the
 full process below the 55 GiB gate. The response stopped at the requested token
 cap, so an unfinished final code block is expected and is not a decoder error.
+
+Use `gguf_bench` for qualification rather than running these cases as separate
+processes. It amortizes the full expert pinning across the regression, short
+decode, exact 32-token TTFT, and sustained 128-token cases while resetting
+sequence state between measurements. The complete command and JSONL schema are
+documented in [profiling.md](profiling.md#persistent-gguf-qualification).
+
+The first native-CPU suite measured the exact 32-token TTFT at `6.20 s` and
+held `3.74 token/s` over 127 sustained decode passes. All 216,000 expert
+requests in the long case hit the pinned cache, measured inference reads were
+zero, and final RSS was `47,318.8 MiB`. This crosses both stretch gates while
+remaining below the 55 GiB memory gate. The earlier sustained numbers above
+came from a different release build configuration and remain useful historical
+measurements, not the current native-build qualification.
