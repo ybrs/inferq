@@ -6,6 +6,30 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
+pub struct BuildInfo {
+    pub target_arch: &'static str,
+    pub debug_assertions: bool,
+    pub avx2: bool,
+    pub fma: bool,
+    pub candle_threads: usize,
+    pub rayon_threads: usize,
+}
+
+impl BuildInfo {
+    pub fn detect(host: &HostInfo) -> Self {
+        let default_threads = host.physical_cores.unwrap_or(host.logical_cpus).max(1);
+        Self {
+            target_arch: std::env::consts::ARCH,
+            debug_assertions: cfg!(debug_assertions),
+            avx2: cfg!(target_feature = "avx2"),
+            fma: cfg!(target_feature = "fma"),
+            candle_threads: configured_threads("CANDLE_NUM_THREADS", default_threads),
+            rayon_threads: configured_threads("RAYON_NUM_THREADS", default_threads),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct SourceInfo {
     pub git_commit: Option<String>,
     pub git_dirty: Option<bool>,
@@ -152,6 +176,14 @@ fn command_output(program: &str, args: &[&str]) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn configured_threads(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|threads| *threads > 0)
+        .unwrap_or(default)
+}
+
 fn value_after_colon<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     text.lines().find_map(|line| {
         let (name, value) = line.split_once(':')?;
@@ -237,5 +269,14 @@ mod tests {
     fn source_detection_is_best_effort() {
         let source = SourceInfo::detect();
         assert_eq!(source.git_commit.is_some(), source.git_dirty.is_some());
+    }
+
+    #[test]
+    fn build_info_has_nonzero_thread_counts() {
+        let host = HostInfo::detect(Path::new("."));
+        let build = BuildInfo::detect(&host);
+        assert!(build.candle_threads > 0);
+        assert!(build.rayon_threads > 0);
+        assert_eq!(build.target_arch, std::env::consts::ARCH);
     }
 }

@@ -21,6 +21,16 @@ pub struct QuantizedAttentionTimings {
     pub output_projection: Duration,
 }
 
+impl QuantizedAttentionTimings {
+    pub fn accumulate(&mut self, other: &Self) {
+        self.wall += other.wall;
+        self.projections += other.projections;
+        self.norm_rope += other.norm_rope;
+        self.attention += other.attention;
+        self.output_projection += other.output_projection;
+    }
+}
+
 pub struct QuantizedAttentionLayer {
     layer: usize,
     hidden_size: usize,

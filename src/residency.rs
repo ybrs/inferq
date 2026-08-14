@@ -75,9 +75,10 @@ pub fn warm_all_experts(
     let mut loaded = 0usize;
     for (index, (_, name, expected_bytes)) in tensors.iter().enumerate() {
         let bytes = if pin_in_process {
+            let tensor = checkpoint.expert_tensor(name)?;
             (0..config.num_experts).try_fold(0usize, |total, expert| {
                 total
-                    .checked_add(checkpoint.warm_expert_matrix(name, expert)?)
+                    .checked_add(tensor.warm(expert)?)
                     .context("full expert warmup byte count overflowed")
             })?
         } else {
@@ -98,6 +99,9 @@ pub fn warm_all_experts(
         });
     }
     let elapsed = started.elapsed();
+    if pin_in_process {
+        checkpoint.mark_expert_cache_fully_resident()?;
+    }
     let cache = checkpoint
         .expert_cache_stats()?
         .activity_since(cache_before);

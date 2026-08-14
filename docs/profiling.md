@@ -70,9 +70,13 @@ validated before the GGUF is opened.
 Build and run the complete pinned suite with:
 
 ```bash
-RUSTFLAGS='-C target-cpu=native' cargo build --release --bin gguf_bench
+CARGO_TARGET_DIR=target-native \
+RUSTFLAGS='-C target-cpu=native' \
+cargo build --release --bin gguf_bench
 
-./target/release/gguf_bench \
+CANDLE_NUM_THREADS=4 \
+RAYON_NUM_THREADS=4 \
+./target-native/release/gguf_bench \
   --model /data/projects/localllm/models/Qwen3-Coder-Next-UD-Q4_K_M.gguf \
   --tokenizer-model /data/projects/localllm/models/Qwen3-Coder-Next-SafeTensors \
   --prompts benchmarks/gguf-prompts.json \
@@ -81,11 +85,15 @@ RUSTFLAGS='-C target-cpu=native' cargo build --release --bin gguf_bench
   --output artifacts/gguf-pinned-suite.jsonl
 ```
 
-The output path is created with no-overwrite semantics. Each record embeds the
-source revision, host and storage metadata, local GGUF identity, combined load
-telemetry, the shared warmup report, rendered prompt and token IDs, greedy
-correctness status, TTFT/decode rates, per-layer forward timings, expert-cache
-activity, RSS, faults, and physical I/O counters.
+The output path is created with no-overwrite semantics. Quantized schema
+version 2 embeds the source revision, compile-time AVX2/FMA status, effective
+Candle/Rayon thread counts, host and storage metadata, local GGUF identity,
+combined load telemetry, the shared warmup report, rendered prompt and token
+IDs, greedy correctness status, TTFT/decode rates, expert-cache activity, RSS,
+faults, and physical I/O counters. Timing attribution includes disjoint model
+stages plus nested attention, DeltaNet, and MoE operations and all 48 layers.
+The separate target directory prevents the canonical generic validation build
+from overwriting the native benchmark binary.
 
 Check or edit prompt cases without loading the 46 GiB GGUF:
 
@@ -116,3 +124,25 @@ both exceed the project's stretch gates. These numbers came from a
 `target-cpu=native` build on the host recorded in the artifact. Do not compare
 them to a generic x86-64 release binary as though the build configuration were
 the same.
+
+### Native decode optimization result
+
+The first schema-2 profile exposed DeltaNet recurrence as 11.36 seconds of a
+32.49-second sustained decode. Its scalar loop traversed row-major
+`[key,value]` state with a 128-float stride. Reordering the mathematically
+identical work over contiguous value rows reduced recurrence to 1.42 seconds.
+Pre-resolved numeric expert handles and a fully-resident cache state also
+remove per-token tensor-name allocation and unnecessary LRU maintenance.
+
+On the same 23-input/128-output workload, with the same four native threads and
+all 216,000 expert requests hitting cache:
+
+| Revision | TTFT | Decode | Physical reads | RSS |
+| --- | ---: | ---: | ---: | ---: |
+| Initial native suite | 4.51 s | 3.74 tok/s | 0 MiB | 47,319 MiB |
+| Contiguous DeltaNet + resident cache | 3.15 s | 5.62 tok/s | 0 MiB | 47,263 MiB |
+
+All 128 generated token IDs matched the initial artifact exactly. The accepted
+change improves sustained decode by 50.2%; an algebraically equivalent version
+that reassociated floating-point multiplication was rejected after diverging
+at generated token 28.

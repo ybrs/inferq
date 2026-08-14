@@ -278,9 +278,13 @@ sequence state between measurements. The complete command and JSONL schema are
 documented in [profiling.md](profiling.md#persistent-gguf-qualification).
 
 The first native-CPU suite measured the exact 32-token TTFT at `6.20 s` and
-held `3.74 token/s` over 127 sustained decode passes. All 216,000 expert
+held `3.74 token/s` over 127 sustained decode passes. The next profiled
+optimization changed DeltaNet recurrence to traverse contiguous state rows and
+removed fully-resident LRU bookkeeping. The identical 128 generated token IDs
+then decoded at `5.62 token/s`, with TTFT reduced from `4.51 s` to `3.15 s`.
+All 216,000 expert
 requests in the long case hit the pinned cache, measured inference reads were
-zero, and final RSS was `47,318.8 MiB`. This crosses both stretch gates while
+zero, and final RSS was `47,263.1 MiB`. This crosses both stretch gates while
 remaining below the 55 GiB memory gate. The earlier sustained numbers above
 came from a different release build configuration and remain useful historical
 measurements, not the current native-build qualification.

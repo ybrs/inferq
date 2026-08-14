@@ -40,6 +40,17 @@ pub struct QuantizedDeltaTimings {
     pub output_projection: Duration,
 }
 
+impl QuantizedDeltaTimings {
+    pub fn accumulate(&mut self, other: &Self) {
+        self.wall += other.wall;
+        self.projections += other.projections;
+        self.convolution += other.convolution;
+        self.recurrence += other.recurrence;
+        self.gated_norm += other.gated_norm;
+        self.output_projection += other.output_projection;
+    }
+}
+
 pub struct QuantizedDeltaLayer {
     layer: usize,
     hidden_size: usize,

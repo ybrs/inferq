@@ -4,7 +4,7 @@ use anyhow::{Context, Result, ensure};
 use candle_core::{DType, IndexOp, Tensor};
 use candle_nn::ops;
 
-use crate::{GgufCheckpoint, QuantizedMatrix};
+use crate::{GgufCheckpoint, GgufExpertTensor, QuantizedMatrix};
 
 use super::{Route, top_k_routes};
 
@@ -39,7 +39,6 @@ pub struct QuantizedMoeOutput {
 /// One GGUF MoE sublayer with resident decision/shared weights and directly
 /// addressed routed experts.
 pub struct QuantizedMoeLayer<'a> {
-    checkpoint: &'a GgufCheckpoint,
     layer: usize,
     hidden_size: usize,
     intermediate_size: usize,
@@ -51,6 +50,9 @@ pub struct QuantizedMoeLayer<'a> {
     shared_up: QuantizedMatrix,
     shared_down: QuantizedMatrix,
     shared_selector: Tensor,
+    gate_experts: GgufExpertTensor<'a>,
+    up_experts: GgufExpertTensor<'a>,
+    down_experts: GgufExpertTensor<'a>,
 }
 
 impl std::fmt::Debug for QuantizedMoeLayer<'_> {
@@ -126,6 +128,9 @@ impl<'a> QuantizedMoeLayer<'a> {
         let shared_selector = checkpoint
             .load_f32_vector(&format!("{prefix}.ffn_gate_inp_shexp.weight"))?
             .reshape((1, hidden_size))?;
+        let gate_experts = checkpoint.expert_tensor(&gate_experts_name)?;
+        let up_experts = checkpoint.expert_tensor(&format!("{prefix}.ffn_up_exps.weight"))?;
+        let down_experts = checkpoint.expert_tensor(&down_experts_name)?;
         ensure!(
             shared_gate.shape()[1] == hidden_size
                 && shared_up.shape() == shared_gate.shape()
@@ -133,7 +138,6 @@ impl<'a> QuantizedMoeLayer<'a> {
             "invalid shared expert matrix shapes"
         );
         Ok(Self {
-            checkpoint,
             layer,
             hidden_size,
             intermediate_size,
@@ -145,6 +149,9 @@ impl<'a> QuantizedMoeLayer<'a> {
             shared_up,
             shared_down,
             shared_selector,
+            gate_experts,
+            up_experts,
+            down_experts,
         })
     }
 
@@ -166,22 +173,15 @@ impl<'a> QuantizedMoeLayer<'a> {
         let routes = top_k_routes(&router_logits, self.experts_per_token, self.normalize_top_k)?;
         timings.top_k = top_k_started.elapsed();
 
-        let prefix = format!("blk.{}", self.layer);
         let mut outputs = Vec::with_capacity(routes.len());
         for (token_index, route) in routes.iter().enumerate() {
             let x = flat.i(token_index)?.unsqueeze(0)?;
             let mut combined = Tensor::zeros((1, self.hidden_size), DType::F32, xs.device())?;
             for (&expert, &route_weight) in route.experts.iter().zip(&route.weights) {
                 let load_started = Instant::now();
-                let gate = self
-                    .checkpoint
-                    .load_expert_matrix(&format!("{prefix}.ffn_gate_exps.weight"), expert)?;
-                let up = self
-                    .checkpoint
-                    .load_expert_matrix(&format!("{prefix}.ffn_up_exps.weight"), expert)?;
-                let down = self
-                    .checkpoint
-                    .load_expert_matrix(&format!("{prefix}.ffn_down_exps.weight"), expert)?;
+                let gate = self.gate_experts.load(expert)?;
+                let up = self.up_experts.load(expert)?;
+                let down = self.down_experts.load(expert)?;
                 timings.expert_load += load_started.elapsed();
                 let compute_started = Instant::now();
                 let activated = ops::silu(&gate.forward(&x)?)?.broadcast_mul(&up.forward(&x)?)?;

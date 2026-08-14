@@ -58,7 +58,7 @@ struct Args {
     /// Number of hottest experts to warm in each observed layer.
     #[arg(long, default_value_t = 10)]
     warmup_experts_per_layer: usize,
-    /// Sequentially warm every fused expert tensor into the OS page cache.
+    /// Warm every fused expert tensor, pinning it when an expert cache is configured.
     #[arg(long, conflicts_with = "warmup_census")]
     warmup_all_experts: bool,
 }
@@ -176,7 +176,7 @@ fn report(
     );
     let cache = result.metrics.expert_cache;
     eprintln!(
-        "expert cache: {}/{} hits ({:.1}%); loaded {:.1} MiB of GGUF ranges; resident {:.1}/{:.1} MiB in {} entries; {} evictions",
+        "expert cache: {}/{} hits ({:.1}%); loaded {:.1} MiB of GGUF ranges; resident {:.1}/{:.1} MiB in {} entries (fully resident: {}); {} evictions",
         cache.hits,
         cache.requests,
         cache.hit_rate() * 100.,
@@ -184,6 +184,7 @@ fn report(
         cache.resident_bytes as f64 / (1024. * 1024.),
         cache.capacity_bytes as f64 / (1024. * 1024.),
         cache.entries,
+        cache.fully_resident,
         cache.evictions,
     );
     eprintln!(

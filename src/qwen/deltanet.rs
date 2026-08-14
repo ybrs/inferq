@@ -76,22 +76,37 @@ pub(crate) fn recurrent_delta_step(
         for cell in &mut state[state_base..state_base + key_dim * value_dim] {
             *cell *= decay;
         }
-        for j in 0..value_dim {
-            let mut prediction = 0.;
-            for i in 0..key_dim {
-                prediction += state[state_base + i * value_dim + j] * k[q_base + i];
-            }
-            let delta = (v[v_base + j] - prediction) * beta[h];
-            for i in 0..key_dim {
-                state[state_base + i * value_dim + j] += k[q_base + i] * delta;
+
+        // State is row-major `[key, value]`. Traverse complete value rows so
+        // the hot recurrence is contiguous and can be vectorized on CPU.
+        let output = &mut out[v_base..v_base + value_dim];
+        output.fill(0.);
+        for i in 0..key_dim {
+            let row = &state[state_base + i * value_dim..state_base + (i + 1) * value_dim];
+            let key = k[q_base + i];
+            for (prediction, &cell) in output.iter_mut().zip(row) {
+                *prediction += cell * key;
             }
         }
-        for j in 0..value_dim {
-            let mut value = 0.;
-            for i in 0..key_dim {
-                value += state[state_base + i * value_dim + j] * q[q_base + i] * q_scale;
+        for (delta, &target) in output.iter_mut().zip(&v[v_base..v_base + value_dim]) {
+            *delta = (target - *delta) * beta[h];
+        }
+        for i in 0..key_dim {
+            let row = &mut state[state_base + i * value_dim..state_base + (i + 1) * value_dim];
+            let key = k[q_base + i];
+            for (cell, &delta) in row.iter_mut().zip(output.iter()) {
+                *cell += key * delta;
             }
-            out[v_base + j] = value;
+        }
+        output.fill(0.);
+        for i in 0..key_dim {
+            let row = &state[state_base + i * value_dim..state_base + (i + 1) * value_dim];
+            for (value, &cell) in output.iter_mut().zip(row) {
+                // Preserve the scalar reference's multiplication order. The
+                // alternate `cell * (query * scale)` changes greedy output on
+                // a near-tied logit despite being algebraically equivalent.
+                *value += cell * q[q_base + i] * q_scale;
+            }
         }
     }
 }
@@ -249,6 +264,48 @@ pub fn reference_deltanet(
 mod tests {
     use super::*;
 
+    #[allow(clippy::too_many_arguments)]
+    fn strided_recurrence_reference(
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        g: &[f32],
+        beta: &[f32],
+        heads: usize,
+        key_dim: usize,
+        value_dim: usize,
+        state: &mut [f32],
+        out: &mut [f32],
+    ) {
+        let q_scale = (key_dim as f32).sqrt().recip();
+        for h in 0..heads {
+            let state_base = h * key_dim * value_dim;
+            let q_base = h * key_dim;
+            let v_base = h * value_dim;
+            let decay = g[h].exp();
+            for cell in &mut state[state_base..state_base + key_dim * value_dim] {
+                *cell *= decay;
+            }
+            for j in 0..value_dim {
+                let mut prediction = 0.;
+                for i in 0..key_dim {
+                    prediction += state[state_base + i * value_dim + j] * k[q_base + i];
+                }
+                let delta = (v[v_base + j] - prediction) * beta[h];
+                for i in 0..key_dim {
+                    state[state_base + i * value_dim + j] += k[q_base + i] * delta;
+                }
+            }
+            for j in 0..value_dim {
+                let mut value = 0.;
+                for i in 0..key_dim {
+                    value += state[state_base + i * value_dim + j] * q[q_base + i] * q_scale;
+                }
+                out[v_base + j] = value;
+            }
+        }
+    }
+
     #[test]
     fn delta_rule_updates_and_reuses_state() {
         let mut state = vec![0.; 4];
@@ -281,5 +338,57 @@ mod tests {
         );
         assert!((out[0] - 2. / 2f32.sqrt()).abs() < 1e-6);
         assert!((out[1] - 3. / 2f32.sqrt()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn contiguous_recurrence_matches_strided_reference() {
+        let heads = 2;
+        let key_dim = 4;
+        let value_dim = 3;
+        let q: Vec<_> = (0..heads * key_dim)
+            .map(|index| (index as f32 - 3.) / 7.)
+            .collect();
+        let k: Vec<_> = (0..heads * key_dim)
+            .map(|index| (5. - index as f32) / 9.)
+            .collect();
+        let v: Vec<_> = (0..heads * value_dim)
+            .map(|index| (index as f32 + 1.) / 5.)
+            .collect();
+        let mut expected_state: Vec<_> = (0..heads * key_dim * value_dim)
+            .map(|index| (index as f32 - 7.) / 31.)
+            .collect();
+        let mut actual_state = expected_state.clone();
+        let mut expected = vec![0.; heads * value_dim];
+        let mut actual = expected.clone();
+        strided_recurrence_reference(
+            &q,
+            &k,
+            &v,
+            &[-0.2, -0.4],
+            &[0.3, 0.7],
+            heads,
+            key_dim,
+            value_dim,
+            &mut expected_state,
+            &mut expected,
+        );
+        recurrent_delta_step(
+            &q,
+            &k,
+            &v,
+            &[-0.2, -0.4],
+            &[0.3, 0.7],
+            heads,
+            key_dim,
+            value_dim,
+            &mut actual_state,
+            &mut actual,
+        );
+        for (actual, expected) in actual.iter().zip(&expected) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
+        for (actual, expected) in actual_state.iter().zip(&expected_state) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
     }
 }

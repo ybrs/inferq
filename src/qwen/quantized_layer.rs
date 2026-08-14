@@ -13,11 +13,27 @@ use super::{
 
 #[derive(Debug, Clone, Default)]
 pub struct QuantizedLayerTimings {
+    pub layer: usize,
+    pub layer_type: Option<LayerType>,
     pub wall: Duration,
     pub normalization: Duration,
     pub attention: QuantizedAttentionTimings,
     pub delta: QuantizedDeltaTimings,
     pub moe: QuantizedMoeTimings,
+}
+
+impl QuantizedLayerTimings {
+    pub fn accumulate(&mut self, other: &Self) {
+        if self.layer_type.is_none() {
+            self.layer = other.layer;
+            self.layer_type = other.layer_type;
+        }
+        self.wall += other.wall;
+        self.normalization += other.normalization;
+        self.attention.accumulate(&other.attention);
+        self.delta.accumulate(&other.delta);
+        self.moe.accumulate(&other.moe);
+    }
 }
 
 #[derive(Debug)]
@@ -102,6 +118,8 @@ impl<'a> QuantizedLinearLayer<'a> {
             hidden,
             routes: moe.routes,
             timings: QuantizedLayerTimings {
+                layer: self.layer,
+                layer_type: Some(LayerType::LinearAttention),
                 wall: wall_started.elapsed(),
                 normalization,
                 attention: QuantizedAttentionTimings::default(),
@@ -113,6 +131,7 @@ impl<'a> QuantizedLinearLayer<'a> {
 }
 
 pub struct QuantizedFullLayer<'a> {
+    layer: usize,
     eps: f64,
     input_norm: Tensor,
     post_attention_norm: Tensor,
@@ -140,6 +159,7 @@ impl<'a> QuantizedFullLayer<'a> {
             "invalid layer norm dimensions for layer {layer}"
         );
         Ok(Self {
+            layer,
             eps: config.rms_norm_eps,
             input_norm,
             post_attention_norm,
@@ -178,6 +198,8 @@ impl<'a> QuantizedFullLayer<'a> {
             hidden,
             routes: moe.routes,
             timings: QuantizedLayerTimings {
+                layer: self.layer,
+                layer_type: Some(LayerType::FullAttention),
                 wall: wall_started.elapsed(),
                 normalization,
                 attention,

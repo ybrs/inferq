@@ -57,6 +57,9 @@ pub struct ExpertCacheStats {
     pub capacity_bytes: usize,
     pub resident_bytes: usize,
     pub entries: usize,
+    /// Full warmup proved that all model experts are pinned, so recency
+    /// bookkeeping is disabled until an unexpected miss occurs.
+    pub fully_resident: bool,
     pub requests: u64,
     pub hits: u64,
     pub misses: u64,
@@ -72,6 +75,7 @@ impl ExpertCacheStats {
             capacity_bytes: self.capacity_bytes,
             resident_bytes: self.resident_bytes,
             entries: self.entries,
+            fully_resident: self.fully_resident,
             requests: self.requests.saturating_sub(earlier.requests),
             hits: self.hits.saturating_sub(earlier.hits),
             misses: self.misses.saturating_sub(earlier.misses),
@@ -108,6 +112,51 @@ pub struct QuantizedEmbedding {
     rows: usize,
     columns: usize,
     storage_bytes: usize,
+}
+
+/// A validated, checkpoint-bound view of one fused expert tensor.
+///
+/// Resolving the tensor once avoids string allocation, GGUF metadata lookup,
+/// and shape arithmetic on every routed-expert cache access.
+pub struct GgufExpertTensor<'a> {
+    checkpoint: &'a GgufCheckpoint,
+    name: String,
+    dtype: GgmlDType,
+    expert_count: usize,
+    rows: usize,
+    columns: usize,
+    expert_bytes: usize,
+    tensor_start: u64,
+}
+
+impl std::fmt::Debug for GgufExpertTensor<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GgufExpertTensor")
+            .field("name", &self.name)
+            .field("dtype", &self.dtype)
+            .field("expert_count", &self.expert_count)
+            .field("rows", &self.rows)
+            .field("columns", &self.columns)
+            .finish_non_exhaustive()
+    }
+}
+
+impl GgufExpertTensor<'_> {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn expert_count(&self) -> usize {
+        self.expert_count
+    }
+
+    pub fn load(&self, expert: usize) -> Result<QuantizedMatrix> {
+        self.checkpoint.load_resolved_expert_matrix(self, expert)
+    }
+
+    pub fn warm(&self, expert: usize) -> Result<usize> {
+        Ok(self.load(expert)?.storage_bytes())
+    }
 }
 
 impl QuantizedEmbedding {
@@ -222,6 +271,12 @@ struct CachedExpertMatrix {
     last_access: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ExpertMatrixKey {
+    tensor_start: u64,
+    expert: usize,
+}
+
 #[derive(Default)]
 struct ExpertMatrixCache {
     capacity_bytes: usize,
@@ -232,8 +287,9 @@ struct ExpertMatrixCache {
     misses: u64,
     evictions: u64,
     bytes_loaded: u64,
-    entries: HashMap<(String, usize), CachedExpertMatrix>,
-    lru: VecDeque<((String, usize), u64)>,
+    entries: HashMap<ExpertMatrixKey, CachedExpertMatrix>,
+    lru: VecDeque<(ExpertMatrixKey, u64)>,
+    fully_resident: bool,
 }
 
 impl ExpertMatrixCache {
@@ -245,7 +301,7 @@ impl ExpertMatrixCache {
         let mut current: Vec<_> = self
             .entries
             .iter()
-            .map(|(key, entry)| (key.clone(), entry.last_access))
+            .map(|(key, entry)| (*key, entry.last_access))
             .collect();
         current.sort_unstable_by_key(|(_, access)| *access);
         self.lru = current.into();
@@ -256,6 +312,7 @@ impl ExpertMatrixCache {
             capacity_bytes: self.capacity_bytes,
             resident_bytes: self.resident_bytes,
             entries: self.entries.len(),
+            fully_resident: self.fully_resident,
             requests: self.requests,
             hits: self.hits,
             misses: self.misses,
@@ -264,14 +321,21 @@ impl ExpertMatrixCache {
         }
     }
 
-    fn get(&mut self, name: &str, expert: usize) -> Option<QuantizedMatrix> {
+    fn get(&mut self, key: ExpertMatrixKey) -> Option<QuantizedMatrix> {
         self.requests += 1;
         if self.capacity_bytes == 0 {
             self.misses += 1;
             return None;
         }
+        if self.fully_resident {
+            if let Some(entry) = self.entries.get(&key) {
+                self.hits += 1;
+                return Some(entry.matrix.clone());
+            }
+            self.misses += 1;
+            return None;
+        }
         self.access_clock += 1;
-        let key = (name.to_owned(), expert);
         if let Some(entry) = self.entries.get_mut(&key) {
             self.hits += 1;
             entry.last_access = self.access_clock;
@@ -285,7 +349,17 @@ impl ExpertMatrixCache {
         }
     }
 
-    fn record_read_and_insert(&mut self, name: &str, expert: usize, matrix: &QuantizedMatrix) {
+    fn record_read_and_insert(&mut self, key: ExpertMatrixKey, matrix: &QuantizedMatrix) {
+        if self.fully_resident {
+            self.fully_resident = false;
+            let mut current: Vec<_> = self
+                .entries
+                .iter()
+                .map(|(key, entry)| (*key, entry.last_access))
+                .collect();
+            current.sort_unstable_by_key(|(_, access)| *access);
+            self.lru = current.into();
+        }
         let storage_bytes = matrix.storage_bytes();
         self.bytes_loaded = self.bytes_loaded.saturating_add(storage_bytes as u64);
         if self.capacity_bytes == 0 || storage_bytes > self.capacity_bytes {
@@ -305,9 +379,8 @@ impl ExpertMatrixCache {
             }
         }
         self.access_clock += 1;
-        let key = (name.to_owned(), expert);
         let previous = self.entries.insert(
-            key.clone(),
+            key,
             CachedExpertMatrix {
                 matrix: matrix.clone(),
                 storage_bytes,
@@ -320,6 +393,11 @@ impl ExpertMatrixCache {
         self.resident_bytes += storage_bytes;
         self.lru.push_back((key, self.access_clock));
         self.compact_lru_if_needed();
+    }
+
+    fn mark_fully_resident(&mut self) {
+        self.fully_resident = true;
+        self.lru.clear();
     }
 }
 
@@ -414,6 +492,21 @@ impl GgufCheckpoint {
         Ok(cache.stats())
     }
 
+    /// Mark a completed full-model warmup so cache hits no longer maintain an
+    /// eviction queue. A later miss automatically restores LRU tracking.
+    pub fn mark_expert_cache_fully_resident(&self) -> Result<()> {
+        let mut cache = self
+            .expert_cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("expert cache lock was poisoned"))?;
+        ensure!(
+            cache.capacity_bytes > 0 && !cache.entries.is_empty(),
+            "cannot mark an empty or disabled expert cache as fully resident"
+        );
+        cache.mark_fully_resident();
+        Ok(())
+    }
+
     /// Read the three compressed matrices for one layer-qualified expert.
     /// With a zero-capacity explicit cache, dropping the returned matrix views
     /// leaves residency decisions to the OS page cache.
@@ -425,7 +518,8 @@ impl GgufCheckpoint {
             "ffn_up_exps.weight",
             "ffn_down_exps.weight",
         ] {
-            let matrix = self.load_expert_matrix(&format!("{prefix}.{tensor}"), expert)?;
+            let tensor = self.expert_tensor(&format!("{prefix}.{tensor}"))?;
+            let matrix = tensor.load(expert)?;
             bytes = bytes
                 .checked_add(matrix.storage_bytes())
                 .context("expert warmup byte count overflowed")?;
@@ -436,7 +530,7 @@ impl GgufCheckpoint {
     /// Load one expert matrix through the configured cache and return its
     /// compressed storage size.
     pub fn warm_expert_matrix(&self, name: &str, expert: usize) -> Result<usize> {
-        Ok(self.load_expert_matrix(name, expert)?.storage_bytes())
+        self.expert_tensor(name)?.warm(expert)
     }
 
     /// Stream one tensor through a bounded buffer to populate the OS page
@@ -542,6 +636,11 @@ impl GgufCheckpoint {
     /// Load one matrix from a GGUF tensor shaped `[experts, rows, columns]`.
     /// Only the selected expert's compressed byte range is read.
     pub fn load_expert_matrix(&self, name: &str, expert: usize) -> Result<QuantizedMatrix> {
+        self.expert_tensor(name)?.load(expert)
+    }
+
+    /// Resolve and validate a fused expert tensor for repeated routed access.
+    pub fn expert_tensor(&self, name: &str) -> Result<GgufExpertTensor<'_>> {
         let info = self
             .content
             .tensor_infos
@@ -552,11 +651,6 @@ impl GgufCheckpoint {
             dims.len() == 3,
             "GGUF tensor {name:?} has shape {:?}, expected [experts, rows, columns]",
             info.shape
-        );
-        ensure!(
-            expert < dims[0],
-            "expert index {expert} is outside tensor {name:?} with {} experts",
-            dims[0]
         );
         let rows = dims[1];
         let columns = dims[2];
@@ -572,36 +666,63 @@ impl GgufCheckpoint {
         let expert_bytes = blocks
             .checked_mul(info.ggml_dtype.type_size())
             .context("GGUF expert matrix byte size overflowed")?;
+        Ok(GgufExpertTensor {
+            checkpoint: self,
+            name: name.to_owned(),
+            dtype: info.ggml_dtype,
+            expert_count: dims[0],
+            rows,
+            columns,
+            expert_bytes,
+            tensor_start: self.content.tensor_data_offset.saturating_add(info.offset),
+        })
+    }
+
+    fn load_resolved_expert_matrix(
+        &self,
+        tensor: &GgufExpertTensor<'_>,
+        expert: usize,
+    ) -> Result<QuantizedMatrix> {
+        ensure!(
+            expert < tensor.expert_count,
+            "expert index {expert} is outside tensor {:?} with {} experts",
+            tensor.name,
+            tensor.expert_count
+        );
+        let key = ExpertMatrixKey {
+            tensor_start: tensor.tensor_start,
+            expert,
+        };
         if let Some(matrix) = self
             .expert_cache
             .lock()
             .map_err(|_| anyhow::anyhow!("expert cache lock was poisoned"))?
-            .get(name, expert)
+            .get(key)
         {
             return Ok(matrix);
         }
         let expert_offset = expert
-            .checked_mul(expert_bytes)
+            .checked_mul(tensor.expert_bytes)
             .context("GGUF expert matrix offset overflowed")?;
-        let start = self
-            .content
-            .tensor_data_offset
-            .saturating_add(info.offset)
-            .saturating_add(expert_offset as u64);
-        let mut raw = vec![0; expert_bytes];
+        let start = tensor.tensor_start.saturating_add(expert_offset as u64);
+        let mut raw = vec![0; tensor.expert_bytes];
         let mut file = self
             .file
             .lock()
             .map_err(|_| anyhow::anyhow!("GGUF file lock was poisoned"))?;
         file.seek(SeekFrom::Start(start))?;
-        file.read_exact(&mut raw)
-            .with_context(|| format!("failed to read expert {expert} from GGUF tensor {name:?}"))?;
-        let storage = QStorage::from_data(Cow::Owned(raw), &Device::Cpu, info.ggml_dtype)?;
-        let matrix = QuantizedMatrix::new(QTensor::new(storage, (rows, columns))?)?;
+        file.read_exact(&mut raw).with_context(|| {
+            format!(
+                "failed to read expert {expert} from GGUF tensor {:?}",
+                tensor.name
+            )
+        })?;
+        let storage = QStorage::from_data(Cow::Owned(raw), &Device::Cpu, tensor.dtype)?;
+        let matrix = QuantizedMatrix::new(QTensor::new(storage, (tensor.rows, tensor.columns))?)?;
         self.expert_cache
             .lock()
             .map_err(|_| anyhow::anyhow!("expert cache lock was poisoned"))?
-            .record_read_and_insert(name, expert, &matrix);
+            .record_read_and_insert(key, &matrix);
         Ok(matrix)
     }
 
@@ -805,16 +926,31 @@ mod tests {
             quantized.storage_size_in_bytes()
         );
         checkpoint.configure_expert_cache(1024 * 1024).unwrap();
-        let expert = checkpoint.load_expert_matrix("experts", 1).unwrap();
+        let experts = checkpoint.expert_tensor("experts").unwrap();
+        assert_eq!(experts.name(), "experts");
+        assert_eq!(experts.expert_count(), 2);
+        let expert = experts.load(1).unwrap();
         assert!(expert.storage_bytes() < quantized.storage_size_in_bytes());
         let actual = expert.forward(&input).unwrap().to_vec2::<f32>().unwrap();
         assert!((actual[0][0] - expected[0][0]).abs() < 2e-2);
-        checkpoint.load_expert_matrix("experts", 1).unwrap();
+        experts.load(1).unwrap();
         let stats = checkpoint.expert_cache_stats().unwrap();
         assert_eq!(stats.requests, 2);
         assert_eq!(stats.misses, 1);
         assert_eq!(stats.hits, 1);
         assert_eq!(stats.entries, 1);
         assert_eq!(stats.bytes_loaded, expert.storage_bytes() as u64);
+
+        checkpoint.mark_expert_cache_fully_resident().unwrap();
+        experts.load(1).unwrap();
+        let stats = checkpoint.expert_cache_stats().unwrap();
+        assert!(stats.fully_resident);
+        assert_eq!(stats.hits, 2);
+
+        experts.load(0).unwrap();
+        let stats = checkpoint.expert_cache_stats().unwrap();
+        assert!(!stats.fully_resident);
+        assert_eq!(stats.misses, 2);
+        assert_eq!(stats.entries, 2);
     }
 }

@@ -10,14 +10,14 @@ use clap::{ArgAction, Parser};
 use qwen_engine::{
     ExpertCacheStats, FullExpertWarmupMode, GenerationOptions, GgufCheckpoint, GgufModelIdentity,
     QuantizedRuntime,
-    profile::{HostInfo, ProcessDelta, ProcessSnapshot, SourceInfo},
-    qwen::QuantizedForwardTimings,
+    profile::{BuildInfo, HostInfo, ProcessDelta, ProcessSnapshot, SourceInfo},
+    qwen::QuantizedForwardTimingReport,
     tokenizer::ModelTokenizer,
     warm_all_experts,
 };
 use serde::{Deserialize, Serialize};
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Parser)]
 #[command(about = "Persistent multi-case benchmark for quantized Qwen inference")]
@@ -135,47 +135,9 @@ struct PerformanceInfo {
 }
 
 #[derive(Debug, Serialize)]
-struct QuantizedTimingReport {
-    wall_seconds: f64,
-    embedding_seconds: f64,
-    layer_seconds: Vec<f64>,
-    final_norm_seconds: f64,
-    lm_head_seconds: f64,
-    accounted_seconds: f64,
-    accounted_fraction: f64,
-}
-
-impl From<&QuantizedForwardTimings> for QuantizedTimingReport {
-    fn from(timings: &QuantizedForwardTimings) -> Self {
-        let accounted = timings.embedding
-            + timings.layers.iter().copied().sum::<std::time::Duration>()
-            + timings.final_norm
-            + timings.lm_head;
-        let wall = timings.wall.as_secs_f64();
-        Self {
-            wall_seconds: wall,
-            embedding_seconds: timings.embedding.as_secs_f64(),
-            layer_seconds: timings
-                .layers
-                .iter()
-                .map(|time| time.as_secs_f64())
-                .collect(),
-            final_norm_seconds: timings.final_norm.as_secs_f64(),
-            lm_head_seconds: timings.lm_head.as_secs_f64(),
-            accounted_seconds: accounted.as_secs_f64(),
-            accounted_fraction: if wall == 0. {
-                0.
-            } else {
-                accounted.as_secs_f64() / wall
-            },
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
 struct TimingInfo {
-    prefill: QuantizedTimingReport,
-    decode: QuantizedTimingReport,
+    prefill: QuantizedForwardTimingReport,
+    decode: QuantizedForwardTimingReport,
 }
 
 #[derive(Debug, Serialize)]
@@ -183,6 +145,7 @@ struct Record<'a> {
     schema_version: u32,
     timestamp_unix_ms: u128,
     source: &'a SourceInfo,
+    build: &'a BuildInfo,
     host: &'a HostInfo,
     model: &'a GgufModelIdentity,
     load: LoadInfo<'a>,
@@ -287,6 +250,11 @@ fn main() -> Result<()> {
     };
     let source = SourceInfo::detect();
     let host = HostInfo::detect(model_path);
+    let build = BuildInfo::detect(&host);
+    eprintln!(
+        "build: {} AVX2={} FMA={}, Candle/Rayon threads {}/{}",
+        build.target_arch, build.avx2, build.fma, build.candle_threads, build.rayon_threads
+    );
     let load_before = ProcessSnapshot::capture()?;
     let load_started = Instant::now();
     let checkpoint = GgufCheckpoint::open(model_path)?;
@@ -404,6 +372,7 @@ fn main() -> Result<()> {
                     .context("system clock is before the Unix epoch")?
                     .as_millis(),
                 source: &source,
+                build: &build,
                 host: &host,
                 model: &identity,
                 load: LoadInfo {
@@ -451,8 +420,8 @@ fn main() -> Result<()> {
                 expert_cache: result.metrics.expert_cache,
                 process: before.delta(&after),
                 timings: TimingInfo {
-                    prefill: (&result.metrics.prefill_profile).into(),
-                    decode: (&result.metrics.decode_profile).into(),
+                    prefill: result.metrics.prefill_profile.report(),
+                    decode: result.metrics.decode_profile.report(),
                 },
             };
             serde_json::to_writer(&mut output, &record)?;

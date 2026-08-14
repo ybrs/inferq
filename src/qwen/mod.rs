@@ -26,7 +26,11 @@ pub use quantized_deltanet::{QuantizedDeltaLayer, QuantizedDeltaState, Quantized
 pub use quantized_layer::{
     QuantizedFullLayer, QuantizedLayerOutput, QuantizedLayerTimings, QuantizedLinearLayer,
 };
-pub use quantized_model::{QuantizedForwardTimings, QuantizedModel, QuantizedModelState};
+pub use quantized_model::{
+    QuantizedForwardTimingReport, QuantizedForwardTimings, QuantizedLayerTimingReport,
+    QuantizedModel, QuantizedModelState, QuantizedOperationTimingReport,
+    QuantizedStageTimingReport,
+};
 pub use quantized_moe::{QuantizedMoeLayer, QuantizedMoeOutput, QuantizedMoeTimings};
 
 use std::time::Instant;

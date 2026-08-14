@@ -13,8 +13,8 @@ pub mod trace;
 
 pub use config::{LayerType, Qwen3NextConfig};
 pub use gguf::{
-    ExpertCacheStats, GgufCheckpoint, GgufModelIdentity, GgufSummary, GgufTensorInfo,
-    QuantizedEmbedding, QuantizedMatrix, inspect_gguf,
+    ExpertCacheStats, GgufCheckpoint, GgufExpertTensor, GgufModelIdentity, GgufSummary,
+    GgufTensorInfo, QuantizedEmbedding, QuantizedMatrix, inspect_gguf,
 };
 pub use loader::{Checkpoint, ModelSummary, TensorInfo};
 pub use residency::{

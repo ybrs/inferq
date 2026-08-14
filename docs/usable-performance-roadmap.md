@@ -352,11 +352,15 @@ JSONL artifact. Its manifest includes the greedy regression, 16-token decode,
 an exactly 32-token templated coding prompt, and sustained 128-token decode.
 
 The first complete `target-cpu=native` suite measured the exact 32-token TTFT
-at 6.20 seconds. The 128-token case decoded its 127 passes at 3.74 token/s,
-with 216,000/216,000 expert hits, zero physical inference reads, and 47,318.8
-MiB final RSS. The greedy `[284, 526]` regression passed. This crosses both
-stretch gates on the current host; the remaining qualification work is
-variance and conversational/tool correctness rather than basic throughput.
+at 6.20 seconds. Structured nested timing then identified the strided DeltaNet
+recurrence as 35% of sustained decode. Contiguous row traversal reduced that
+operation from 11.36 to 1.42 seconds over 127 passes. Together with resolved
+expert handles and disabled LRU bookkeeping after proven full residency, the
+same 128 generated IDs improved from 3.74 to 5.62 token/s and TTFT from 4.51
+to 3.15 seconds. The run retained 216,000/216,000 expert hits, zero physical
+inference reads, and 47,263.1 MiB RSS. This crosses both stretch gates on the
+current host; remaining qualification is variance and conversational/tool
+correctness rather than basic throughput.
 
 The next three bounded changes should be:
 
@@ -364,8 +368,8 @@ The next three bounded changes should be:
    persistent process.
 2. Validate multiple templated user/assistant turns, then add the official tool
    description/call subset needed by an agent harness.
-3. Profile native-build layer timings and prioritize the remaining prefill and
-   decode work only where it improves real agent workloads or memory headroom.
+3. Use schema-2 timing to evaluate fused expert compute and batched long-prompt
+   prefill only where they improve real agent workloads or memory headroom.
 
 Expert I/O is removed from the recommended pinned decode path. The critical
 path now moves to variance qualification and the tool-capable
