@@ -8,6 +8,7 @@ mod norm;
 mod quantized_attention;
 mod quantized_deltanet;
 mod quantized_layer;
+mod quantized_model;
 mod quantized_moe;
 
 pub use attention::{ReferenceAttentionState, reference_attention, reference_attention_step};
@@ -25,6 +26,7 @@ pub use quantized_deltanet::{QuantizedDeltaLayer, QuantizedDeltaState, Quantized
 pub use quantized_layer::{
     QuantizedFullLayer, QuantizedLayerOutput, QuantizedLayerTimings, QuantizedLinearLayer,
 };
+pub use quantized_model::{QuantizedForwardTimings, QuantizedModel, QuantizedModelState};
 pub use quantized_moe::{QuantizedMoeLayer, QuantizedMoeOutput, QuantizedMoeTimings};
 
 use std::time::Instant;

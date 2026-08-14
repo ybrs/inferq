@@ -54,6 +54,46 @@ pub struct QuantizedMatrix {
     storage_bytes: usize,
 }
 
+pub struct QuantizedEmbedding {
+    tensor: Arc<QTensor>,
+    rows: usize,
+    columns: usize,
+    storage_bytes: usize,
+}
+
+impl QuantizedEmbedding {
+    fn new(tensor: QTensor) -> Result<Self> {
+        ensure!(
+            matches!(
+                tensor.dtype(),
+                GgmlDType::Q4K | GgmlDType::Q5K | GgmlDType::Q6K | GgmlDType::Q8_0 | GgmlDType::F32
+            ),
+            "unsupported GGUF embedding dtype {:?}",
+            tensor.dtype()
+        );
+        let (rows, columns) = tensor.shape().dims2()?;
+        let storage_bytes = tensor.storage_size_in_bytes();
+        Ok(Self {
+            tensor: Arc::new(tensor),
+            rows,
+            columns,
+            storage_bytes,
+        })
+    }
+
+    pub fn shape(&self) -> [usize; 2] {
+        [self.rows, self.columns]
+    }
+
+    pub fn storage_bytes(&self) -> usize {
+        self.storage_bytes
+    }
+
+    pub fn forward(&self, token_ids: &Tensor) -> Result<Tensor> {
+        Ok(self.tensor.embedding(token_ids)?)
+    }
+}
+
 impl std::fmt::Debug for QuantizedMatrix {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("QuantizedMatrix")
@@ -202,6 +242,27 @@ impl GgufCheckpoint {
             .read(&mut *file, self.content.tensor_data_offset, &Device::Cpu)
             .with_context(|| format!("failed to load GGUF matrix {name:?}"))?;
         QuantizedMatrix::new(tensor)
+    }
+
+    pub fn load_embedding(&self, name: &str) -> Result<QuantizedEmbedding> {
+        let info = self
+            .content
+            .tensor_infos
+            .get(name)
+            .with_context(|| format!("GGUF is missing tensor {name:?}"))?;
+        ensure!(
+            info.shape.rank() == 2,
+            "GGUF tensor {name:?} has shape {:?}, expected an embedding matrix",
+            info.shape
+        );
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|_| anyhow::anyhow!("GGUF file lock was poisoned"))?;
+        let tensor = info
+            .read(&mut *file, self.content.tensor_data_offset, &Device::Cpu)
+            .with_context(|| format!("failed to load GGUF embedding {name:?}"))?;
+        QuantizedEmbedding::new(tensor)
     }
 
     /// Load one matrix from a GGUF tensor shaped `[experts, rows, columns]`.
@@ -408,6 +469,26 @@ mod tests {
             QuantizedMatrix::new(QTensor::quantize(&weights, GgmlDType::Q4K).unwrap()).unwrap();
         let input = Tensor::zeros((1, 128), DType::F32, &Device::Cpu).unwrap();
         assert!(matrix.forward(&input).is_err());
+    }
+
+    #[test]
+    fn direct_embedding_matches_dequantized_rows() {
+        let values: Vec<f32> = (0..4 * 256)
+            .map(|index| (index as f32 % 19. - 9.) / 8.)
+            .collect();
+        let weights = Tensor::from_vec(values, (4, 256), &Device::Cpu).unwrap();
+        let tensor = QTensor::quantize(&weights, GgmlDType::Q8_0).unwrap();
+        let expected = tensor
+            .dequantize(&Device::Cpu)
+            .unwrap()
+            .index_select(&Tensor::new(&[1u32, 3], &Device::Cpu).unwrap(), 0)
+            .unwrap()
+            .to_vec2::<f32>()
+            .unwrap();
+        let embedding = QuantizedEmbedding::new(tensor).unwrap();
+        let ids = Tensor::new(&[1u32, 3], &Device::Cpu).unwrap();
+        let actual = embedding.forward(&ids).unwrap().to_vec2::<f32>().unwrap();
+        assert_eq!(actual, expected);
     }
 
     #[test]

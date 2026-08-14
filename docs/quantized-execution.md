@@ -130,3 +130,27 @@ At the second cached position the attention mixer RMSE was `0.00439`; the
 quantized and BF16 sessions both reused their first-step keys and values. Both
 decoder layer types have now crossed their isolated correctness gate. The next
 work is a 48-layer runtime with quantized embedding, final norm, and LM head.
+
+## End-to-end GGUF inference
+
+The first complete runtime now connects the Q8_0 token embedding, all 48 mixed
+decoder layers and their persistent states, the final norm, and Q6_K LM head.
+It uses the Hugging Face directory only for `config.json` and `tokenizer.json`:
+
+```bash
+RUSTFLAGS='-C target-cpu=native' cargo build --release --bin gguf_infer
+
+./target/release/gguf_infer \
+  --model /data/projects/localllm/models/Qwen3-Coder-Next-UD-Q4_K_M.gguf \
+  --tokenizer-model /data/projects/localllm/models/Qwen3-Coder-Next-SafeTensors \
+  --prompt a \
+  --max-new-tokens 2
+```
+
+Prompt `a` produced `[284, 526]` (`" = int"`), exactly matching the existing
+BF16 regression. With pages left warm by the first run, a new process loaded
+resident weights in `1.89 s` and prefetched the first token in `0.427 s`
+(`2.34 token/s`). The next decode pass took `20.3 s` because it routed to a new
+set of cold expert pages. This is end-to-end correct but not yet sustained
+usable performance: persistent execution plus expert residency/census is now
+the immediate bottleneck.

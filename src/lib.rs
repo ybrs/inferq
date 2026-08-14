@@ -11,6 +11,8 @@ pub mod tokenizer;
 pub mod trace;
 
 pub use config::{LayerType, Qwen3NextConfig};
-pub use gguf::{GgufCheckpoint, GgufSummary, GgufTensorInfo, QuantizedMatrix, inspect_gguf};
+pub use gguf::{
+    GgufCheckpoint, GgufSummary, GgufTensorInfo, QuantizedEmbedding, QuantizedMatrix, inspect_gguf,
+};
 pub use loader::{Checkpoint, ModelSummary, TensorInfo};
 pub use runtime::{GenerationMetrics, GenerationOptions, GenerationResult, Runtime};

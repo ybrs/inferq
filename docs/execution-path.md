@@ -89,7 +89,7 @@ Direct GGUF matrix execution and selected-expert range loading are now
 implemented as the first Stage 2B boundary; see
 [quantized-execution.md](quantized-execution.md). Direct routed MoE and one
 complete layer of each type now match their BF16 comparison gates, including a
-two-step full-attention KV-cache comparison. A complete GGUF model runtime and
-tokenizer construction from GGUF metadata are not yet implemented. Embedding,
-LM head, and whole-model state assembly remain before end-to-end GGUF
-generation.
+two-step full-attention KV-cache comparison. The first complete GGUF runtime is
+also operational and matches the two-token BF16 regression. It currently uses
+the Hugging Face directory for config/tokenizer assets and needs persistent
+expert residency before sustained decode is usable.

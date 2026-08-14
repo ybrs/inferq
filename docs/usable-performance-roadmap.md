@@ -305,7 +305,11 @@ DeltaNet integration is now complete as well: the whole quantized linear layer
 matched BF16 routing, produced output RMSE 0.00193, and took 11.0 ms warm. Full
 attention is now complete too: layer 3 matched BF16 routing, produced output
 RMSE 0.0107, took 7.79 ms warm, and passed a two-step persistent-KV comparison.
-Whole-model assembly is the next open part of item 3 below.
+Whole-model assembly is now operational: prompt `a` produced the expected
+two-token sequence `[284, 526]`. Warm prefill reached 2.34 token/s, but the next
+decode encountered new cold expert pages and took 20.3 seconds. Persistent
+residency and real-routing census are therefore the next open critical-path
+work.
 
 The next three bounded changes should be:
 

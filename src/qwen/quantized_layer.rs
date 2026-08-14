@@ -190,7 +190,7 @@ impl<'a> QuantizedFullLayer<'a> {
 
 /// GGUF conversion stores ordinary RMSNorm weights with the `1 + weight`
 /// adjustment already applied.
-fn gguf_rms_norm(xs: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
+pub(super) fn gguf_rms_norm(xs: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
     let xs = xs.to_dtype(DType::F32)?;
     let variance = xs.sqr()?.mean_keepdim(D::Minus1)?;
     Ok(xs
