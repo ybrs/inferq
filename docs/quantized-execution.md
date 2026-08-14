@@ -44,3 +44,27 @@ expert buffers. The next integration step is one complete quantized layer:
 3. handle GGUF DeltaNet's split `attn_qkv`/`attn_gate` representation;
 4. compare layer output and selected expert IDs with the BF16 oracle;
 5. promote the path to a complete runtime only after that comparison passes.
+
+## Real routed MoE checkpoint
+
+`QuantizedMoeLayer` is the next integrated slice. It keeps the real F32 router
+and quantized shared-expert weights resident, runs learned top-k routing, and
+loads only the selected gate/up/down expert matrices. Compare it with the BF16
+oracle using the same deterministic hidden vector:
+
+```bash
+RUSTFLAGS='-C target-cpu=native' cargo build --release --bin gguf_moe
+
+./target/release/gguf_moe \
+  --model /data/projects/localllm/models/Qwen3-Coder-Next-UD-Q4_K_M.gguf \
+  --reference-model /data/projects/localllm/models/Qwen3-Coder-Next-SafeTensors \
+  --layer 0 \
+  --top-k 10
+```
+
+On the local checkpoints, all ten selected expert IDs matched. Quantized versus
+BF16 MoE output had maximum absolute error 0.00303 and RMSE 0.00077. With the
+selected expert pages warm, the quantized MoE sublayer took 6.4 ms; a prior
+cold-page run took roughly 250 ms, of which 244 ms was expert loading and only
+3.2 ms expert compute. This confirms both the direct-kernel path and the need
+for a persistent page-cache/residency strategy.

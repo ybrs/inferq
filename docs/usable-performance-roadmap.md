@@ -296,6 +296,13 @@ naive predictors or synthetic locality assumptions can lose end-to-end.
 
 ## Immediate implementation sequence
 
+Implementation status on 2026-08-14: the versioned profiling artifact and
+stable cases are in place. Direct Q4_K/Q5_K/Q6_K/Q8_0/F32 projection execution,
+selected-expert byte-range loading, and a complete routed MoE sublayer are also
+working. Layer-0 MoE selected the same ten experts as the BF16 oracle and its
+output RMSE was 0.00077 on the deterministic comparison vector. Full
+attention/DeltaNet integration is the next open part of item 3 below.
+
 The next three bounded changes should be:
 
 1. Add structured profiling and a benchmark artifact schema, then capture a

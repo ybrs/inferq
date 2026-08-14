@@ -171,6 +171,18 @@ impl GgufCheckpoint {
         infos
     }
 
+    pub fn tensor_info(&self, name: &str) -> Option<GgufTensorInfo> {
+        let info = self.content.tensor_infos.get(name)?;
+        Some(GgufTensorInfo {
+            name: name.to_owned(),
+            dtype: format!("{:?}", info.ggml_dtype),
+            shape: info.shape.dims().to_vec(),
+            offset: self.content.tensor_data_offset + info.offset,
+            storage_bytes: info.shape.elem_count() / info.ggml_dtype.block_size()
+                * info.ggml_dtype.type_size(),
+        })
+    }
+
     pub fn load_matrix(&self, name: &str) -> Result<QuantizedMatrix> {
         let info = self
             .content
@@ -243,6 +255,28 @@ impl GgufCheckpoint {
             .with_context(|| format!("failed to read expert {expert} from GGUF tensor {name:?}"))?;
         let storage = QStorage::from_data(Cow::Owned(raw), &Device::Cpu, info.ggml_dtype)?;
         QuantizedMatrix::new(QTensor::new(storage, (rows, columns))?)
+    }
+
+    pub fn load_f32_vector(&self, name: &str) -> Result<Tensor> {
+        let info = self
+            .content
+            .tensor_infos
+            .get(name)
+            .with_context(|| format!("GGUF is missing tensor {name:?}"))?;
+        ensure!(
+            info.shape.rank() == 1 && info.ggml_dtype == GgmlDType::F32,
+            "GGUF tensor {name:?} has shape {:?} and dtype {:?}, expected an F32 vector",
+            info.shape,
+            info.ggml_dtype
+        );
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|_| anyhow::anyhow!("GGUF file lock was poisoned"))?;
+        let tensor = info
+            .read(&mut *file, self.content.tensor_data_offset, &Device::Cpu)
+            .with_context(|| format!("failed to load GGUF vector {name:?}"))?;
+        Ok(tensor.dequantize(&Device::Cpu)?)
     }
 }
 

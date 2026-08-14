@@ -5,10 +5,12 @@ mod deltanet;
 mod model;
 mod moe;
 mod norm;
+mod quantized_moe;
 
 pub use model::{ForwardTimingReport, ForwardTimings, Model, ModelState};
-pub use moe::{Route, top_k_routes};
+pub use moe::{Route, reference_routes, reference_sparse_moe, top_k_routes};
 pub use norm::{l2_normalize, rms_norm, rms_norm_gated};
+pub use quantized_moe::{QuantizedMoeLayer, QuantizedMoeOutput, QuantizedMoeTimings};
 
 use std::time::Instant;
 

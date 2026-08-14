@@ -53,6 +53,41 @@ pub fn top_k_routes(router_logits: &Tensor, k: usize, normalize: bool) -> Result
     Ok(routes)
 }
 
+pub fn reference_routes(
+    checkpoint: &Checkpoint,
+    config: &Qwen3NextConfig,
+    layer: usize,
+    xs: &Tensor,
+) -> Result<Vec<Route>> {
+    let mut timings = ForwardTimings::default();
+    let flat = xs.reshape((xs.elem_count() / config.hidden_size, config.hidden_size))?;
+    let name = format!("model.layers.{layer}.mlp.gate.weight");
+    let weight = load_profiled(checkpoint, &name, xs.device(), &mut timings)?;
+    let logits = linear_profiled(&flat, &weight, &mut timings)?;
+    top_k_routes(&logits, config.num_experts_per_tok, config.norm_topk_prob)
+}
+
+pub fn reference_sparse_moe(
+    checkpoint: &Checkpoint,
+    config: &Qwen3NextConfig,
+    layer: usize,
+    xs: &Tensor,
+) -> Result<Tensor> {
+    let token_count = xs.elem_count() / config.hidden_size;
+    let token_ids = vec![0; token_count];
+    let mut timings = ForwardTimings::default();
+    sparse_moe(
+        checkpoint,
+        config,
+        layer,
+        xs,
+        &token_ids,
+        0,
+        None,
+        &mut timings,
+    )
+}
+
 fn mlp(
     xs: &Tensor,
     gate: &Tensor,
