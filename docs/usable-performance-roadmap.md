@@ -1,0 +1,328 @@
+# Roadmap to usable performance
+
+## Outcome we are targeting
+
+Phase 1 established a correct, inspectable BF16 reference. It is suitable as a
+correctness oracle, but not as an interactive engine. The next objective is a
+warm, persistent CPU runtime that can complete real coding prompts without
+minute-long pauses between tokens.
+
+For the current host, define three performance gates:
+
+| Gate | Warm decode | Warm TTFT for a 32-token prompt | Meaning |
+| --- | ---: | ---: | --- |
+| Research-usable | at least 0.5 token/s | at most 60 s | Routing and workload experiments stop being prohibitively slow. |
+| Agent-usable | at least 1 token/s | at most 30 s | Slow, but practical for unattended coding-agent tasks. |
+| Stretch | at least 2 tokens/s | at most 15 s | Interactive enough to inspect and steer regularly. |
+
+These are project gates, not promises. Every number must come from the
+repeatable benchmark harness and retain the exact greedy-token correctness
+gate. A persistent session is the primary operating mode; cold startup from a
+rotational disk is reported separately.
+
+## Measured starting point
+
+The current reference path runs the official BF16 SafeTensors checkpoint and
+promotes every matrix multiplication to F32 because Candle CPU does not provide
+BF16 matmul.
+
+On 2026-08-14, prompt `a` produced the same first greedy token as the local
+llama.cpp Q4_K_M checkpoint. The relevant measurements were:
+
+| Path | Result |
+| --- | ---: |
+| Rust BF16 cold one-token prefill | 57.8 s |
+| Rust BF16 prefill after cache eviction | 117.0 s |
+| Rust BF16 cached decode pass | 63.9 s/token |
+| llama.cpp Q4 model load/repack | 277.7 s |
+| llama.cpp Q4 token evaluation | 49.6 s/token |
+
+The 12-token raw prompt tested later took 239.3 seconds to prefill, followed by
+29.7 seconds for its one actual decode pass. These measurements are
+page-cache-sensitive and are smoke-test baselines rather than stable
+benchmarks.
+
+## Current hardware constraints
+
+The development host is materially different from the high-bandwidth systems
+used by several reference projects:
+
+- Intel Core i7-6700: 4 physical cores, 8 threads, AVX2/FMA, no AVX-512;
+- 62 GiB RAM and 32 GiB swap;
+- 8 MiB shared L3 cache;
+- model storage on a rotational SATA disk, exposed as Btrfs at `/data`;
+- official BF16 checkpoint: approximately 160 GB;
+- local Q4_K_M GGUF: 45.9 GiB.
+
+The 45.9 GiB GGUF can plausibly coexist with runtime state inside 62 GiB RAM if
+we execute it directly. It cannot coexist comfortably with a second 27+ GiB
+repacked copy, which is what the observed llama.cpp CPU-repack path attempted;
+that run filled swap. Avoiding expanded or duplicate weight representations is
+therefore both a speed and a correctness-of-operation requirement.
+
+The rotational disk also changes the expected storage design. Randomly reading
+ten experts per layer from HDD cannot be the steady-state decode path. The
+initial exact strategy is:
+
+1. keep the compact quantized model mmap-backed;
+2. avoid whole-weight dequantization and duplicate repack buffers;
+3. use the OS page cache first;
+4. keep the inference process alive between requests;
+5. measure residency and page faults before adding an explicit cache.
+
+NVMe-oriented O_DIRECT, io_uring, and asynchronous expert streaming remain a
+separate hardware-gated track.
+
+## Lessons from related projects
+
+### Flash-MoE
+
+[Flash-MoE](https://github.com/danveloper/flash-moe) streams only selected
+experts from SSD, uses per-expert packed files, fuses dequantization with GEMV,
+uses BLAS for the Gated DeltaNet recurrence, and reports that trusting the OS
+page cache beat its custom caches. Its negative experiments are equally useful:
+compression, speculative expert prediction, explicit prefetch, and mmap of cold
+expert files all lost in its tested pipeline.
+
+Adopt now:
+
+- selected-expert execution rather than materializing all experts;
+- a one-time expert-local packing format;
+- fused dequantization and dot product;
+- BLAS or vectorized DeltaNet operations;
+- OS page cache as the first cache implementation;
+- explicit experiment logs including discarded approaches.
+
+Do not extrapolate its throughput. Its M3 Max has approximately 400 GB/s unified
+memory bandwidth, a 17.5 GB/s SSD, and GPU compute. This host has neither that
+memory system nor an SSD.
+
+### Pulsar
+
+[Pulsar](https://github.com/giannisanni/pulsar) keeps routing and other
+decision-making weights resident, streams routed experts, records a warm expert
+census, and uses the census to populate resident tiers on later runs. It also
+separates prefill GEMM from memory-bound one-token decode and treats
+teacher-forced/reference agreement as a release gate.
+
+Adopt now:
+
+- separate resident decision weights from routed expert storage;
+- preserve distinct prefill and decode kernels;
+- record per-layer expert popularity in a versioned sidecar;
+- distinguish cold-census and sustained warm measurements;
+- keep deterministic and teacher-forced comparison tools.
+
+Its reported throughput depends on CUDA GPUs and PCIe placement. The tiering
+concept transfers; the absolute numbers and kernels do not.
+
+### Micro-Expert-Router
+
+[Micro-Expert-Router](https://github.com/randyap8-wq/Micro-Expert-Router-SSD-Streamed-MoE-MER)
+is the closest CPU-oriented reference. It uses layer-qualified expert blobs,
+page-aligned buffers, optional O_DIRECT/io_uring, a bounded shared Rayon pool,
+real learned routing, and separate synthetic versus full-transformer benchmark
+claims. Its documented Qwen run shows why measured cache behavior matters: a
+25% expert cache achieved about 72% hits and 0.55 token/s, while halving cache
+capacity reduced learned-routing hits to about 53% and decode to 0.33 token/s.
+Its synthetic routing had predicted a much higher hit rate and did not transfer.
+
+Adopt now:
+
+- layer-qualified expert identities;
+- real model routing in every performance qualification;
+- a bounded, persistent worker pool with explicit thread-count experiments;
+- cache hit/miss, bytes-read, and I/O-stall telemetry;
+- fail-closed execution modes and explicit fallback reporting;
+- page-aligned expert blobs as an optional internal format.
+
+Defer O_DIRECT and io_uring until the model is on actual NVMe. On this HDD they
+would bypass the page cache that makes warm execution possible.
+
+### GdsLLM
+
+[GdsLLM](https://github.com/rscunha13/gdsllm) demonstrates direct NVMe-to-VRAM
+DMA, selective expert loading, and fused dequantization/GEMV. Its Qwen path
+loads ten of 512 experts rather than an entire layer, which is the same central
+data-reduction opportunity present here.
+
+Adopt now:
+
+- make selected expert ranges directly addressable;
+- fuse dequantization with compute;
+- represent weight residency and transfer as scheduler-visible events.
+
+GPUDirect Storage itself is out of scope for the current CPU-only host. It
+becomes relevant only if the project later gains a suitable NVIDIA GPU and
+NVMe device.
+
+## Critical path
+
+### Stage 2A: reproducible profiling
+
+Before changing kernels, make the current cost visible.
+
+Deliverables:
+
+- structured JSON benchmark output with model revision, host, thread count,
+  cold/warm status, prompt tokens, generated tokens, and correctness result;
+- timings split into weight load/conversion, GEMV/GEMM, normalization, router,
+  top-k, routed experts, shared expert, DeltaNet, full attention, and LM head;
+- allocation counts and peak RSS;
+- major/minor faults and bytes read where the OS exposes them;
+- `perf stat` capture for cycles, instructions, cache misses, faults, and context
+  switches;
+- stable one-token, 12-token prefill, and 16-token decode benchmark cases.
+
+Exit gate: component timings explain at least 95% of wall time and repeated warm
+runs have a documented variance band.
+
+### Stage 2B: direct quantized execution
+
+This is the highest-leverage stage. Stop expanding BF16 weights to F32.
+
+Deliverables:
+
+- executable tensor views for the existing GGUF Q4_K, Q5_K, Q6_K, Q8_0, and
+  F32 tensors used by this exact checkpoint;
+- a `QuantizedMatrix`/GEMV boundary that cannot accidentally dequantize a whole
+  matrix;
+- scalar reference dequant-dot kernels with block-level tests;
+- a narrow llama.cpp/ggml kernel adapter as the initial fast implementation and
+  performance oracle, if its integration is shorter than a correct native AVX2
+  implementation;
+- direct execution of embedding, router, shared expert, selected experts,
+  attention/DeltaNet projections, and LM head from quantized weights;
+- per-layer and final-logit comparisons against the BF16 reference.
+
+The initial FFI bridge is allowed to get a working quantized path quickly. The
+Rust API owns scheduling and state; FFI should expose only well-bounded
+quantized dot/GEMV operations. Native Rust AVX2 can replace it incrementally.
+
+Exit gate: identical greedy IDs on the regression prompts, no full-matrix F32
+temporary, peak RSS below 55 GiB, and at least a 4x warm decode improvement over
+the BF16 baseline.
+
+### Stage 3: specialized one-token decode
+
+Make decode a fixed-shape execution plan instead of a series of generic tensor
+operations.
+
+Deliverables:
+
+- preallocated hidden, projection, expert, routing, attention, and DeltaNet
+  scratch buffers;
+- no steady-state heap allocation;
+- persistent worker pool, benchmarking 4 physical workers against 8 SMT
+  workers and smaller counts;
+- AVX2/FMA quantized GEMV for the dominant checkpoint formats;
+- fused gate/up traversal, SwiGLU, down projection, route weighting, and
+  accumulation where measurement supports it;
+- specialized router top-k and final LM-head scan;
+- vectorized or BLAS-backed DeltaNet state scale/GEMV/rank-one update;
+- incremental text output after every generated token.
+
+Exit gate: research-usable warm decode of at least 0.5 token/s while preserving
+the greedy-token regression suite.
+
+### Stage 4: prefill path
+
+The current implementation repeats selected-expert loading and computation per
+prompt token. Prefill needs its own batched plan.
+
+Deliverables:
+
+- batch GEMM kernels or a proven BLAS/ggml path for dense projections;
+- group prompt tokens by routed expert so one expert view serves all assigned
+  tokens;
+- chunked causal DeltaNet prefill with equivalence against the recurrent
+  reference;
+- batched full attention and LM-head work only for required output positions;
+- tokenizer/chat-template timing separated from model prefill.
+
+Exit gate: a warm 32-token prompt reaches TTFT below 60 seconds. Continue toward
+30 seconds after decode has crossed 0.5 token/s.
+
+### Stage 5: residency, persistence, and packaging
+
+Usability requires keeping expensive state alive.
+
+Deliverables:
+
+- an interactive process that loads once and retains model mappings and session
+  state across turns;
+- an optional model warmup with explicit progress and cancellation;
+- residency/page-fault telemetry for non-expert weights and expert pages;
+- a per-layer routing census sidecar keyed by model hash and quantization;
+- optional expert-local `qcpu` repack files with contiguous gate/up/down blocks,
+  alignment, checksums, and source-model identity;
+- page-cache-first hot expert ordering or prefaulting, evaluated without
+  duplicating the entire 46 GiB model in heap memory;
+- proper tokenizer chat-template application and newline-safe streaming CLI.
+
+Exit gate: agent-usable warm decode of at least 1 token/s and warm TTFT below 30
+seconds, with the process remaining below the memory budget during a 128-token
+generation.
+
+### Stage 6: storage experiments, gated by hardware
+
+On the current HDD, benchmark only buffered/page-cache-backed execution. If the
+model moves to NVMe, add controlled alternatives:
+
+- buffered `pread` versus mmap faults versus O_DIRECT;
+- io_uring registered fixed buffers and queue-depth sweeps;
+- explicit RAM expert cache sizes;
+- hot expert pinning from real routing census data;
+- I/O/compute overlap only when it reduces end-to-end token time;
+- per-expert contiguous packing versus fused GGUF tensor slicing.
+
+Reject any storage change that improves synthetic I/O while reducing full-model
+decode throughput. Record cold and sustained-warm results separately.
+
+### Stage 7: exact workload-aware placement
+
+After the exact quantized engine is usable, collect routing traces from actual
+coding-agent work. Use them only for output-preserving changes first:
+
+- expert disk/layout ordering;
+- hot-page warming;
+- cache sizing;
+- thread scheduling;
+- high-precision prefetch with extra bytes measured.
+
+Speculative routing, fewer active experts, masking, pruning, and distillation
+remain later approximate tracks. Flash-MoE and MER both provide evidence that
+naive predictors or synthetic locality assumptions can lose end-to-end.
+
+## Immediate implementation sequence
+
+The next three bounded changes should be:
+
+1. Add structured profiling and a benchmark artifact schema, then capture a
+   clean warm/cold baseline without another engine competing for page cache.
+2. Add GGUF quantized tensor views plus scalar block-dequantization tests, and
+   execute one projection without whole-matrix F32 materialization.
+3. Integrate a fast Q4_K/Q5_K/Q6_K/Q8_0 GEMV path, initially through a narrow
+   ggml adapter if appropriate, then bring up one complete layer and compare it
+   against BF16 before switching the full model.
+
+This ordering attacks the measured weight representation and memory-pressure
+problem first. An expert cache, io_uring, speculative routing, server API, and
+approximate expert counts do not belong on the critical path yet.
+
+## Benchmark and correctness contract
+
+Every accepted performance change must report:
+
+- Git commit and dirty status;
+- exact model file and revision/hash;
+- quantization and internal packing version;
+- CPU, RAM, storage type, filesystem, compiler, and thread count;
+- whether the run is cold, warm, or persistent-session steady state;
+- prompt/decode token counts and raw durations;
+- TTFT, prefill tokens/s, decode tokens/s, RSS, faults, and bytes read;
+- greedy token IDs and numerical comparison result;
+- routing-trace equivalence for changes touching MoE.
+
+The BF16 implementation remains the readable oracle even after it stops being
+the default execution path.

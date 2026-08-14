@@ -31,6 +31,16 @@ Performance is not the primary objective in Phase 1. Correctness and observabili
 
 ## Status
 
-Experimental. No code yet — documentation and architecture planning only.
+Phase 1 reference implementation is present. It loads and validates sharded
+SafeTensors checkpoints, uses the model tokenizer, executes full-attention,
+Gated DeltaNet, and MoE layers, maintains decode state, supports greedy/basic
+sampling, emits routing traces, compares logits, and runs a coding-workload
+benchmark. It is intentionally scalar and slow.
 
-See the two docs above for milestones and design.
+Start with [the execution-path guide](docs/execution-path.md). Run all offline
+checks with `./scripts/validate.sh`. Full-checkpoint differential validation is
+opt-in because the model weights and Transformers reference artifacts are not
+stored in this repository.
+
+The measured post-Phase-1 optimization sequence is documented in the
+[roadmap to usable performance](docs/usable-performance-roadmap.md).
