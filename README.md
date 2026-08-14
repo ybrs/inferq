@@ -21,6 +21,9 @@ Performance is not the primary objective in Phase 1. Correctness and observabili
 ## Repo contents
 
 * `phase-1-qwen-rust-inference.md` – Phase 1 plan: milestones from loading weights to autoregressive decode, routing instrumentation, and benchmark harness.
+* `docs/profiling.md` – versioned profiling artifacts, stable micro-cases, and hardware-counter capture.
+* `docs/quantized-execution.md` – direct compressed GGUF projections and selected-expert range loading.
+* `docs/usable-performance-roadmap.md` – measured baseline and the critical path from the reference engine to usable CPU performance.
 * `qwen-cpu-inference-target-architecture.md` – Long-term target architecture, design principles, language split Rust/Python/C++, and the 14-phase roadmap toward workload-aware specialization.
 
 ## Development focus

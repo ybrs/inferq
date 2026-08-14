@@ -106,6 +106,7 @@ fn main() -> Result<()> {
             timings
                 .layers
                 .iter()
+                .map(|layer| layer.wall)
                 .sum::<std::time::Duration>()
                 .as_secs_f64(),
             timings.lm_head.as_secs_f64()

@@ -8,7 +8,7 @@ use candle_core::{IndexOp, Tensor};
 
 use crate::{
     Checkpoint,
-    qwen::{Model, ModelState},
+    qwen::{ForwardTimings, Model, ModelState},
     sampling::{Sampler, SamplingConfig},
     tokenizer::ModelTokenizer,
     trace::RoutingTrace,
@@ -39,6 +39,9 @@ pub struct GenerationMetrics {
     pub generated_tokens: usize,
     pub prefill_wall_time: Duration,
     pub decode_wall_time: Duration,
+    pub time_to_first_token: Duration,
+    pub prefill_profile: ForwardTimings,
+    pub decode_profile: ForwardTimings,
 }
 
 impl GenerationMetrics {
@@ -95,26 +98,34 @@ impl Runtime {
     }
 
     pub fn prefill(&mut self, tokens: &[u32]) -> Result<Tensor> {
+        self.prefill_profiled(tokens).map(|(logits, _)| logits)
+    }
+
+    pub fn prefill_profiled(&mut self, tokens: &[u32]) -> Result<(Tensor, ForwardTimings)> {
         ensure!(!tokens.is_empty(), "prompt token sequence is empty");
         self.reset();
-        let (logits, _) = if let Some(trace) = self.trace.as_mut() {
+        let result = if let Some(trace) = self.trace.as_mut() {
             self.model
                 .forward(tokens, &mut self.state, Some(trace.as_mut()))?
         } else {
             self.model.forward(tokens, &mut self.state, None)?
         };
-        Ok(logits)
+        Ok(result)
     }
 
     pub fn decode(&mut self, token: u32) -> Result<Tensor> {
+        self.decode_profiled(token).map(|(logits, _)| logits)
+    }
+
+    pub fn decode_profiled(&mut self, token: u32) -> Result<(Tensor, ForwardTimings)> {
         ensure!(self.state.position > 0, "decode requires a prior prefill");
-        let (logits, _) = if let Some(trace) = self.trace.as_mut() {
+        let result = if let Some(trace) = self.trace.as_mut() {
             self.model
                 .forward(&[token], &mut self.state, Some(trace.as_mut()))?
         } else {
             self.model.forward(&[token], &mut self.state, None)?
         };
-        Ok(logits)
+        Ok(result)
     }
 
     pub fn generate(
@@ -129,14 +140,17 @@ impl Runtime {
         );
         let mut sampler = Sampler::new(options.sampling.clone())?;
         let prefill_started = Instant::now();
-        let mut logits = self.prefill(&prompt_token_ids)?;
+        let (mut logits, prefill_profile) = self.prefill_profiled(&prompt_token_ids)?;
         let prefill_wall_time = prefill_started.elapsed();
         let decode_started = Instant::now();
+        let mut decode_profile = ForwardTimings::default();
+        let mut time_to_first_token = None;
         let mut generated = Vec::with_capacity(options.max_new_tokens);
         for step in 0..options.max_new_tokens {
             let last = logits.i(logits.dim(0)? - 1)?.to_vec1::<f32>()?;
             let token = sampler.sample(&last)?;
             generated.push(token);
+            time_to_first_token.get_or_insert_with(|| prefill_started.elapsed());
             let is_config_eos = self
                 .model
                 .config()
@@ -149,7 +163,9 @@ impl Runtime {
             {
                 break;
             }
-            logits = self.decode(token)?;
+            let (next_logits, profile) = self.decode_profiled(token)?;
+            decode_profile.accumulate(&profile);
+            logits = next_logits;
         }
         if let Some(trace) = &mut self.trace {
             trace.flush()?;
@@ -165,6 +181,9 @@ impl Runtime {
                 generated_tokens: generated.len(),
                 prefill_wall_time,
                 decode_wall_time,
+                time_to_first_token: time_to_first_token.unwrap_or(prefill_wall_time),
+                prefill_profile,
+                decode_profile,
             },
             prompt_token_ids,
             generated_token_ids: generated,

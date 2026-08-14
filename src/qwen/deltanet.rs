@@ -3,7 +3,9 @@ use candle_core::{DType, Tensor};
 
 use crate::{Checkpoint, Qwen3NextConfig};
 
-use super::{linear, norm::rms_norm_gated};
+use super::{
+    linear_profiled, load_f32_profiled, load_profiled, model::ForwardTimings, norm::rms_norm_gated,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct DeltaState {
@@ -100,6 +102,7 @@ pub(crate) fn forward(
     layer: usize,
     xs: &Tensor,
     state: &mut DeltaState,
+    timings: &mut ForwardTimings,
 ) -> Result<Tensor> {
     let dev = xs.device();
     let p = format!("model.layers.{layer}.linear_attn");
@@ -114,26 +117,28 @@ pub(crate) fn forward(
     let conv_dim = key_dim * 2 + value_dim;
     let kernel = config.linear_conv_kernel_dim;
 
-    let qkvz_weight = checkpoint.load(&format!("{p}.in_proj_qkvz.weight"), dev)?;
-    let ba_weight = checkpoint.load(&format!("{p}.in_proj_ba.weight"), dev)?;
-    let projected = linear(xs, &qkvz_weight)?
+    let qkvz_weight = load_profiled(
+        checkpoint,
+        &format!("{p}.in_proj_qkvz.weight"),
+        dev,
+        timings,
+    )?;
+    let ba_weight = load_profiled(checkpoint, &format!("{p}.in_proj_ba.weight"), dev, timings)?;
+    let projected = linear_profiled(xs, &qkvz_weight, timings)?
         .reshape((seq, nk, kd * 2 + ratio * vd * 2))?
         .to_dtype(DType::F32)?
         .to_vec3::<f32>()?;
-    let projected_ba = linear(xs, &ba_weight)?
+    let projected_ba = linear_profiled(xs, &ba_weight, timings)?
         .reshape((seq, nk, ratio * 2))?
         .to_dtype(DType::F32)?
         .to_vec3::<f32>()?;
-    let conv_weight = checkpoint
-        .load_f32(&format!("{p}.conv1d.weight"), dev)?
+    let conv_weight = load_f32_profiled(checkpoint, &format!("{p}.conv1d.weight"), dev, timings)?
         .reshape((conv_dim, kernel))?
         .to_vec2::<f32>()?;
-    let a_log = checkpoint
-        .load_f32(&format!("{p}.A_log"), dev)?
-        .to_vec1::<f32>()?;
-    let dt_bias = checkpoint
-        .load_f32(&format!("{p}.dt_bias"), dev)?
-        .to_vec1::<f32>()?;
+    let a_log =
+        load_f32_profiled(checkpoint, &format!("{p}.A_log"), dev, timings)?.to_vec1::<f32>()?;
+    let dt_bias =
+        load_f32_profiled(checkpoint, &format!("{p}.dt_bias"), dev, timings)?.to_vec1::<f32>()?;
     ensure!(
         state.conv.len() == conv_dim * (kernel - 1),
         "invalid DeltaNet convolution state"
@@ -222,11 +227,11 @@ pub(crate) fn forward(
     // normalization, which matters for BF16 checkpoint comparisons.
     let output = Tensor::from_vec(output, (seq * nv, vd), dev)?.to_dtype(xs.dtype())?;
     let gates = Tensor::from_vec(gates, (seq * nv, vd), dev)?;
-    let norm_weight = checkpoint.load(&format!("{p}.norm.weight"), dev)?;
+    let norm_weight = load_profiled(checkpoint, &format!("{p}.norm.weight"), dev, timings)?;
     let output = rms_norm_gated(&output, &norm_weight, &gates, config.rms_norm_eps)?
         .reshape((seq, value_dim))?;
-    let out_weight = checkpoint.load(&format!("{p}.out_proj.weight"), dev)?;
-    Ok(linear(&output, &out_weight)?.reshape(xs.shape())?)
+    let out_weight = load_profiled(checkpoint, &format!("{p}.out_proj.weight"), dev, timings)?;
+    Ok(linear_profiled(&output, &out_weight, timings)?.reshape(xs.shape())?)
 }
 
 #[cfg(test)]

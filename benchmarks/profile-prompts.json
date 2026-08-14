@@ -1,0 +1,23 @@
+[
+  {
+    "name": "one-token-smoke",
+    "category": "profiling",
+    "prompt": "a",
+    "max_new_tokens": 1,
+    "expected_token_prefix": [284]
+  },
+  {
+    "name": "twelve-token-prefill",
+    "category": "profiling",
+    "prompt": "write me python function that checks if a string is a palindrome",
+    "max_new_tokens": 2,
+    "expected_token_prefix": [271, 8420]
+  },
+  {
+    "name": "sixteen-token-decode",
+    "category": "profiling",
+    "prompt": "a",
+    "max_new_tokens": 16,
+    "expected_token_prefix": [284, 526]
+  }
+]

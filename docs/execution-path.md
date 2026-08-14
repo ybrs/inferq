@@ -72,6 +72,9 @@ cargo run --release --bin routing_trace -- --model /models/Qwen3-Coder-Next \
 cargo run --release --bin bench -- --model /models/Qwen3-Coder-Next
 ```
 
+The profiling artifact schema, stable micro-cases, cache-state contract, and
+`perf stat` wrapper are documented in [profiling.md](profiling.md).
+
 Generate reference artifacts with `python/reference_logits.py`. Set
 `QWEN_MODEL_DIR` and `QWEN_REFERENCE_DIR` to include a full-model differential
 comparison in `scripts/validate.sh`.
@@ -82,7 +85,10 @@ Phase 1 uses the permitted SafeTensors path so the architecture can be made
 correct and observable first. GGUF v3 metadata and tensor inventories are also
 parsed and validated; this has been exercised against the local 46 GB
 `Qwen3-Coder-Next-UD-Q4_K_M.gguf` (F32/Q4K/Q5K/Q6K/Q8_0, 843 tensors).
-Quantized GGUF tensor execution and tokenizer construction from GGUF metadata
-are not yet implemented. That remaining work must account for GGUF's split
-Q/K/V, split expert gate/up tensors, optimized split QKV/Z DeltaNet layout, and
-direct `-exp(A_log)` representation rather than merely renaming tensors.
+Direct GGUF matrix execution and selected-expert range loading are now
+implemented as the first Stage 2B boundary; see
+[quantized-execution.md](quantized-execution.md). A complete GGUF model runtime
+and tokenizer construction from GGUF metadata are not yet implemented. That
+remaining work must account for GGUF's split Q/K/V, split expert gate/up
+tensors, optimized split QKV/Z DeltaNet layout, and direct `-exp(A_log)`
+representation rather than merely renaming tensors.

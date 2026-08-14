@@ -3,6 +3,7 @@
 pub mod config;
 pub mod gguf;
 pub mod loader;
+pub mod profile;
 pub mod qwen;
 pub mod runtime;
 pub mod sampling;
@@ -10,6 +11,6 @@ pub mod tokenizer;
 pub mod trace;
 
 pub use config::{LayerType, Qwen3NextConfig};
-pub use gguf::{GgufSummary, inspect_gguf};
+pub use gguf::{GgufCheckpoint, GgufSummary, GgufTensorInfo, QuantizedMatrix, inspect_gguf};
 pub use loader::{Checkpoint, ModelSummary, TensorInfo};
-pub use runtime::{GenerationOptions, GenerationResult, Runtime};
+pub use runtime::{GenerationMetrics, GenerationOptions, GenerationResult, Runtime};

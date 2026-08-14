@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::{cmp::Ordering, time::Instant};
 
 use anyhow::{Result, ensure};
 use candle_core::{DType, IndexOp, Tensor};
@@ -9,7 +9,7 @@ use crate::{
     trace::{RoutingRecord, RoutingTrace},
 };
 
-use super::{f32_tensor, linear};
+use super::{f32_tensor, linear_profiled, load_profiled, model::ForwardTimings};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Route {
@@ -53,18 +53,34 @@ pub fn top_k_routes(router_logits: &Tensor, k: usize, normalize: bool) -> Result
     Ok(routes)
 }
 
-fn mlp(xs: &Tensor, gate: &Tensor, up: &Tensor, down: &Tensor) -> Result<Tensor> {
-    let gate = ops::silu(&linear(xs, gate)?)?;
-    linear(&gate.broadcast_mul(&linear(xs, up)?)?, down).map_err(Into::into)
+fn mlp(
+    xs: &Tensor,
+    gate: &Tensor,
+    up: &Tensor,
+    down: &Tensor,
+    timings: &mut ForwardTimings,
+) -> Result<Tensor> {
+    let gate = ops::silu(&linear_profiled(xs, gate, timings)?)?;
+    linear_profiled(
+        &gate.broadcast_mul(&linear_profiled(xs, up, timings)?)?,
+        down,
+        timings,
+    )
+    .map_err(Into::into)
 }
 
-pub(crate) fn dense_mlp(checkpoint: &Checkpoint, layer: usize, xs: &Tensor) -> Result<Tensor> {
+pub(crate) fn dense_mlp(
+    checkpoint: &Checkpoint,
+    layer: usize,
+    xs: &Tensor,
+    timings: &mut ForwardTimings,
+) -> Result<Tensor> {
     let dev = xs.device();
     let p = format!("model.layers.{layer}.mlp");
-    let gate = checkpoint.load(&format!("{p}.gate_proj.weight"), dev)?;
-    let up = checkpoint.load(&format!("{p}.up_proj.weight"), dev)?;
-    let down = checkpoint.load(&format!("{p}.down_proj.weight"), dev)?;
-    mlp(xs, &gate, &up, &down)
+    let gate = load_profiled(checkpoint, &format!("{p}.gate_proj.weight"), dev, timings)?;
+    let up = load_profiled(checkpoint, &format!("{p}.up_proj.weight"), dev, timings)?;
+    let down = load_profiled(checkpoint, &format!("{p}.down_proj.weight"), dev, timings)?;
+    mlp(xs, &gate, &up, &down, timings)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -76,32 +92,53 @@ pub(crate) fn sparse_moe(
     token_ids: &[u32],
     token_offset: usize,
     mut trace: Option<&mut dyn RoutingTrace>,
+    timings: &mut ForwardTimings,
 ) -> Result<Tensor> {
     let dev = xs.device();
     let p = format!("model.layers.{layer}.mlp");
     let flat = xs.reshape((xs.elem_count() / config.hidden_size, config.hidden_size))?;
-    let router_weight = checkpoint.load(&format!("{p}.gate.weight"), dev)?;
-    let router_logits = linear(&flat, &router_weight)?;
+    let router_started = Instant::now();
+    let router_weight = load_profiled(checkpoint, &format!("{p}.gate.weight"), dev, timings)?;
+    let router_logits = linear_profiled(&flat, &router_weight, timings)?;
+    timings.router += router_started.elapsed();
+    let top_k_started = Instant::now();
     let routes = top_k_routes(
         &router_logits,
         config.num_experts_per_tok,
         config.norm_topk_prob,
     )?;
+    timings.top_k += top_k_started.elapsed();
     ensure!(
         routes.len() == token_ids.len(),
         "routing token count mismatch"
     );
 
+    let routed_started = Instant::now();
     let mut outputs = Vec::with_capacity(routes.len());
     for (token_index, route) in routes.iter().enumerate() {
         let x = flat.i(token_index)?.unsqueeze(0)?;
         let mut combined = Tensor::zeros((1, config.hidden_size), DType::F32, dev)?;
         for (&expert, &route_weight) in route.experts.iter().zip(&route.weights) {
             let expert_prefix = format!("{p}.experts.{expert}");
-            let gate = checkpoint.load(&format!("{expert_prefix}.gate_proj.weight"), dev)?;
-            let up = checkpoint.load(&format!("{expert_prefix}.up_proj.weight"), dev)?;
-            let down = checkpoint.load(&format!("{expert_prefix}.down_proj.weight"), dev)?;
-            let expert_out = mlp(&x, &gate, &up, &down)?.to_dtype(DType::F32)?;
+            let gate = load_profiled(
+                checkpoint,
+                &format!("{expert_prefix}.gate_proj.weight"),
+                dev,
+                timings,
+            )?;
+            let up = load_profiled(
+                checkpoint,
+                &format!("{expert_prefix}.up_proj.weight"),
+                dev,
+                timings,
+            )?;
+            let down = load_profiled(
+                checkpoint,
+                &format!("{expert_prefix}.down_proj.weight"),
+                dev,
+                timings,
+            )?;
+            let expert_out = mlp(&x, &gate, &up, &down, timings)?.to_dtype(DType::F32)?;
             combined = (combined + (expert_out * route_weight as f64)?)?;
         }
         outputs.push(combined);
@@ -116,14 +153,39 @@ pub(crate) fn sparse_moe(
             })?;
         }
     }
+    timings.routed_experts += routed_started.elapsed();
     let routed = Tensor::cat(&outputs, 0)?;
-    let shared_gate = checkpoint.load(&format!("{p}.shared_expert.gate_proj.weight"), dev)?;
-    let shared_up = checkpoint.load(&format!("{p}.shared_expert.up_proj.weight"), dev)?;
-    let shared_down = checkpoint.load(&format!("{p}.shared_expert.down_proj.weight"), dev)?;
-    let shared = mlp(&flat, &shared_gate, &shared_up, &shared_down)?.to_dtype(DType::F32)?;
-    let shared_selector = checkpoint.load(&format!("{p}.shared_expert_gate.weight"), dev)?;
-    let shared_selector = ops::sigmoid(&linear(&flat, &shared_selector)?.to_dtype(DType::F32)?)?;
+    let shared_started = Instant::now();
+    let shared_gate = load_profiled(
+        checkpoint,
+        &format!("{p}.shared_expert.gate_proj.weight"),
+        dev,
+        timings,
+    )?;
+    let shared_up = load_profiled(
+        checkpoint,
+        &format!("{p}.shared_expert.up_proj.weight"),
+        dev,
+        timings,
+    )?;
+    let shared_down = load_profiled(
+        checkpoint,
+        &format!("{p}.shared_expert.down_proj.weight"),
+        dev,
+        timings,
+    )?;
+    let shared =
+        mlp(&flat, &shared_gate, &shared_up, &shared_down, timings)?.to_dtype(DType::F32)?;
+    let shared_selector = load_profiled(
+        checkpoint,
+        &format!("{p}.shared_expert_gate.weight"),
+        dev,
+        timings,
+    )?;
+    let shared_selector =
+        ops::sigmoid(&linear_profiled(&flat, &shared_selector, timings)?.to_dtype(DType::F32)?)?;
     let out = (routed + shared.broadcast_mul(&shared_selector)?)?.to_dtype(xs.dtype())?;
+    timings.shared_expert += shared_started.elapsed();
     Ok(out.reshape(xs.shape())?)
 }
 

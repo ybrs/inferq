@@ -3,7 +3,7 @@ use candle_core::{DType, Tensor};
 
 use crate::{Checkpoint, Qwen3NextConfig};
 
-use super::linear;
+use super::{linear_profiled, load_f32_profiled, load_profiled, model::ForwardTimings};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AttentionState {
@@ -43,6 +43,7 @@ pub(crate) fn forward(
     xs: &Tensor,
     position: usize,
     state: &mut AttentionState,
+    timings: &mut ForwardTimings,
 ) -> Result<Tensor> {
     let dev = xs.device();
     let p = format!("model.layers.{layer}.self_attn");
@@ -57,26 +58,24 @@ pub(crate) fn forward(
         state.positions
     );
 
-    let q_weight = checkpoint.load(&format!("{p}.q_proj.weight"), dev)?;
-    let k_weight = checkpoint.load(&format!("{p}.k_proj.weight"), dev)?;
-    let v_weight = checkpoint.load(&format!("{p}.v_proj.weight"), dev)?;
-    let q_projected = linear(xs, &q_weight)?
+    let q_weight = load_profiled(checkpoint, &format!("{p}.q_proj.weight"), dev, timings)?;
+    let k_weight = load_profiled(checkpoint, &format!("{p}.k_proj.weight"), dev, timings)?;
+    let v_weight = load_profiled(checkpoint, &format!("{p}.v_proj.weight"), dev, timings)?;
+    let q_projected = linear_profiled(xs, &q_weight, timings)?
         .reshape((seq, nh, hd * 2))?
         .to_dtype(DType::F32)?
         .to_vec3::<f32>()?;
-    let mut keys = linear(xs, &k_weight)?
+    let mut keys = linear_profiled(xs, &k_weight, timings)?
         .reshape((seq, nkh, hd))?
         .to_dtype(DType::F32)?
         .to_vec3::<f32>()?;
-    let values = linear(xs, &v_weight)?
+    let values = linear_profiled(xs, &v_weight, timings)?
         .reshape((seq, nkh, hd))?
         .to_dtype(DType::F32)?
         .to_vec3::<f32>()?;
-    let q_norm = checkpoint
-        .load_f32(&format!("{p}.q_norm.weight"), dev)?
+    let q_norm = load_f32_profiled(checkpoint, &format!("{p}.q_norm.weight"), dev, timings)?
         .to_vec1::<f32>()?;
-    let k_norm = checkpoint
-        .load_f32(&format!("{p}.k_norm.weight"), dev)?
+    let k_norm = load_f32_profiled(checkpoint, &format!("{p}.k_norm.weight"), dev, timings)?
         .to_vec1::<f32>()?;
     let mut query = vec![vec![vec![0.; hd]; nh]; seq];
     let mut gate = vec![vec![vec![0.; hd]; nh]; seq];
@@ -139,8 +138,8 @@ pub(crate) fn forward(
         }
     }
     let output = Tensor::from_vec(output, (seq, nh * hd), dev)?;
-    let o_weight = checkpoint.load(&format!("{p}.o_proj.weight"), dev)?;
-    Ok(linear(&output, &o_weight)?.reshape(xs.shape())?)
+    let o_weight = load_profiled(checkpoint, &format!("{p}.o_proj.weight"), dev, timings)?;
+    Ok(linear_profiled(&output, &o_weight, timings)?.reshape(xs.shape())?)
 }
 
 #[cfg(test)]
