@@ -1,0 +1,9 @@
+/target/
+/target-*/
+*.bin
+*.gguf
+*.jsonl
+*.safetensors
+benchmark-results/
+reference-artifacts/
+__pycache__/

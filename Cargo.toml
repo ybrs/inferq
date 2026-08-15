@@ -1,0 +1,27 @@
+[package]
+name = "qwen-engine"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Inspectable CPU inference for Qwen3-Coder-Next"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+anyhow = "1.0.100"
+candle-core = "0.11.0"
+candle-nn = "0.11.0"
+clap = { version = "4.6.0", features = ["derive"] }
+half = "2.7.1"
+rand = "0.9.2"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+tokenizers = { version = "0.22.2", default-features = false, features = ["onig"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3.23.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

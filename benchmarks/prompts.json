@@ -1,0 +1,62 @@
+[
+  {
+    "name": "rust-parser",
+    "category": "short-code-generation",
+    "prompt": "Write a Rust function that parses a comma-separated list of signed integers without panicking and returns descriptive errors.",
+    "max_new_tokens": 96
+  },
+  {
+    "name": "python-regression-test",
+    "category": "test-writing",
+    "prompt": "Given a Python function normalize_path(path), write pytest cases for empty paths, dot segments, parent segments, and Unicode names.",
+    "max_new_tokens": 96
+  },
+  {
+    "name": "borrow-checker-diagnosis",
+    "category": "compiler-failure-diagnosis",
+    "prompt": "Explain and fix this Rust error: cannot borrow `items` as mutable because it is also borrowed as immutable inside a loop over items.iter().",
+    "max_new_tokens": 96
+  },
+  {
+    "name": "shell-find-large-files",
+    "category": "shell-interaction",
+    "prompt": "Give a safe shell command to list the twenty largest regular files beneath the current directory without crossing filesystems.",
+    "max_new_tokens": 64
+  },
+  {
+    "name": "git-review",
+    "category": "source-editing",
+    "prompt": "Review a hypothetical git diff that replaces checked arithmetic with wrapping arithmetic in a billing total. Explain the risk and propose a focused patch and regression test.",
+    "max_new_tokens": 96
+  },
+  {
+    "name": "task-update",
+    "category": "mcp-task-management",
+    "prompt": "Produce a concise task-manager update: implementation is complete, unit tests pass, integration testing is blocked on access to a staging database, and the next action belongs to the infrastructure team.",
+    "max_new_tokens": 64
+  },
+  {
+    "name": "api-refactor",
+    "category": "refactoring",
+    "prompt": "Refactor a Rust API that accepts five booleans into a typed options structure while preserving source compatibility for one release. Include a migration example.",
+    "max_new_tokens": 128
+  },
+  {
+    "name": "failing-async-test",
+    "category": "test-failure-diagnosis",
+    "prompt": "A Tokio test passes alone but intermittently fails in the full suite because all tests modify the same process environment variable. Diagnose it and give two robust fixes.",
+    "max_new_tokens": 96
+  },
+  {
+    "name": "repository-plan",
+    "category": "long-context-agent",
+    "prompt": "You inspected a repository with a library crate, CLI crate, and integration tests. Plan a change that adds structured JSON output while retaining text output, including discovery, implementation, compatibility, and verification steps.",
+    "max_new_tokens": 128
+  },
+  {
+    "name": "minimal-patch",
+    "category": "short-context-agent",
+    "prompt": "Fix an off-by-one error in a binary search that skips the final element. Describe the minimal code change and boundary tests.",
+    "max_new_tokens": 64
+  }
+]
