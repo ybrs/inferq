@@ -86,12 +86,16 @@ RAYON_NUM_THREADS=4 \
 ```
 
 The output path is created with no-overwrite semantics. Quantized schema
-version 2 embeds the source revision, compile-time AVX2/FMA status, effective
+version 3 embeds the source revision, compile-time AVX2/FMA status, effective
 Candle/Rayon thread counts, host and storage metadata, local GGUF identity,
 combined load telemetry, the shared warmup report, rendered prompt and token
 IDs, greedy correctness status, TTFT/decode rates, expert-cache activity, RSS,
 faults, and physical I/O counters. Timing attribution includes disjoint model
 stages plus nested attention, DeltaNet, and MoE operations and all 48 layers.
+Routed-expert compute is further split into fused gate/up projection,
+activation, down projection, and route-weighted accumulation. These four
+suboperations overlap the enclosing routed-expert compute value and must not be
+added to it.
 The separate target directory prevents the canonical generic validation build
 from overwriting the native benchmark binary.
 
@@ -185,3 +189,41 @@ cache requests fall from 216,000 to 144,000 and each expert uses one gate/up
 kernel launch instead of two. All 128 IDs matched; MoE fell from 8.46 to 8.00
 seconds, routed compute from 6.30 to 5.87 seconds, and total decode from 21.65
 to 21.21 seconds (5.99 token/s).
+
+### Routed-expert projection profile
+
+A three-repetition fully resident control established a `6.0206 token/s` mean
+with a `5.9978`--`6.0409 token/s` range and `0.294%` coefficient of variation.
+Mean decode wall time was `21.094 s`; all three 128-token sequences matched the
+accepted artifact exactly. Use this variance band when judging small changes on
+the i7-6700 host.
+
+Schema 3 split the `5.835 s` routed-expert compute region as follows:
+
+| Routed-expert operation | Decode time | Share of routed compute |
+| --- | ---: | ---: |
+| Fused gate/up quantized projection | 3.454 s | 59.2% |
+| Down quantized projection | 2.029 s | 34.8% |
+| SiLU and gate/up product | 0.231 s | 4.0% |
+| Route-weighted accumulation | 0.112 s | 1.9% |
+| Timer remainder | 0.009 s | 0.2% |
+
+The two compressed projections therefore account for 94.0% of routed-expert
+compute. Fusing only route-weighted accumulation has an end-to-end ceiling near
+0.5% and is below the threshold for invasive work.
+
+An exact selected-expert prototype reused Candle's Q4_K/Q5_K dot products but
+scheduled all ten experts through Rayon so gate/up could share one input
+quantization and both projections could share a dispatch. Its outputs and all
+128 generated IDs were bit-identical. Fine-grained scheduling decoded at
+`5.754 token/s`; a coarser 40-task layout reached only `5.827 token/s`. In the
+latter run routed-expert compute rose to `6.168 s` and total MoE time to
+`8.389 s`. Both versions were rejected and removed.
+
+The next credible exact MoE improvement must work inside Candle's persistent
+quantized-matmul worker pool (or a model-specific replacement), not wrap the
+existing kernels in a second scheduler. A selected-matrix API there could
+share input quantization and barriers without giving up the worker pool's
+lower dispatch cost. Larger gains still require fewer weight bytes per token,
+which means a different execution quantization or an explicitly approximate
+reduction in active experts.

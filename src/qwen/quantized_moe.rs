@@ -15,6 +15,10 @@ pub struct QuantizedMoeTimings {
     pub top_k: Duration,
     pub expert_load: Duration,
     pub expert_compute: Duration,
+    pub expert_gate_up: Duration,
+    pub expert_activation: Duration,
+    pub expert_down: Duration,
+    pub expert_accumulation: Duration,
     pub shared_expert: Duration,
 }
 
@@ -25,6 +29,10 @@ impl QuantizedMoeTimings {
         self.top_k += other.top_k;
         self.expert_load += other.expert_load;
         self.expert_compute += other.expert_compute;
+        self.expert_gate_up += other.expert_gate_up;
+        self.expert_activation += other.expert_activation;
+        self.expert_down += other.expert_down;
+        self.expert_accumulation += other.expert_accumulation;
         self.shared_expert += other.shared_expert;
     }
 }
@@ -180,12 +188,20 @@ impl<'a> QuantizedMoeLayer<'a> {
                 let down = self.down_experts.load(expert)?;
                 timings.expert_load += load_started.elapsed();
                 let compute_started = Instant::now();
+                let gate_up_started = Instant::now();
                 let gate_up = gate_up.forward(&x)?;
+                timings.expert_gate_up += gate_up_started.elapsed();
+                let activation_started = Instant::now();
                 let gate = gate_up.narrow(1, 0, self.intermediate_size)?;
                 let up = gate_up.narrow(1, self.intermediate_size, self.intermediate_size)?;
                 let activated = ops::silu(&gate)?.broadcast_mul(&up)?;
+                timings.expert_activation += activation_started.elapsed();
+                let down_started = Instant::now();
                 let value = down.forward(&activated)?;
+                timings.expert_down += down_started.elapsed();
+                let accumulation_started = Instant::now();
                 combined = (combined + (value * f64::from(route_weight))?)?;
+                timings.expert_accumulation += accumulation_started.elapsed();
                 timings.expert_compute += compute_started.elapsed();
             }
             outputs.push(combined);

@@ -17,7 +17,7 @@ use qwen_engine::{
 };
 use serde::{Deserialize, Serialize};
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Parser)]
 #[command(about = "Persistent multi-case benchmark for quantized Qwen inference")]

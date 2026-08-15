@@ -94,6 +94,11 @@ impl QuantizedForwardTimings {
                 total.moe_top_k_seconds += layer.moe.top_k.as_secs_f64();
                 total.moe_expert_lookup_seconds += layer.moe.expert_load.as_secs_f64();
                 total.moe_expert_compute_seconds += layer.moe.expert_compute.as_secs_f64();
+                total.moe_expert_gate_up_seconds += layer.moe.expert_gate_up.as_secs_f64();
+                total.moe_expert_activation_seconds += layer.moe.expert_activation.as_secs_f64();
+                total.moe_expert_down_seconds += layer.moe.expert_down.as_secs_f64();
+                total.moe_expert_accumulation_seconds +=
+                    layer.moe.expert_accumulation.as_secs_f64();
                 total.moe_shared_expert_seconds += layer.moe.shared_expert.as_secs_f64();
                 total
             },
@@ -161,6 +166,10 @@ pub struct QuantizedOperationTimingReport {
     pub moe_top_k_seconds: f64,
     pub moe_expert_lookup_seconds: f64,
     pub moe_expert_compute_seconds: f64,
+    pub moe_expert_gate_up_seconds: f64,
+    pub moe_expert_activation_seconds: f64,
+    pub moe_expert_down_seconds: f64,
+    pub moe_expert_accumulation_seconds: f64,
     pub moe_shared_expert_seconds: f64,
 }
 
@@ -387,6 +396,10 @@ mod tests {
                 wall: Duration::from_millis(55),
                 expert_load: Duration::from_millis(3),
                 expert_compute: Duration::from_millis(40),
+                expert_gate_up: Duration::from_millis(17),
+                expert_activation: Duration::from_millis(2),
+                expert_down: Duration::from_millis(18),
+                expert_accumulation: Duration::from_millis(3),
                 ..Default::default()
             },
             ..Default::default()
@@ -409,6 +422,16 @@ mod tests {
         assert_eq!(report.stages.moe_seconds, 0.055);
         assert_eq!(report.nested_operations.moe_expert_lookup_seconds, 0.003);
         assert_eq!(report.nested_operations.moe_expert_compute_seconds, 0.040);
+        assert_eq!(report.nested_operations.moe_expert_gate_up_seconds, 0.017);
+        assert_eq!(
+            report.nested_operations.moe_expert_activation_seconds,
+            0.002
+        );
+        assert_eq!(report.nested_operations.moe_expert_down_seconds, 0.018);
+        assert_eq!(
+            report.nested_operations.moe_expert_accumulation_seconds,
+            0.003
+        );
         assert_eq!(report.nested_operations.deltanet_recurrence_seconds, 0.005);
     }
 
