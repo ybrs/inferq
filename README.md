@@ -24,6 +24,7 @@ Performance is not the primary objective in Phase 1. Correctness and observabili
 * `docs/profiling.md` – versioned profiling artifacts, stable micro-cases, and hardware-counter capture.
 * `docs/quantized-execution.md` – direct compressed GGUF projections and selected-expert range loading.
 * `docs/usable-performance-roadmap.md` – measured baseline and the critical path from the reference engine to usable CPU performance.
+* `docs/qwen36-35b-a3b.md` – Qwen3.6-35B-A3B compatibility, Q4/Q8 reproduction commands, and measured architecture/performance comparison.
 * `qwen-cpu-inference-target-architecture.md` – Long-term target architecture, design principles, language split Rust/Python/C++, and the 14-phase roadmap toward workload-aware specialization.
 
 ## Development focus
@@ -49,6 +50,12 @@ stored in this repository.
 
 The measured post-Phase-1 optimization sequence is documented in the
 [roadmap to usable performance](docs/usable-performance-roadmap.md).
+
+The optimized GGUF path also supports text-only Qwen3.6-35B-A3B. On the same
+i7-6700 host, its fully resident Q4_K_M artifact reached 8.12 decode tok/s at
+20.26 GiB RSS; Q8_0 reached 6.27 tok/s at 34.72 GiB RSS. See the
+[Qwen3.6 Q4/Q8 comparison](docs/qwen36-35b-a3b.md) for exact artifacts,
+commands, compatibility details, and methodology.
 
 ## Installation on a new server
 

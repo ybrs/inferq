@@ -110,15 +110,52 @@ pub struct QuantizedDeltaLayer {
     value_heads: usize,
     key_head_dim: usize,
     value_head_dim: usize,
+    value_head_layout: ValueHeadLayout,
     conv_kernel: usize,
     eps: f64,
-    qkvz: QuantizedMatrix,
+    qkvz: QuantizedDeltaProjection,
     beta_alpha: QuantizedMatrix,
+    beta_alpha_layout: BetaAlphaLayout,
     output: QuantizedMatrix,
     conv_weight: Vec<f32>,
     state_scale: Vec<f32>,
     dt_bias: Vec<f32>,
     norm_weight: Tensor,
+}
+
+enum QuantizedDeltaProjection {
+    Fused(QuantizedMatrix),
+    Separate {
+        qkv: QuantizedMatrix,
+        z: QuantizedMatrix,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum BetaAlphaLayout {
+    InterleavedByKeyHead,
+    GroupedByProjection,
+}
+
+#[derive(Clone, Copy)]
+enum ValueHeadLayout {
+    GroupedByKeyHead,
+    TiledByRepeat,
+}
+
+impl ValueHeadLayout {
+    fn index(
+        self,
+        key_head: usize,
+        repeat: usize,
+        key_heads: usize,
+        repeats_per_key: usize,
+    ) -> usize {
+        match self {
+            Self::GroupedByKeyHead => key_head * repeats_per_key + repeat,
+            Self::TiledByRepeat => repeat * key_heads + key_head,
+        }
+    }
 }
 
 impl std::fmt::Debug for QuantizedDeltaLayer {
@@ -144,7 +181,23 @@ impl QuantizedDeltaLayer {
         let conv_dim = key_dim * 2 + value_dim;
         let qkv = checkpoint.load_matrix(&format!("{prefix}.attn_qkv.weight"))?;
         let z = checkpoint.load_matrix(&format!("{prefix}.attn_gate.weight"))?;
-        let beta_alpha = checkpoint.load_matrix(&format!("{prefix}.ssm_ba.weight"))?;
+        // Qwen3-Next exports beta and alpha as one projection. Qwen3.5/3.6
+        // GGUF keeps the two projections separate; concatenate them in the
+        // original beta-then-alpha order so the hot path stays shared.
+        let fused_ba_name = format!("{prefix}.ssm_ba.weight");
+        let (beta_alpha, beta_alpha_layout) = if checkpoint.tensor_info(&fused_ba_name).is_some() {
+            (
+                checkpoint.load_matrix(&fused_ba_name)?,
+                BetaAlphaLayout::InterleavedByKeyHead,
+            )
+        } else {
+            let beta = checkpoint.load_matrix(&format!("{prefix}.ssm_beta.weight"))?;
+            let alpha = checkpoint.load_matrix(&format!("{prefix}.ssm_alpha.weight"))?;
+            (
+                beta.concatenate_rows(&alpha)?,
+                BetaAlphaLayout::GroupedByProjection,
+            )
+        };
         let output = checkpoint.load_matrix(&format!("{prefix}.ssm_out.weight"))?;
         ensure!(
             qkv.shape() == [conv_dim, config.hidden_size],
@@ -154,7 +207,6 @@ impl QuantizedDeltaLayer {
             z.shape() == [value_dim, config.hidden_size],
             "invalid GGUF z shape"
         );
-        let qkvz = qkv.concatenate_rows(&z)?;
         ensure!(
             beta_alpha.shape() == [config.linear_num_value_heads * 2, config.hidden_size],
             "invalid GGUF beta/alpha shape"
@@ -163,6 +215,11 @@ impl QuantizedDeltaLayer {
             output.shape() == [config.hidden_size, value_dim],
             "invalid GGUF DeltaNet output shape"
         );
+        let qkvz = if qkv.dtype() == z.dtype() {
+            QuantizedDeltaProjection::Fused(qkv.concatenate_rows(&z)?)
+        } else {
+            QuantizedDeltaProjection::Separate { qkv, z }
+        };
         let conv_weight = checkpoint
             .load_f32_tensor(&format!("{prefix}.ssm_conv1d.weight"))?
             .reshape((conv_dim, config.linear_conv_kernel_dim))?
@@ -194,10 +251,16 @@ impl QuantizedDeltaLayer {
             value_heads: config.linear_num_value_heads,
             key_head_dim: config.linear_key_head_dim,
             value_head_dim: config.linear_value_head_dim,
+            value_head_layout: if config.model_type == "qwen3_5_moe_text" {
+                ValueHeadLayout::TiledByRepeat
+            } else {
+                ValueHeadLayout::GroupedByKeyHead
+            },
             conv_kernel: config.linear_conv_kernel_dim,
             eps: config.rms_norm_eps,
             qkvz,
             beta_alpha,
+            beta_alpha_layout,
             output,
             conv_weight,
             state_scale,
@@ -236,17 +299,30 @@ impl QuantizedDeltaLayer {
         let key_dim = self.key_heads * self.key_head_dim;
         let value_dim = self.value_heads * self.value_head_dim;
         let conv_dim = key_dim * 2 + value_dim;
-        let projected_width = conv_dim + value_dim;
         let ratio = self.value_heads / self.key_heads;
         let mut timings = QuantizedDeltaTimings::default();
         let projection_started = Instant::now();
-        let projected = self.qkvz.forward(&flat)?.flatten_all()?.to_vec1::<f32>()?;
+        let (projected, separate_gates) = match &self.qkvz {
+            QuantizedDeltaProjection::Fused(qkvz) => {
+                (qkvz.forward(&flat)?.flatten_all()?.to_vec1::<f32>()?, None)
+            }
+            QuantizedDeltaProjection::Separate { qkv, z } => (
+                qkv.forward(&flat)?.flatten_all()?.to_vec1::<f32>()?,
+                Some(z.forward(&flat)?.flatten_all()?.to_vec1::<f32>()?),
+            ),
+        };
+        let projected_width = if separate_gates.is_some() {
+            conv_dim
+        } else {
+            conv_dim + value_dim
+        };
         state.scratch.prepare_output(seq * value_dim);
         for token in 0..seq {
-            let token_projection =
-                &projected[token * projected_width..(token + 1) * projected_width];
-            state.scratch.gates[token * value_dim..(token + 1) * value_dim]
-                .copy_from_slice(&token_projection[conv_dim..]);
+            let gate = separate_gates.as_ref().map_or_else(
+                || &projected[token * projected_width + conv_dim..(token + 1) * projected_width],
+                |gates| &gates[token * value_dim..(token + 1) * value_dim],
+            );
+            state.scratch.gates[token * value_dim..(token + 1) * value_dim].copy_from_slice(gate);
         }
         let projected_ba = self
             .beta_alpha
@@ -296,7 +372,9 @@ impl QuantizedDeltaLayer {
                         [key_head * self.key_head_dim..(key_head + 1) * self.key_head_dim],
                 );
                 for repeat in 0..ratio {
-                    let value_head = key_head * ratio + repeat;
+                    let value_head =
+                        self.value_head_layout
+                            .index(key_head, repeat, self.key_heads, ratio);
                     scratch.q_repeated
                         [value_head * self.key_head_dim..(value_head + 1) * self.key_head_dim]
                         .copy_from_slice(
@@ -311,16 +389,27 @@ impl QuantizedDeltaLayer {
                         );
                 }
             }
-            let parameters_per_key_head = 2 * ratio;
             let token_parameters =
                 &projected_ba[token * self.value_heads * 2..(token + 1) * self.value_heads * 2];
             for key_head in 0..self.key_heads {
-                let parameters = &token_parameters
-                    [key_head * parameters_per_key_head..(key_head + 1) * parameters_per_key_head];
                 for repeat in 0..ratio {
-                    let value_head = key_head * ratio + repeat;
-                    scratch.beta[value_head] = sigmoid(parameters[repeat]);
-                    let alpha = parameters[ratio + repeat];
+                    let value_head =
+                        self.value_head_layout
+                            .index(key_head, repeat, self.key_heads, ratio);
+                    let (beta, alpha) = match self.beta_alpha_layout {
+                        BetaAlphaLayout::InterleavedByKeyHead => {
+                            let base = key_head * 2 * ratio;
+                            (
+                                token_parameters[base + repeat],
+                                token_parameters[base + ratio + repeat],
+                            )
+                        }
+                        BetaAlphaLayout::GroupedByProjection => (
+                            token_parameters[value_head],
+                            token_parameters[self.value_heads + value_head],
+                        ),
+                    };
+                    scratch.beta[value_head] = sigmoid(beta);
                     scratch.decay[value_head] =
                         self.state_scale[value_head] * softplus(alpha + self.dt_bias[value_head]);
                 }
@@ -471,5 +560,19 @@ mod tests {
         let bias = -0.1;
         let reference = -a_log.exp() * softplus(alpha + bias);
         assert!((gguf_value * softplus(alpha + bias) - reference).abs() < 1e-6);
+    }
+
+    #[test]
+    fn value_head_layout_matches_grouped_and_tiled_gguf_orders() {
+        let grouped = ValueHeadLayout::GroupedByKeyHead;
+        let tiled = ValueHeadLayout::TiledByRepeat;
+        let grouped_indices: Vec<_> = (0..2)
+            .flat_map(|key| (0..2).map(move |repeat| grouped.index(key, repeat, 2, 2)))
+            .collect();
+        let tiled_indices: Vec<_> = (0..2)
+            .flat_map(|key| (0..2).map(move |repeat| tiled.index(key, repeat, 2, 2)))
+            .collect();
+        assert_eq!(grouped_indices, [0, 1, 2, 3]);
+        assert_eq!(tiled_indices, [0, 2, 1, 3]);
     }
 }

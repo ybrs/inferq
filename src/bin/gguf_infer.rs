@@ -15,9 +15,9 @@ use qwen_engine::{
 };
 
 #[derive(Debug, Parser)]
-#[command(about = "End-to-end quantized Qwen3-Coder-Next inference")]
+#[command(about = "End-to-end quantized Qwen3-Next-family inference")]
 struct Args {
-    /// Qwen3-Coder-Next GGUF file.
+    /// Supported Qwen3-Next or Qwen3.5/3.6 MoE GGUF file.
     #[arg(long)]
     model: PathBuf,
     /// Hugging Face model directory supplying config.json and tokenizer.json.

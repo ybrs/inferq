@@ -2,6 +2,7 @@ use std::{fs, path::Path};
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 fn default_model_type() -> String {
     "qwen3_next".into()
@@ -41,6 +42,7 @@ pub struct Qwen3NextConfig {
     pub model_type: String,
     pub vocab_size: usize,
     pub hidden_size: usize,
+    #[serde(default)]
     pub intermediate_size: usize,
     pub num_hidden_layers: usize,
     pub num_attention_heads: usize,
@@ -73,6 +75,8 @@ pub struct Qwen3NextConfig {
     pub partial_rotary_factor: f64,
     #[serde(default = "default_true")]
     pub norm_topk_prob: bool,
+    #[serde(default = "default_true")]
+    pub attn_output_gate: bool,
     #[serde(default)]
     pub tie_word_embeddings: bool,
     #[serde(default)]
@@ -105,22 +109,49 @@ impl Qwen3NextConfig {
         let path = path.as_ref();
         let bytes = fs::read(path)
             .with_context(|| format!("failed to read model config {}", path.display()))?;
-        let config: Self = serde_json::from_slice(&bytes)
-            .with_context(|| format!("invalid model config {}", path.display()))?;
+        Self::from_json(&bytes).with_context(|| format!("invalid model config {}", path.display()))
+    }
+
+    fn from_json(bytes: &[u8]) -> Result<Self> {
+        let root: Value = serde_json::from_slice(bytes)?;
+        let mut text = root.get("text_config").unwrap_or(&root).clone();
+        let object = text
+            .as_object_mut()
+            .context("model config must be a JSON object")?;
+        if !object.contains_key("intermediate_size") {
+            let moe = object
+                .get("moe_intermediate_size")
+                .cloned()
+                .context("model config has neither intermediate_size nor moe_intermediate_size")?;
+            object.insert("intermediate_size".into(), moe);
+        }
+        if !object.contains_key("rope_theta")
+            && let Some(theta) = object
+                .get("rope_parameters")
+                .and_then(|rope| rope.get("rope_theta"))
+                .cloned()
+        {
+            object.insert("rope_theta".into(), theta);
+        }
+        let config: Self = serde_json::from_value(text)?;
         config.validate()?;
         Ok(config)
     }
 
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.model_type == "qwen3_next",
-            "unsupported model_type {:?}; expected qwen3_next",
+            matches!(self.model_type.as_str(), "qwen3_next" | "qwen3_5_moe_text"),
+            "unsupported model_type {:?}; expected qwen3_next or qwen3_5_moe_text",
             self.model_type
         );
         ensure!(
             self.hidden_act == "silu",
             "unsupported hidden_act {:?}; expected silu",
             self.hidden_act
+        );
+        ensure!(
+            self.attn_output_gate,
+            "this runtime requires the full-attention output gate"
         );
         for (name, value) in [
             ("vocab_size", self.vocab_size),
@@ -237,6 +268,7 @@ mod tests {
             rope_theta: 10_000.,
             partial_rotary_factor: 1.,
             norm_topk_prob: true,
+            attn_output_gate: true,
             tie_word_embeddings: false,
             attention_bias: false,
             max_position_embeddings: 128,
@@ -252,5 +284,50 @@ mod tests {
         assert_eq!(c.layer_type(2), LayerType::LinearAttention);
         assert_eq!(c.layer_type(3), LayerType::FullAttention);
         c.validate().unwrap();
+    }
+
+    #[test]
+    fn loads_nested_qwen35_moe_text_config() {
+        let source = serde_json::json!({
+            "model_type": "qwen3_5_moe",
+            "text_config": {
+                "model_type": "qwen3_5_moe_text",
+                "vocab_size": 248320,
+                "hidden_size": 2048,
+                "num_hidden_layers": 4,
+                "num_attention_heads": 16,
+                "num_key_value_heads": 2,
+                "head_dim": 256,
+                "linear_conv_kernel_dim": 4,
+                "linear_key_head_dim": 128,
+                "linear_value_head_dim": 128,
+                "linear_num_key_heads": 16,
+                "linear_num_value_heads": 32,
+                "moe_intermediate_size": 512,
+                "shared_expert_intermediate_size": 512,
+                "num_experts_per_tok": 8,
+                "num_experts": 256,
+                "layer_types": [
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention"
+                ],
+                "full_attention_interval": 4,
+                "hidden_act": "silu",
+                "rms_norm_eps": 1e-6,
+                "partial_rotary_factor": 0.25,
+                "rope_parameters": { "rope_theta": 10000000 },
+                "attn_output_gate": true,
+                "max_position_embeddings": 262144
+            }
+        });
+        let config = Qwen3NextConfig::from_json(source.to_string().as_bytes()).unwrap();
+        assert_eq!(config.model_type, "qwen3_5_moe_text");
+        assert_eq!(config.intermediate_size, 512);
+        assert_eq!(config.rope_theta, 10_000_000.);
+        assert!(config.norm_topk_prob);
+        assert_eq!(config.num_experts_per_tok, 8);
+        assert_eq!(config.layer_type(3), LayerType::FullAttention);
     }
 }

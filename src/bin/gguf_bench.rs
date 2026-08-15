@@ -22,7 +22,7 @@ const SCHEMA_VERSION: u32 = 3;
 #[derive(Debug, Parser)]
 #[command(about = "Persistent multi-case benchmark for quantized Qwen inference")]
 struct Args {
-    /// Qwen3-Coder-Next GGUF file.
+    /// Supported Qwen3-Next or Qwen3.5/3.6 MoE GGUF file.
     #[arg(long, required_unless_present = "validate_prompts_only")]
     model: Option<PathBuf>,
     /// Hugging Face model directory supplying config.json and tokenizer files.

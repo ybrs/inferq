@@ -8,6 +8,7 @@ use tokenizers::Tokenizer;
 pub struct ModelTokenizer {
     tokenizer: Tokenizer,
     chat_template: Option<String>,
+    thinking_generation_prompt: bool,
 }
 
 impl ModelTokenizer {
@@ -30,9 +31,13 @@ impl ModelTokenizer {
         } else {
             None
         };
+        let thinking_generation_prompt = chat_template.as_deref().is_some_and(|template| {
+            template.contains("enable_thinking") && template.contains("<think>")
+        });
         Ok(Self {
             tokenizer,
             chat_template,
+            thinking_generation_prompt,
         })
     }
 
@@ -86,7 +91,11 @@ impl ModelTokenizer {
     /// Render the official template's plain-message, no-tools subset.
     pub fn initial_chat_prompt(&self, user: &str, system: Option<&str>) -> Result<String> {
         self.ensure_qwen_chat_template()?;
-        Ok(qwen_initial_chat_prompt(user, system))
+        Ok(qwen_initial_chat_prompt(
+            user,
+            system,
+            self.thinking_generation_prompt,
+        ))
     }
 
     /// Append a user turn to an existing assistant generation. If the model
@@ -94,11 +103,19 @@ impl ModelTokenizer {
     /// inserted; otherwise the assistant message is closed first.
     pub fn chat_continuation(&self, user: &str, assistant_closed: bool) -> Result<String> {
         self.ensure_qwen_chat_template()?;
-        Ok(qwen_chat_continuation(user, assistant_closed))
+        Ok(qwen_chat_continuation(
+            user,
+            assistant_closed,
+            self.thinking_generation_prompt,
+        ))
     }
 }
 
-fn qwen_initial_chat_prompt(user: &str, system: Option<&str>) -> String {
+fn qwen_initial_chat_prompt(
+    user: &str,
+    system: Option<&str>,
+    thinking_generation_prompt: bool,
+) -> String {
     let mut prompt = String::new();
     if let Some(system) = system {
         prompt.push_str("<|im_start|>system\n");
@@ -108,10 +125,17 @@ fn qwen_initial_chat_prompt(user: &str, system: Option<&str>) -> String {
     prompt.push_str("<|im_start|>user\n");
     prompt.push_str(user);
     prompt.push_str("<|im_end|>\n<|im_start|>assistant\n");
+    if thinking_generation_prompt {
+        prompt.push_str("<think>\n");
+    }
     prompt
 }
 
-fn qwen_chat_continuation(user: &str, assistant_closed: bool) -> String {
+fn qwen_chat_continuation(
+    user: &str,
+    assistant_closed: bool,
+    thinking_generation_prompt: bool,
+) -> String {
     let mut prompt = if assistant_closed {
         "\n".to_owned()
     } else {
@@ -120,6 +144,9 @@ fn qwen_chat_continuation(user: &str, assistant_closed: bool) -> String {
     prompt.push_str("<|im_start|>user\n");
     prompt.push_str(user);
     prompt.push_str("<|im_end|>\n<|im_start|>assistant\n");
+    if thinking_generation_prompt {
+        prompt.push_str("<think>\n");
+    }
     prompt
 }
 
@@ -130,16 +157,28 @@ mod tests {
     #[test]
     fn renders_plain_qwen_chat_turns() {
         assert_eq!(
-            qwen_initial_chat_prompt("hello", Some("be concise")),
+            qwen_initial_chat_prompt("hello", Some("be concise"), false),
             "<|im_start|>system\nbe concise<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n"
         );
         assert_eq!(
-            qwen_chat_continuation("next", false),
+            qwen_chat_continuation("next", false, false),
             "<|im_end|>\n<|im_start|>user\nnext<|im_end|>\n<|im_start|>assistant\n"
         );
         assert_eq!(
-            qwen_chat_continuation("next", true),
+            qwen_chat_continuation("next", true, false),
             "\n<|im_start|>user\nnext<|im_end|>\n<|im_start|>assistant\n"
+        );
+    }
+
+    #[test]
+    fn renders_thinking_generation_prefix() {
+        assert_eq!(
+            qwen_initial_chat_prompt("hello", None, true),
+            "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n<think>\n"
+        );
+        assert_eq!(
+            qwen_chat_continuation("next", false, true),
+            "<|im_end|>\n<|im_start|>user\nnext<|im_end|>\n<|im_start|>assistant\n<think>\n"
         );
     }
 }

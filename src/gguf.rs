@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 pub struct GgufSummary {
     pub architecture: String,
     pub layers: usize,
+    pub auxiliary_predictor_layers: usize,
     pub hidden_size: usize,
     pub experts_per_layer: usize,
     pub experts_selected: usize,
@@ -1040,12 +1041,27 @@ pub fn inspect_gguf(path: impl AsRef<Path>) -> Result<GgufSummary> {
         Some(Value::String(value)) => value.clone(),
         other => anyhow::bail!("invalid general.architecture metadata: {other:?}"),
     };
+    let metadata_prefix = match architecture.as_str() {
+        "qwen3next" => "qwen3next",
+        "qwen35moe" => "qwen35moe",
+        _ => anyhow::bail!("unsupported GGUF architecture {architecture:?}"),
+    };
+    let all_layers = get_usize(&content, &format!("{metadata_prefix}.block_count"))?;
+    let auxiliary_predictor_layers = content
+        .metadata
+        .get(&format!("{metadata_prefix}.nextn_predict_layers"))
+        .map(integer)
+        .transpose()?
+        .unwrap_or(0);
     ensure!(
-        architecture == "qwen3next",
-        "unsupported GGUF architecture {architecture:?}"
+        auxiliary_predictor_layers <= all_layers,
+        "next-token predictor layer count exceeds total GGUF block count"
     );
-    let layers = get_usize(&content, "qwen3next.block_count")?;
-    let interval = get_usize(&content, "qwen3next.full_attention_interval")?;
+    let layers = all_layers - auxiliary_predictor_layers;
+    let interval = get_usize(
+        &content,
+        &format!("{metadata_prefix}.full_attention_interval"),
+    )?;
     ensure!(interval > 0, "full_attention_interval must be positive");
     let full_attention_layers = layers / interval;
     let vocab_size = match content.metadata.get("tokenizer.ggml.tokens") {
@@ -1062,9 +1078,10 @@ pub fn inspect_gguf(path: impl AsRef<Path>) -> Result<GgufSummary> {
     Ok(GgufSummary {
         architecture,
         layers,
-        hidden_size: get_usize(&content, "qwen3next.embedding_length")?,
-        experts_per_layer: get_usize(&content, "qwen3next.expert_count")?,
-        experts_selected: get_usize(&content, "qwen3next.expert_used_count")?,
+        auxiliary_predictor_layers,
+        hidden_size: get_usize(&content, &format!("{metadata_prefix}.embedding_length"))?,
+        experts_per_layer: get_usize(&content, &format!("{metadata_prefix}.expert_count"))?,
+        experts_selected: get_usize(&content, &format!("{metadata_prefix}.expert_used_count"))?,
         vocab_size,
         full_attention_layers,
         linear_attention_layers: layers - full_attention_layers,
