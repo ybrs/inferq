@@ -239,6 +239,11 @@ pub struct QuantizedLayerTimingReport {
     pub deltanet_seconds: f64,
     pub moe_seconds: f64,
     pub unattributed_seconds: f64,
+    pub moe_token_expert_assignments: usize,
+    pub moe_unique_experts_selected: usize,
+    pub moe_duplicate_assignment_rate: f64,
+    pub moe_average_rows_per_selected_expert: f64,
+    pub moe_max_rows_per_expert: usize,
 }
 
 impl From<&QuantizedLayerTimings> for QuantizedLayerTimingReport {
@@ -254,6 +259,14 @@ impl From<&QuantizedLayerTimings> for QuantizedLayerTimingReport {
             deltanet_seconds: timings.delta.wall.as_secs_f64(),
             moe_seconds: timings.moe.wall.as_secs_f64(),
             unattributed_seconds: timings.wall.saturating_sub(accounted).as_secs_f64(),
+            moe_token_expert_assignments: timings.moe.routing.token_expert_assignments,
+            moe_unique_experts_selected: timings.moe.routing.unique_experts_selected,
+            moe_duplicate_assignment_rate: timings.moe.routing.duplicate_assignment_rate(),
+            moe_average_rows_per_selected_expert: timings
+                .moe
+                .routing
+                .average_rows_per_selected_expert(),
+            moe_max_rows_per_expert: timings.moe.routing.max_rows_per_expert,
         }
     }
 }

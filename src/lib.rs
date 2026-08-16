@@ -21,6 +21,7 @@ pub use residency::{
     FullExpertWarmupMode, FullExpertWarmupProgress, FullExpertWarmupReport, warm_all_experts,
 };
 pub use runtime::{
-    GenerationMetrics, GenerationOptions, GenerationResult, QuantizedGenerationMetrics,
-    QuantizedGenerationResult, QuantizedRuntime, QuantizedSpeculativeMetrics, Runtime,
+    GenerationMetrics, GenerationOptions, GenerationResult, QuantizedDraftObservation,
+    QuantizedGenerationMetrics, QuantizedGenerationResult, QuantizedRuntime,
+    QuantizedSpeculativeMetrics, Runtime, ThinkingMetrics,
 };

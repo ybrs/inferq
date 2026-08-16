@@ -34,6 +34,17 @@ struct Args {
     /// Apply the official Qwen plain-message chat template.
     #[arg(long)]
     chat: bool,
+    /// Render the Qwen assistant prefix with its thinking block already closed.
+    #[arg(long, requires = "chat", conflicts_with = "thinking_budget")]
+    no_thinking: bool,
+    /// Force-close Qwen's thinking block after N committed generated tokens.
+    #[arg(
+        long,
+        value_name = "N",
+        requires = "chat",
+        conflicts_with = "no_thinking"
+    )]
+    thinking_budget: Option<usize>,
     /// Optional system message for the first chat turn.
     #[arg(long, requires = "chat")]
     system_prompt: Option<String>,
@@ -64,6 +75,9 @@ struct Args {
     /// Enable Qwen3.5/3.6 MTP speculation with at most N draft tokens per verification pass.
     #[arg(long, default_value_t = 0)]
     speculative_mtp: usize,
+    /// Skip MTP proposals whose raw top-1/top-2 logit margin is below this value.
+    #[arg(long, value_name = "MARGIN")]
+    speculative_mtp_min_margin: Option<f32>,
 }
 
 fn prepare_all_experts(checkpoint: &GgufCheckpoint, runtime: &QuantizedRuntime<'_>) -> Result<()> {
@@ -180,17 +194,29 @@ fn report(
     let speculative = &result.metrics.speculative;
     if speculative.max_draft_tokens > 0 {
         eprintln!(
-            "MTP speculation: {}/{} draft tokens accepted ({:.1}%); {} verification passes over {} tokens; {} rollback replays over {} tokens; draft {:.3}s, verify {:.3}s, resync {:.3}s",
+            "MTP speculation: {}/{} draft tokens accepted ({:.1}%, {} gated); {} verification passes over {} tokens; {} rollback replays over {} tokens; draft {:.3}s, verify {:.3}s, checkpoint {:.3}s, restore {:.3}s, replay {:.3}s, resync {:.3}s",
             speculative.accepted_tokens,
             speculative.drafted_tokens,
             speculative.acceptance_rate() * 100.,
+            speculative.gated_tokens,
             speculative.verification_passes,
             speculative.verification_tokens,
             speculative.rollback_replays,
             speculative.replayed_tokens,
             speculative.draft_wall_time.as_secs_f64(),
             speculative.verification_wall_time.as_secs_f64(),
+            speculative.checkpoint_wall_time.as_secs_f64(),
+            speculative.restore_wall_time.as_secs_f64(),
+            speculative.replay_wall_time.as_secs_f64(),
             speculative.resync_wall_time.as_secs_f64(),
+        );
+    }
+    if let Some(budget) = result.metrics.thinking.budget {
+        eprintln!(
+            "thinking budget: {}/{} committed thinking tokens; forced closures {}",
+            result.metrics.thinking.committed_thinking_tokens,
+            budget,
+            result.metrics.thinking.forced_closures,
         );
     }
     let cache = result.metrics.expert_cache;
@@ -246,16 +272,19 @@ fn user_turn_prompt(
     first_turn: bool,
     assistant_closed: bool,
     system_prompt: Option<&str>,
+    enable_thinking: bool,
 ) -> Result<String> {
     if !chat {
         return Ok(user.to_owned());
     }
     if first_turn {
-        runtime.tokenizer().initial_chat_prompt(user, system_prompt)
+        runtime
+            .tokenizer()
+            .initial_chat_prompt_with_thinking(user, system_prompt, enable_thinking)
     } else {
         runtime
             .tokenizer()
-            .chat_continuation(user, assistant_closed)
+            .chat_continuation_with_thinking(user, assistant_closed, enable_thinking)
     }
 }
 
@@ -273,6 +302,7 @@ fn interactive(
     options: &GenerationOptions,
     chat: bool,
     system_prompt: Option<&str>,
+    enable_thinking: bool,
 ) -> Result<()> {
     eprintln!("interactive session ready; /reset clears sequence state, /quit exits");
     let mut first_turn = true;
@@ -285,6 +315,7 @@ fn interactive(
             first_turn,
             assistant_closed,
             system_prompt,
+            enable_thinking,
         )?;
         let result = generate_and_report(runtime, &prompt, options)?;
         assistant_closed = emitted_im_end(runtime, &result);
@@ -316,6 +347,7 @@ fn interactive(
                     first_turn,
                     assistant_closed,
                     system_prompt,
+                    enable_thinking,
                 )?;
                 let result = generate_and_report(runtime, &prompt, options)?;
                 assistant_closed = emitted_im_end(runtime, &result);
@@ -352,6 +384,10 @@ fn main() -> Result<()> {
             || (args.routing_trace.is_none() && args.routing_census.is_none()),
         "--speculative-mtp does not yet support routing traces or censuses"
     );
+    ensure!(
+        args.speculative_mtp_min_margin.is_none() || args.speculative_mtp > 0,
+        "--speculative-mtp-min-margin requires --speculative-mtp"
+    );
 
     let checkpoint = GgufCheckpoint::open(&args.model)?;
     let expert_cache_bytes = args
@@ -362,6 +398,11 @@ fn main() -> Result<()> {
     let identity = checkpoint.identity()?;
     let load_started = Instant::now();
     let mut runtime = QuantizedRuntime::load(&checkpoint, &args.tokenizer_model)?;
+    ensure!(
+        (!args.no_thinking && args.thinking_budget.is_none())
+            || runtime.tokenizer().supports_thinking_generation(),
+        "--no-thinking and --thinking-budget require a Qwen chat template with thinking support"
+    );
     let load_time = load_started.elapsed();
     eprintln!(
         "model loaded in {:.3}s ({}, {})",
@@ -403,6 +444,8 @@ fn main() -> Result<()> {
     let options = GenerationOptions {
         max_new_tokens: args.max_new_tokens,
         speculative_mtp_draft_tokens: args.speculative_mtp,
+        speculative_mtp_min_margin: args.speculative_mtp_min_margin,
+        thinking_budget: args.thinking_budget,
         ..GenerationOptions::default()
     };
     if args.interactive {
@@ -412,6 +455,7 @@ fn main() -> Result<()> {
             &options,
             args.chat,
             args.system_prompt.as_deref(),
+            !args.no_thinking,
         )
     } else {
         let prompt = user_turn_prompt(
@@ -421,6 +465,7 @@ fn main() -> Result<()> {
             true,
             false,
             args.system_prompt.as_deref(),
+            !args.no_thinking,
         )?;
         generate_and_report(&mut runtime, &prompt, &options)?;
         Ok(())

@@ -1,12 +1,67 @@
-use std::time::{Duration, Instant};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, ensure};
 use candle_core::{DType, IndexOp, Tensor};
 use candle_nn::ops;
+use serde::Serialize;
 
 use crate::{GgufCheckpoint, GgufExpertPair, GgufExpertTensor, QuantizedMatrix};
 
 use super::{Route, top_k_routes};
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct QuantizedMoeRoutingStats {
+    pub batches: usize,
+    pub rows: usize,
+    pub token_expert_assignments: usize,
+    pub unique_experts_selected: usize,
+    pub max_rows_per_expert: usize,
+}
+
+impl QuantizedMoeRoutingStats {
+    pub fn from_routes(routes: &[Route], expert_count: usize) -> Self {
+        let mut counts = vec![0usize; expert_count];
+        for route in routes {
+            for &expert in &route.experts {
+                counts[expert] += 1;
+            }
+        }
+        Self {
+            batches: 1,
+            rows: routes.len(),
+            token_expert_assignments: counts.iter().sum(),
+            unique_experts_selected: counts.iter().filter(|&&count| count > 0).count(),
+            max_rows_per_expert: counts.into_iter().max().unwrap_or(0),
+        }
+    }
+
+    pub fn accumulate(&mut self, other: &Self) {
+        self.batches += other.batches;
+        self.rows += other.rows;
+        self.token_expert_assignments += other.token_expert_assignments;
+        self.unique_experts_selected += other.unique_experts_selected;
+        self.max_rows_per_expert = self.max_rows_per_expert.max(other.max_rows_per_expert);
+    }
+
+    pub fn duplicate_assignment_rate(&self) -> f64 {
+        if self.token_expert_assignments == 0 {
+            0.
+        } else {
+            1. - self.unique_experts_selected as f64 / self.token_expert_assignments as f64
+        }
+    }
+
+    pub fn average_rows_per_selected_expert(&self) -> f64 {
+        if self.unique_experts_selected == 0 {
+            0.
+        } else {
+            self.token_expert_assignments as f64 / self.unique_experts_selected as f64
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct QuantizedMoeTimings {
@@ -20,6 +75,7 @@ pub struct QuantizedMoeTimings {
     pub expert_down: Duration,
     pub expert_accumulation: Duration,
     pub shared_expert: Duration,
+    pub routing: QuantizedMoeRoutingStats,
 }
 
 impl QuantizedMoeTimings {
@@ -34,6 +90,7 @@ impl QuantizedMoeTimings {
         self.expert_down += other.expert_down;
         self.expert_accumulation += other.expert_accumulation;
         self.shared_expert += other.shared_expert;
+        self.routing.accumulate(&other.routing);
     }
 }
 
@@ -59,6 +116,12 @@ pub struct QuantizedMoeLayer<'a> {
     shared_selector: Tensor,
     gate_up_experts: GgufExpertPair<'a>,
     down_experts: GgufExpertTensor<'a>,
+}
+
+#[derive(Clone, Copy)]
+enum RoutedExecution {
+    TokenMajor,
+    GroupedByExpert,
 }
 
 impl std::fmt::Debug for QuantizedMoeLayer<'_> {
@@ -161,6 +224,20 @@ impl<'a> QuantizedMoeLayer<'a> {
     }
 
     pub fn forward(&self, xs: &Tensor) -> Result<QuantizedMoeOutput> {
+        let rows = xs.elem_count() / self.hidden_size;
+        let execution = if rows > 1 {
+            RoutedExecution::GroupedByExpert
+        } else {
+            RoutedExecution::TokenMajor
+        };
+        self.forward_with_execution(xs, execution)
+    }
+
+    fn forward_with_execution(
+        &self,
+        xs: &Tensor,
+        execution: RoutedExecution,
+    ) -> Result<QuantizedMoeOutput> {
         let wall_started = Instant::now();
         ensure!(
             xs.elem_count().is_multiple_of(self.hidden_size),
@@ -177,11 +254,41 @@ impl<'a> QuantizedMoeLayer<'a> {
         let top_k_started = Instant::now();
         let routes = top_k_routes(&router_logits, self.experts_per_token, self.normalize_top_k)?;
         timings.top_k = top_k_started.elapsed();
+        timings.routing = QuantizedMoeRoutingStats::from_routes(&routes, self.expert_count);
 
+        let routed = match execution {
+            RoutedExecution::TokenMajor => self.routed_token_major(&flat, &routes, &mut timings)?,
+            RoutedExecution::GroupedByExpert => {
+                self.routed_grouped_by_expert(&flat, &routes, &mut timings)?
+            }
+        };
+        let shared_started = Instant::now();
+        let shared_gate_up = self.shared_gate_up.forward(&flat)?;
+        let shared_gate = shared_gate_up.narrow(1, 0, self.intermediate_size)?;
+        let shared_up = shared_gate_up.narrow(1, self.intermediate_size, self.intermediate_size)?;
+        let shared = ops::silu(&shared_gate)?.broadcast_mul(&shared_up)?;
+        let shared = self.shared_down.forward(&shared)?;
+        let selector = ops::sigmoid(&flat.matmul(&self.shared_selector.t()?)?)?;
+        let hidden = (routed + shared.broadcast_mul(&selector)?)?.reshape(xs.shape())?;
+        timings.shared_expert = shared_started.elapsed();
+        timings.wall = wall_started.elapsed();
+        Ok(QuantizedMoeOutput {
+            hidden,
+            routes,
+            timings,
+        })
+    }
+
+    fn routed_token_major(
+        &self,
+        flat: &Tensor,
+        routes: &[Route],
+        timings: &mut QuantizedMoeTimings,
+    ) -> Result<Tensor> {
         let mut outputs = Vec::with_capacity(routes.len());
         for (token_index, route) in routes.iter().enumerate() {
             let x = flat.i(token_index)?.unsqueeze(0)?;
-            let mut combined = Tensor::zeros((1, self.hidden_size), DType::F32, xs.device())?;
+            let mut combined = Tensor::zeros((1, self.hidden_size), DType::F32, flat.device())?;
             for (&expert, &route_weight) in route.experts.iter().zip(&route.weights) {
                 let load_started = Instant::now();
                 let gate_up = self.gate_up_experts.load(expert)?;
@@ -206,22 +313,79 @@ impl<'a> QuantizedMoeLayer<'a> {
             }
             outputs.push(combined);
         }
-        let routed = Tensor::cat(&outputs, 0)?;
-        let shared_started = Instant::now();
-        let shared_gate_up = self.shared_gate_up.forward(&flat)?;
-        let shared_gate = shared_gate_up.narrow(1, 0, self.intermediate_size)?;
-        let shared_up = shared_gate_up.narrow(1, self.intermediate_size, self.intermediate_size)?;
-        let shared = ops::silu(&shared_gate)?.broadcast_mul(&shared_up)?;
-        let shared = self.shared_down.forward(&shared)?;
-        let selector = ops::sigmoid(&flat.matmul(&self.shared_selector.t()?)?)?;
-        let hidden = (routed + shared.broadcast_mul(&selector)?)?.reshape(xs.shape())?;
-        timings.shared_expert = shared_started.elapsed();
-        timings.wall = wall_started.elapsed();
-        Ok(QuantizedMoeOutput {
-            hidden,
-            routes,
-            timings,
-        })
+        Ok(Tensor::cat(&outputs, 0)?)
+    }
+
+    fn routed_grouped_by_expert(
+        &self,
+        flat: &Tensor,
+        routes: &[Route],
+        timings: &mut QuantizedMoeTimings,
+    ) -> Result<Tensor> {
+        let mut assignments = BTreeMap::<usize, Vec<(usize, usize)>>::new();
+        for (row, route) in routes.iter().enumerate() {
+            for (route_index, &expert) in route.experts.iter().enumerate() {
+                assignments
+                    .entry(expert)
+                    .or_default()
+                    .push((row, route_index));
+            }
+        }
+        let mut values = routes
+            .iter()
+            .map(|route| {
+                (0..route.experts.len())
+                    .map(|_| None)
+                    .collect::<Vec<Option<Tensor>>>()
+            })
+            .collect::<Vec<_>>();
+
+        for (expert, expert_assignments) in assignments {
+            let rows = expert_assignments
+                .iter()
+                .map(|&(row, _)| Ok(flat.i(row)?.unsqueeze(0)?))
+                .collect::<Result<Vec<Tensor>>>()?;
+            let row_refs = rows.iter().collect::<Vec<_>>();
+            let inputs = Tensor::cat(&row_refs, 0)?;
+            let load_started = Instant::now();
+            let gate_up = self.gate_up_experts.load(expert)?;
+            let down = self.down_experts.load(expert)?;
+            timings.expert_load += load_started.elapsed();
+            let compute_started = Instant::now();
+            let gate_up_started = Instant::now();
+            let gate_up = gate_up.forward(&inputs)?;
+            timings.expert_gate_up += gate_up_started.elapsed();
+            let activation_started = Instant::now();
+            let gate = gate_up.narrow(1, 0, self.intermediate_size)?;
+            let up = gate_up.narrow(1, self.intermediate_size, self.intermediate_size)?;
+            let activated = ops::silu(&gate)?.broadcast_mul(&up)?;
+            timings.expert_activation += activation_started.elapsed();
+            let down_started = Instant::now();
+            let expert_output = down.forward(&activated)?;
+            timings.expert_down += down_started.elapsed();
+            timings.expert_compute += compute_started.elapsed();
+            for (expert_row, &(output_row, route_index)) in expert_assignments.iter().enumerate() {
+                values[output_row][route_index] = Some(expert_output.i(expert_row)?.unsqueeze(0)?);
+            }
+        }
+
+        // Preserve the target-only path's token and route accumulation order.
+        // Only expert matrix execution is grouped; weighted additions remain
+        // byte-for-byte ordered like the readable token-major reference.
+        let mut outputs = Vec::with_capacity(routes.len());
+        for (row, route) in routes.iter().enumerate() {
+            let mut combined = Tensor::zeros((1, self.hidden_size), DType::F32, flat.device())?;
+            for (route_index, &route_weight) in route.weights.iter().enumerate() {
+                let accumulation_started = Instant::now();
+                let value = values[row][route_index]
+                    .as_ref()
+                    .context("grouped expert result is missing a routed assignment")?;
+                combined = (combined + (value * f64::from(route_weight))?)?;
+                timings.expert_accumulation += accumulation_started.elapsed();
+            }
+            outputs.push(combined);
+        }
+        Ok(Tensor::cat(&outputs, 0)?)
     }
 }
 
@@ -313,5 +477,36 @@ mod tests {
                 .iter()
                 .all(|value| value.is_finite())
         );
+
+        let batch = Tensor::ones((3, hidden), DType::F32, &Device::Cpu).unwrap();
+        let reference = layer
+            .forward_with_execution(&batch, RoutedExecution::TokenMajor)
+            .unwrap();
+        let grouped = layer
+            .forward_with_execution(&batch, RoutedExecution::GroupedByExpert)
+            .unwrap();
+        assert_eq!(grouped.routes.len(), reference.routes.len());
+        for (actual, expected) in grouped.routes.iter().zip(&reference.routes) {
+            assert_eq!(actual.experts, expected.experts);
+            assert_eq!(actual.weights, expected.weights);
+        }
+        let actual = grouped
+            .hidden
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let expected = reference
+            .hidden
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let max_abs = actual
+            .iter()
+            .zip(expected)
+            .map(|(actual, expected)| (actual - expected).abs())
+            .fold(0f32, f32::max);
+        assert!(max_abs <= 1e-6, "grouped MoE max abs error {max_abs}");
     }
 }

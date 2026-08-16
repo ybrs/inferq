@@ -32,7 +32,13 @@ and current token embedding through the auxiliary predictor, drafts up to the
 requested number of greedy tokens, verifies them in one target-model batch,
 accepts the matching prefix, and restores/replays target recurrent state after
 a rejection. The MTP KV cache is then synchronized from authoritative target
-hidden states. Ordinary generation does not execute this layer. See
+hidden states; already-authoritative accepted-prefix state is retained.
+Ordinary generation does not execute this layer. Qwen chat turns may retain
+unbounded model-controlled thinking, render a closed thinking prefix with
+`--no-thinking`, or use `--thinking-budget N`. A forced tokenizer-derived
+`</think>\n\n` sequence is evaluated through both target and MTP state before
+answer generation continues, and the counter is new for every assistant turn.
+See
 [speculative-decoding.md](speculative-decoding.md) for the exact data flow,
 current restrictions, correctness evidence, and measured performance.
 
@@ -46,6 +52,12 @@ expert IDs, normalized route weights, and optionally full router logits.
 In the fully resident GGUF path, compatible routed and shared expert gate/up
 matrices are row-concatenated without dequantization. Their row results remain
 identical while one compressed kernel launch produces both projections.
+For small multi-token verification batches, routed work is grouped by expert:
+all rows assigned to one expert execute gate/up and down together, while final
+weighted accumulation retains original per-token route order. Large (at least
+4 MiB) Q4_K/Q5_K/Q6_K/Q8_0 dense matrices use a measured small-M path that
+traverses each compressed weight row once for all input rows. K=1 and smaller
+expert matrices retain their established kernels.
 
 ## End-to-end validation
 

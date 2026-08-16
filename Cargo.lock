@@ -957,6 +957,7 @@ dependencies = [
  "clap",
  "half",
  "rand",
+ "rayon",
  "serde",
  "serde_json",
  "tempfile",

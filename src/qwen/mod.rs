@@ -34,7 +34,9 @@ pub use quantized_model::{
     QuantizedLayerTimingReport, QuantizedModel, QuantizedModelCheckpoint, QuantizedModelState,
     QuantizedOperationTimingReport, QuantizedStageTimingReport,
 };
-pub use quantized_moe::{QuantizedMoeLayer, QuantizedMoeOutput, QuantizedMoeTimings};
+pub use quantized_moe::{
+    QuantizedMoeLayer, QuantizedMoeOutput, QuantizedMoeRoutingStats, QuantizedMoeTimings,
+};
 pub use quantized_mtp::{
     QuantizedMtpHead, QuantizedMtpOutput, QuantizedMtpState, QuantizedMtpTimings,
 };

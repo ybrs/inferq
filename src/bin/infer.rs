@@ -73,6 +73,8 @@ fn main() -> Result<()> {
             stop_tokens: args.stop_token,
             add_special_tokens: false,
             speculative_mtp_draft_tokens: 0,
+            speculative_mtp_min_margin: None,
+            thinking_budget: None,
         },
     )?;
     print!("{}", result.text);

@@ -64,6 +64,10 @@ impl ModelTokenizer {
         self.tokenizer.token_to_id(token)
     }
 
+    pub fn supports_thinking_generation(&self) -> bool {
+        self.thinking_generation_prompt
+    }
+
     pub fn decode_stream(
         &self,
         skip_special_tokens: bool,
@@ -90,11 +94,21 @@ impl ModelTokenizer {
 
     /// Render the official template's plain-message, no-tools subset.
     pub fn initial_chat_prompt(&self, user: &str, system: Option<&str>) -> Result<String> {
+        self.initial_chat_prompt_with_thinking(user, system, true)
+    }
+
+    pub fn initial_chat_prompt_with_thinking(
+        &self,
+        user: &str,
+        system: Option<&str>,
+        enable_thinking: bool,
+    ) -> Result<String> {
         self.ensure_qwen_chat_template()?;
         Ok(qwen_initial_chat_prompt(
             user,
             system,
             self.thinking_generation_prompt,
+            enable_thinking,
         ))
     }
 
@@ -102,11 +116,21 @@ impl ModelTokenizer {
     /// already emitted `<|im_end|>`, only its required trailing newline is
     /// inserted; otherwise the assistant message is closed first.
     pub fn chat_continuation(&self, user: &str, assistant_closed: bool) -> Result<String> {
+        self.chat_continuation_with_thinking(user, assistant_closed, true)
+    }
+
+    pub fn chat_continuation_with_thinking(
+        &self,
+        user: &str,
+        assistant_closed: bool,
+        enable_thinking: bool,
+    ) -> Result<String> {
         self.ensure_qwen_chat_template()?;
         Ok(qwen_chat_continuation(
             user,
             assistant_closed,
             self.thinking_generation_prompt,
+            enable_thinking,
         ))
     }
 }
@@ -115,6 +139,7 @@ fn qwen_initial_chat_prompt(
     user: &str,
     system: Option<&str>,
     thinking_generation_prompt: bool,
+    enable_thinking: bool,
 ) -> String {
     let mut prompt = String::new();
     if let Some(system) = system {
@@ -126,7 +151,11 @@ fn qwen_initial_chat_prompt(
     prompt.push_str(user);
     prompt.push_str("<|im_end|>\n<|im_start|>assistant\n");
     if thinking_generation_prompt {
-        prompt.push_str("<think>\n");
+        prompt.push_str(if enable_thinking {
+            "<think>\n"
+        } else {
+            "<think>\n\n</think>\n\n"
+        });
     }
     prompt
 }
@@ -135,6 +164,7 @@ fn qwen_chat_continuation(
     user: &str,
     assistant_closed: bool,
     thinking_generation_prompt: bool,
+    enable_thinking: bool,
 ) -> String {
     let mut prompt = if assistant_closed {
         "\n".to_owned()
@@ -145,7 +175,11 @@ fn qwen_chat_continuation(
     prompt.push_str(user);
     prompt.push_str("<|im_end|>\n<|im_start|>assistant\n");
     if thinking_generation_prompt {
-        prompt.push_str("<think>\n");
+        prompt.push_str(if enable_thinking {
+            "<think>\n"
+        } else {
+            "<think>\n\n</think>\n\n"
+        });
     }
     prompt
 }
@@ -157,15 +191,15 @@ mod tests {
     #[test]
     fn renders_plain_qwen_chat_turns() {
         assert_eq!(
-            qwen_initial_chat_prompt("hello", Some("be concise"), false),
+            qwen_initial_chat_prompt("hello", Some("be concise"), false, true),
             "<|im_start|>system\nbe concise<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n"
         );
         assert_eq!(
-            qwen_chat_continuation("next", false, false),
+            qwen_chat_continuation("next", false, false, true),
             "<|im_end|>\n<|im_start|>user\nnext<|im_end|>\n<|im_start|>assistant\n"
         );
         assert_eq!(
-            qwen_chat_continuation("next", true, false),
+            qwen_chat_continuation("next", true, false, true),
             "\n<|im_start|>user\nnext<|im_end|>\n<|im_start|>assistant\n"
         );
     }
@@ -173,12 +207,24 @@ mod tests {
     #[test]
     fn renders_thinking_generation_prefix() {
         assert_eq!(
-            qwen_initial_chat_prompt("hello", None, true),
+            qwen_initial_chat_prompt("hello", None, true, true),
             "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n<think>\n"
         );
         assert_eq!(
-            qwen_chat_continuation("next", false, true),
+            qwen_chat_continuation("next", false, true, true),
             "<|im_end|>\n<|im_start|>user\nnext<|im_end|>\n<|im_start|>assistant\n<think>\n"
+        );
+    }
+
+    #[test]
+    fn renders_non_thinking_generation_prefix_with_closed_block() {
+        assert_eq!(
+            qwen_initial_chat_prompt("hello", None, true, false),
+            "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        );
+        assert_eq!(
+            qwen_chat_continuation("next", true, true, false),
+            "\n<|im_start|>user\nnext<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
         );
     }
 }

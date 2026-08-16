@@ -61,10 +61,13 @@ commands, compatibility details, and methodology.
 Qwen3.6's bundled MTP predictor can also be used for opt-in greedy speculative
 decoding. This is currently a correctness/reference implementation: its
 128-token output exactly matches ordinary greedy decoding, including when
-rejections occur, but its generic multi-row verifier is slower than the normal
-single-token path on the qualified host. Try it with `--speculative-mtp 1` and
-see [Speculative decoding](docs/speculative-decoding.md) for the complete
-command, measurements, restrictions, and next optimization target.
+rejections occur. Expert-grouped MoE execution and measured large-matrix
+small-batch kernels raised draft=1 from 6.31 to 7.17 tok/s, but target-only is
+still faster at 8.09 tok/s, so speculation remains disabled by default. Try it
+with `--speculative-mtp 1`; use `--thinking-budget N` to retain reasoning with
+a per-turn hard limit, or `--no-thinking` to render Qwen's closed thinking
+prefix. See [Speculative decoding](docs/speculative-decoding.md) for commands,
+K=1/2/4/8 verifier measurements, state semantics, and restrictions.
 
 ## Installation on a new server
 
@@ -119,7 +122,8 @@ host-native copy for inference so validation cannot overwrite it:
 ```bash
 CARGO_TARGET_DIR=target-native \
 RUSTFLAGS='-C target-cpu=native' \
-cargo build --release --bin gguf_infer --bin gguf_bench
+cargo build --release \
+  --bin gguf_infer --bin gguf_bench --bin gguf_verify_bench
 ```
 
 Do not copy `target-native` from a different server: `target-cpu=native` may

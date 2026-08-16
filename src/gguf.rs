@@ -13,9 +13,13 @@ use candle_core::{
     quantized::{
         GgmlDType, QStorage, QTensor,
         gguf_file::{Content, Value},
+        k_quants::{BlockQ4K, BlockQ5K, BlockQ6K, BlockQ8_0, GgmlType},
     },
 };
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+
+const SMALL_M_MIN_STORAGE_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GgufSummary {
@@ -322,7 +326,87 @@ impl QuantizedMatrix {
         } else {
             xs.to_dtype(DType::F32)?
         };
+        let input_rows = xs.elem_count() / self.columns;
+        if (2..=8).contains(&input_rows)
+            && self.tensor.device().is_cpu()
+            && (self.storage_bytes >= SMALL_M_MIN_STORAGE_BYTES || cfg!(test))
+        {
+            let values = xs.flatten_all()?.to_vec1::<f32>()?;
+            let output = match self.dtype {
+                GgmlDType::Q4K => self.small_m_forward::<BlockQ4K>(&values, input_rows)?,
+                GgmlDType::Q5K => self.small_m_forward::<BlockQ5K>(&values, input_rows)?,
+                GgmlDType::Q6K => self.small_m_forward::<BlockQ6K>(&values, input_rows)?,
+                GgmlDType::Q8_0 => self.small_m_forward::<BlockQ8_0>(&values, input_rows)?,
+                _ => return Ok(xs.apply_op1_no_bwd(self.tensor.as_ref())?),
+            };
+            let mut shape = xs.dims().to_vec();
+            *shape.last_mut().expect("rank validated above") = self.rows;
+            return Ok(Tensor::from_vec(output, shape, xs.device())?);
+        }
         Ok(xs.apply_op1_no_bwd(self.tensor.as_ref())?)
+    }
+
+    fn small_m_forward<T: GgmlType>(&self, xs: &[f32], input_rows: usize) -> Result<Vec<f32>> {
+        ensure!(
+            self.dtype == T::DTYPE,
+            "small-M kernel dtype mismatch: matrix {:?}, block {:?}",
+            self.dtype,
+            T::DTYPE
+        );
+        let blocks_per_row = self.columns.div_ceil(T::BLCK_SIZE);
+        let bytes = self.tensor.data()?;
+        // SAFETY: Candle's CPU QStorage owns a correctly aligned Vec<T> and
+        // exposes its exact initialized bytes here. The four concrete block
+        // types dispatched above are repr(C) numeric PODs for which every bit
+        // pattern is valid. Prefix/suffix checks below reject misalignment or
+        // a partial block before the typed slice is used.
+        let (prefix, weights, suffix) = unsafe { bytes.align_to::<T>() };
+        ensure!(
+            prefix.is_empty() && suffix.is_empty(),
+            "quantized matrix bytes are not aligned to complete {:?} blocks",
+            T::DTYPE
+        );
+        ensure!(
+            weights.len() == self.rows * blocks_per_row,
+            "quantized matrix has {} {:?} blocks, expected {}",
+            weights.len(),
+            T::DTYPE,
+            self.rows * blocks_per_row
+        );
+
+        let mut quantized_inputs = vec![T::VecDotType::zeros(); input_rows * blocks_per_row];
+        for row in 0..input_rows {
+            T::VecDotType::from_float(
+                &xs[row * self.columns..(row + 1) * self.columns],
+                &mut quantized_inputs[row * blocks_per_row..(row + 1) * blocks_per_row],
+            );
+        }
+
+        // Store output-column-major while parallel workers stream disjoint
+        // compressed rows. Applying all M inputs before advancing retains a
+        // weight row in cache instead of traversing the complete matrix M
+        // times as Candle's generic CPU loop does.
+        let mut transposed = vec![0f32; self.rows * input_rows];
+        transposed
+            .par_chunks_mut(input_rows)
+            .enumerate()
+            .for_each(|(output_row, output)| {
+                let weight =
+                    &weights[output_row * blocks_per_row..(output_row + 1) * blocks_per_row];
+                for input_row in 0..input_rows {
+                    let input = &quantized_inputs
+                        [input_row * blocks_per_row..(input_row + 1) * blocks_per_row];
+                    output[input_row] = T::vec_dot(self.columns, weight, input);
+                }
+            });
+        let mut output = vec![0f32; input_rows * self.rows];
+        for input_row in 0..input_rows {
+            for output_row in 0..self.rows {
+                output[input_row * self.rows + output_row] =
+                    transposed[output_row * input_rows + input_row];
+            }
+        }
+        Ok(output)
     }
 }
 

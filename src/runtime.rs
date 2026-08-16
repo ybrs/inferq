@@ -26,6 +26,121 @@ pub struct GenerationOptions {
     /// Maximum tokens proposed by Qwen3.5/3.6's embedded MTP head per target
     /// verification pass. Zero keeps ordinary autoregressive decoding.
     pub speculative_mtp_draft_tokens: usize,
+    /// Optional raw top-1/top-2 MTP logit-margin gate. Proposals below this
+    /// threshold fall back to a one-row authoritative target pass.
+    pub speculative_mtp_min_margin: Option<f32>,
+    /// Maximum authoritative generated tokens allowed inside the Qwen
+    /// `<think>` section. `None` preserves unbounded model-controlled thinking.
+    pub thinking_budget: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct QuantizedDraftObservation {
+    pub logit_margin: f32,
+    pub accepted: bool,
+    pub gated: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ThinkingMetrics {
+    pub budget: Option<usize>,
+    pub committed_thinking_tokens: usize,
+    pub forced_closures: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThinkingBoundary {
+    Continue,
+    NaturalClosure,
+    ForceClosure,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MtpDraftCandidate {
+    token: u32,
+    logit_margin: f32,
+}
+
+#[derive(Debug, Clone)]
+struct ThinkingBudget {
+    budget: usize,
+    committed: usize,
+    close_tokens: Vec<u32>,
+    forced_close_tokens: Vec<u32>,
+    recent: Vec<u32>,
+    active: bool,
+    forced: bool,
+}
+
+impl ThinkingBudget {
+    fn from_tokenizer(tokenizer: &ModelTokenizer, budget: Option<usize>) -> Result<Option<Self>> {
+        let Some(budget) = budget else {
+            return Ok(None);
+        };
+        let close_tokens = tokenizer.encode("</think>", false)?;
+        let forced_close_tokens = tokenizer.encode("</think>\n\n", false)?;
+        ensure!(
+            !close_tokens.is_empty() && !forced_close_tokens.is_empty(),
+            "tokenizer produced an empty thinking-closure sequence"
+        );
+        Ok(Some(Self {
+            budget,
+            committed: 0,
+            close_tokens,
+            forced_close_tokens,
+            recent: Vec::new(),
+            active: true,
+            forced: false,
+        }))
+    }
+
+    fn should_force_before_sampling(&mut self) -> bool {
+        if self.active && self.budget == 0 {
+            self.active = false;
+            self.forced = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn observe_committed(&mut self, token: u32, enforce_budget: bool) -> ThinkingBoundary {
+        if !self.active {
+            return ThinkingBoundary::Continue;
+        }
+        self.committed += 1;
+        self.recent.push(token);
+        if self.recent.len() > self.close_tokens.len() {
+            self.recent.remove(0);
+        }
+        if self.recent == self.close_tokens {
+            self.active = false;
+            return ThinkingBoundary::NaturalClosure;
+        }
+        if enforce_budget && self.committed >= self.budget {
+            self.active = false;
+            self.forced = true;
+            return ThinkingBoundary::ForceClosure;
+        }
+        ThinkingBoundary::Continue
+    }
+
+    fn remaining(&self) -> Option<usize> {
+        self.active
+            .then(|| self.budget.saturating_sub(self.committed))
+    }
+
+    fn forced_close_tokens(&self) -> &[u32] {
+        &self.forced_close_tokens
+    }
+
+    fn metrics(&self) -> ThinkingMetrics {
+        ThinkingMetrics {
+            budget: Some(self.budget),
+            committed_thinking_tokens: self.committed,
+            forced_closures: usize::from(self.forced),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -40,6 +155,11 @@ pub struct QuantizedSpeculativeMetrics {
     pub draft_wall_time: Duration,
     pub verification_wall_time: Duration,
     pub resync_wall_time: Duration,
+    pub checkpoint_wall_time: Duration,
+    pub restore_wall_time: Duration,
+    pub replay_wall_time: Duration,
+    pub gated_tokens: usize,
+    pub draft_observations: Vec<QuantizedDraftObservation>,
     pub draft_profile: QuantizedMtpTimings,
     pub resync_profile: QuantizedMtpTimings,
 }
@@ -69,6 +189,7 @@ pub struct QuantizedGenerationMetrics {
     pub decode_profile: QuantizedForwardTimings,
     pub expert_cache: ExpertCacheStats,
     pub speculative: QuantizedSpeculativeMetrics,
+    pub thinking: ThinkingMetrics,
 }
 
 impl QuantizedGenerationMetrics {
@@ -164,6 +285,85 @@ impl<'a> QuantizedRuntime<'a> {
         }
     }
 
+    fn force_close_thinking_target_only(
+        &mut self,
+        pending_token: Option<u32>,
+        forced_close_tokens: &[u32],
+        generated: &mut Vec<u32>,
+        decode_profile: &mut QuantizedForwardTimings,
+        on_token: &mut impl FnMut(u32) -> Result<()>,
+    ) -> Result<Tensor> {
+        let mut logits = None;
+        if let Some(token) = pending_token {
+            let (next, profile) = self.forward(&[token])?;
+            decode_profile.accumulate(&profile);
+            logits = Some(next);
+        }
+        for &token in forced_close_tokens {
+            generated.push(token);
+            if let Err(error) = on_token(token) {
+                self.pending_token = Some(token);
+                return Err(error);
+            }
+            let (next, profile) = self.forward(&[token])?;
+            decode_profile.accumulate(&profile);
+            logits = Some(next);
+        }
+        logits.context("forced thinking closure produced no target logits")
+    }
+
+    fn evaluate_authoritative_mtp_token(
+        &mut self,
+        token: u32,
+        decode_profile: &mut QuantizedForwardTimings,
+        speculative: &mut QuantizedSpeculativeMetrics,
+    ) -> Result<Tensor> {
+        let position = self.state.position;
+        let previous_hidden = self
+            .last_target_hidden
+            .clone()
+            .context("target hidden-state carry is missing")?;
+        let output = self.model.forward_detailed(&[token], &mut self.state)?;
+        decode_profile.accumulate(&output.timings);
+        let resync_started = Instant::now();
+        let resync = self.synchronize_mtp(
+            position,
+            Some(&previous_hidden),
+            &[token],
+            &output.normalized_hidden,
+        )?;
+        speculative.resync_wall_time += resync_started.elapsed();
+        speculative.resync_profile.accumulate(&resync);
+        self.last_target_hidden = Some(last_hidden_row(&output.normalized_hidden)?);
+        Ok(output.logits)
+    }
+
+    fn force_close_thinking_speculative(
+        &mut self,
+        pending_token: Option<u32>,
+        forced_close_tokens: &[u32],
+        generated: &mut Vec<u32>,
+        decode_profile: &mut QuantizedForwardTimings,
+        speculative: &mut QuantizedSpeculativeMetrics,
+        on_token: &mut impl FnMut(u32) -> Result<()>,
+    ) -> Result<Tensor> {
+        let mut logits = None;
+        if let Some(token) = pending_token {
+            logits =
+                Some(self.evaluate_authoritative_mtp_token(token, decode_profile, speculative)?);
+        }
+        for &token in forced_close_tokens {
+            generated.push(token);
+            if let Err(error) = on_token(token) {
+                self.pending_token = Some(token);
+                return Err(error);
+            }
+            logits =
+                Some(self.evaluate_authoritative_mtp_token(token, decode_profile, speculative)?);
+        }
+        logits.context("forced thinking closure produced no target logits")
+    }
+
     pub fn generate(
         &mut self,
         prompt: &str,
@@ -201,10 +401,31 @@ impl<'a> QuantizedRuntime<'a> {
         let decode_started = Instant::now();
         let mut decode_profile = QuantizedForwardTimings::default();
         let mut generated = Vec::with_capacity(options.max_new_tokens);
-        for step in 0..options.max_new_tokens {
+        let mut pending_token = None;
+        let mut thinking =
+            ThinkingBudget::from_tokenizer(&self.tokenizer, options.thinking_budget)?;
+        if thinking
+            .as_mut()
+            .is_some_and(ThinkingBudget::should_force_before_sampling)
+        {
+            let closure = thinking
+                .as_ref()
+                .expect("thinking budget exists")
+                .forced_close_tokens()
+                .to_vec();
+            logits = self.force_close_thinking_target_only(
+                None,
+                &closure,
+                &mut generated,
+                &mut decode_profile,
+                &mut on_token,
+            )?;
+        }
+        while generated.len() < options.max_new_tokens {
             let last = logits.i(logits.dim(0)? - 1)?.to_vec1::<f32>()?;
             let token = sampler.sample(&last)?;
             generated.push(token);
+            pending_token = Some(token);
             if let Err(error) = on_token(token) {
                 // The current sampled token has not been evaluated yet, so it
                 // is the correct pending token if the output sink fails.
@@ -214,23 +435,42 @@ impl<'a> QuantizedRuntime<'a> {
                 }
                 return Err(error);
             }
-            let is_config_eos = self
-                .model
-                .config()
-                .eos_token_id
-                .as_ref()
-                .is_some_and(|ids| ids.contains(token));
-            if is_config_eos
-                || options.stop_tokens.contains(&token)
-                || step + 1 == options.max_new_tokens
-            {
+            let is_stop = self.is_stop_token(token, options);
+            let boundary = thinking
+                .as_mut()
+                .map_or(ThinkingBoundary::Continue, |budget| {
+                    budget.observe_committed(token, !is_stop)
+                });
+            if is_stop {
+                break;
+            }
+            if boundary == ThinkingBoundary::ForceClosure {
+                let closure = thinking
+                    .as_ref()
+                    .expect("thinking budget exists")
+                    .forced_close_tokens()
+                    .to_vec();
+                logits = self.force_close_thinking_target_only(
+                    pending_token.take(),
+                    &closure,
+                    &mut generated,
+                    &mut decode_profile,
+                    &mut on_token,
+                )?;
+                if generated.len() >= options.max_new_tokens {
+                    break;
+                }
+                continue;
+            }
+            if generated.len() >= options.max_new_tokens {
                 break;
             }
             let (next_logits, profile) = self.forward(&[token])?;
             decode_profile.accumulate(&profile);
             logits = next_logits;
+            pending_token = None;
         }
-        self.pending_token = generated.last().copied();
+        self.pending_token = pending_token;
         if let Some(trace) = &mut self.trace {
             trace.flush()?;
         }
@@ -255,6 +495,10 @@ impl<'a> QuantizedRuntime<'a> {
                 decode_profile,
                 expert_cache,
                 speculative: QuantizedSpeculativeMetrics::default(),
+                thinking: thinking
+                    .as_ref()
+                    .map(ThinkingBudget::metrics)
+                    .unwrap_or_default(),
             },
             prompt_token_ids,
             evaluated_input_token_ids,
@@ -321,11 +565,7 @@ impl<'a> QuantizedRuntime<'a> {
         let prefill_profile = prefill.timings;
 
         let mut sampler = Sampler::new(options.sampling.clone())?;
-        let first_logits = prefill
-            .logits
-            .i(prefill.logits.dim(0)? - 1)?
-            .to_vec1::<f32>()?;
-        let first = sampler.sample(&first_logits)?;
+        let mut next_logits = prefill.logits;
         let decode_started = Instant::now();
         let mut decode_profile = QuantizedForwardTimings::default();
         let mut speculative = QuantizedSpeculativeMetrics {
@@ -333,20 +573,83 @@ impl<'a> QuantizedRuntime<'a> {
             ..Default::default()
         };
         let mut generated = Vec::with_capacity(options.max_new_tokens);
-        generated.push(first);
-        if let Err(error) = on_token(first) {
-            self.pending_token = Some(first);
-            return Err(error);
+        let mut thinking =
+            ThinkingBudget::from_tokenizer(&self.tokenizer, options.thinking_budget)?;
+        let mut pending_token = None;
+
+        if thinking
+            .as_mut()
+            .is_some_and(ThinkingBudget::should_force_before_sampling)
+        {
+            let closure = thinking
+                .as_ref()
+                .expect("thinking budget exists")
+                .forced_close_tokens()
+                .to_vec();
+            next_logits = self.force_close_thinking_speculative(
+                None,
+                &closure,
+                &mut generated,
+                &mut decode_profile,
+                &mut speculative,
+                &mut on_token,
+            )?;
         }
 
-        'generation: while generated.len() < options.max_new_tokens
-            && !self.is_stop_token(*generated.last().expect("generated is non-empty"), options)
-        {
-            let seed = *generated.last().expect("generated is non-empty");
+        if generated.len() < options.max_new_tokens {
+            let logits = next_logits.i(next_logits.dim(0)? - 1)?.to_vec1::<f32>()?;
+            let first = sampler.sample(&logits)?;
+            generated.push(first);
+            pending_token = Some(first);
+            if let Err(error) = on_token(first) {
+                self.pending_token = Some(first);
+                return Err(error);
+            }
+            let is_stop = self.is_stop_token(first, options);
+            let boundary = thinking
+                .as_mut()
+                .map_or(ThinkingBoundary::Continue, |budget| {
+                    budget.observe_committed(first, !is_stop)
+                });
+            if boundary == ThinkingBoundary::ForceClosure {
+                let closure = thinking
+                    .as_ref()
+                    .expect("thinking budget exists")
+                    .forced_close_tokens()
+                    .to_vec();
+                next_logits = self.force_close_thinking_speculative(
+                    pending_token.take(),
+                    &closure,
+                    &mut generated,
+                    &mut decode_profile,
+                    &mut speculative,
+                    &mut on_token,
+                )?;
+                if generated.len() < options.max_new_tokens {
+                    let logits = next_logits.i(next_logits.dim(0)? - 1)?.to_vec1::<f32>()?;
+                    let answer = sampler.sample(&logits)?;
+                    generated.push(answer);
+                    pending_token = Some(answer);
+                    if let Err(error) = on_token(answer) {
+                        self.pending_token = Some(answer);
+                        return Err(error);
+                    }
+                }
+            }
+        }
+
+        'generation: while let Some(seed) = pending_token {
+            if generated.len() >= options.max_new_tokens || self.is_stop_token(seed, options) {
+                break;
+            }
             let remaining = options.max_new_tokens - generated.len();
-            let draft_limit = options
+            let mut draft_limit = options
                 .speculative_mtp_draft_tokens
                 .min(remaining.saturating_sub(1));
+            if let Some(thinking_remaining) = thinking.as_ref().and_then(ThinkingBudget::remaining)
+            {
+                draft_limit = draft_limit.min(thinking_remaining);
+            }
             let target_prefix_position = self.state.position;
             let prior_hidden = self
                 .last_target_hidden
@@ -360,7 +663,7 @@ impl<'a> QuantizedRuntime<'a> {
             );
 
             let draft_started = Instant::now();
-            let (drafts, draft_profile) =
+            let (draft_candidates, draft_profile) =
                 match self.draft_mtp(seed, &prior_hidden, draft_limit, options) {
                     Ok(result) => result,
                     Err(error) => {
@@ -373,12 +676,33 @@ impl<'a> QuantizedRuntime<'a> {
                 };
             speculative.draft_wall_time += draft_started.elapsed();
             speculative.draft_profile.accumulate(&draft_profile);
-            speculative.drafted_tokens += drafts.len();
+            speculative.drafted_tokens += draft_candidates.len();
+            let verified_draft_count =
+                options
+                    .speculative_mtp_min_margin
+                    .map_or(draft_candidates.len(), |threshold| {
+                        draft_candidates
+                            .iter()
+                            .take_while(|draft| draft.logit_margin >= threshold)
+                            .count()
+                    });
+            speculative.gated_tokens += draft_candidates.len() - verified_draft_count;
+            let drafts = draft_candidates[..verified_draft_count]
+                .iter()
+                .map(|draft| draft.token)
+                .collect::<Vec<_>>();
 
             let mut verification_tokens = Vec::with_capacity(1 + drafts.len());
             verification_tokens.push(seed);
             verification_tokens.extend_from_slice(&drafts);
-            let checkpoint = self.state.checkpoint();
+            let checkpoint = if drafts.is_empty() {
+                None
+            } else {
+                let checkpoint_started = Instant::now();
+                let checkpoint = self.state.checkpoint();
+                speculative.checkpoint_wall_time += checkpoint_started.elapsed();
+                Some(checkpoint)
+            };
             let verification_started = Instant::now();
             let verified = match self
                 .model
@@ -386,7 +710,9 @@ impl<'a> QuantizedRuntime<'a> {
             {
                 Ok(output) => output,
                 Err(error) => {
-                    self.state.restore(&checkpoint)?;
+                    if let Some(checkpoint) = &checkpoint {
+                        self.state.restore(checkpoint)?;
+                    }
                     self.mtp_state
                         .as_mut()
                         .expect("MTP availability validated")
@@ -406,7 +732,15 @@ impl<'a> QuantizedRuntime<'a> {
                 verification_tokens.len()
             );
             let accepted = accepted_draft_prefix(&drafts, &verifier_logits)?;
-            speculative.accepted_tokens += accepted;
+            speculative
+                .draft_observations
+                .extend(draft_candidates.iter().enumerate().map(|(index, draft)| {
+                    QuantizedDraftObservation {
+                        logit_margin: draft.logit_margin,
+                        accepted: index < accepted,
+                        gated: index >= verified_draft_count,
+                    }
+                }));
             let authoritative = argmax(&verifier_logits[accepted])? as u32;
             let committed_token_count = 1 + accepted;
 
@@ -414,11 +748,19 @@ impl<'a> QuantizedRuntime<'a> {
                 verified.normalized_hidden
             } else {
                 speculative.rollback_replays += 1;
-                self.state.restore(&checkpoint)?;
+                let restore_started = Instant::now();
+                self.state.restore(
+                    checkpoint
+                        .as_ref()
+                        .expect("rejection requires a checkpoint"),
+                )?;
+                speculative.restore_wall_time += restore_started.elapsed();
+                let replay_started = Instant::now();
                 let replayed = self.model.forward_detailed(
                     &verification_tokens[..committed_token_count],
                     &mut self.state,
                 )?;
+                speculative.replay_wall_time += replay_started.elapsed();
                 speculative.replayed_tokens += committed_token_count;
                 decode_profile.accumulate(&replayed.timings);
                 replayed.normalized_hidden
@@ -435,9 +777,8 @@ impl<'a> QuantizedRuntime<'a> {
             speculative.resync_profile.accumulate(&resync_profile);
             self.last_target_hidden = Some(last_hidden_row(&committed_hidden)?);
 
-            let mut outputs = drafts[..accepted].to_vec();
-            outputs.push(authoritative);
-            for (output_index, token) in outputs.into_iter().enumerate() {
+            let outputs = speculative_committed_outputs(&drafts, accepted, authoritative);
+            for (output_index, (token, accepted_draft)) in outputs.into_iter().enumerate() {
                 generated.push(token);
                 if let Err(error) = on_token(token) {
                     // Restore the target and MTP contexts to immediately before
@@ -445,27 +786,67 @@ impl<'a> QuantizedRuntime<'a> {
                     // token pending just like ordinary generation.
                     let successful_outputs = output_index;
                     let evaluated = 1 + successful_outputs.min(accepted);
-                    self.state.restore(&checkpoint)?;
-                    let replayed = self
-                        .model
-                        .forward_detailed(&verification_tokens[..evaluated], &mut self.state)?;
-                    self.synchronize_mtp(
-                        target_prefix_position,
-                        Some(&prior_hidden),
-                        &verification_tokens[..evaluated],
-                        &replayed.normalized_hidden,
-                    )?;
-                    self.last_target_hidden = Some(last_hidden_row(&replayed.normalized_hidden)?);
+                    if let Some(checkpoint) = &checkpoint {
+                        self.state.restore(checkpoint)?;
+                        let replayed = self
+                            .model
+                            .forward_detailed(&verification_tokens[..evaluated], &mut self.state)?;
+                        self.synchronize_mtp(
+                            target_prefix_position,
+                            Some(&prior_hidden),
+                            &verification_tokens[..evaluated],
+                            &replayed.normalized_hidden,
+                        )?;
+                        self.last_target_hidden =
+                            Some(last_hidden_row(&replayed.normalized_hidden)?);
+                    }
                     self.pending_token = Some(token);
                     return Err(error);
                 }
-                if generated.len() == options.max_new_tokens || self.is_stop_token(token, options) {
+                if accepted_draft {
+                    speculative.accepted_tokens += 1;
+                }
+                let is_stop = self.is_stop_token(token, options);
+                let boundary = thinking
+                    .as_mut()
+                    .map_or(ThinkingBoundary::Continue, |budget| {
+                        budget.observe_committed(token, !is_stop)
+                    });
+                pending_token = (!accepted_draft).then_some(token);
+                if boundary == ThinkingBoundary::ForceClosure {
+                    let closure = thinking
+                        .as_ref()
+                        .expect("thinking budget exists")
+                        .forced_close_tokens()
+                        .to_vec();
+                    next_logits = self.force_close_thinking_speculative(
+                        (!accepted_draft).then_some(token),
+                        &closure,
+                        &mut generated,
+                        &mut decode_profile,
+                        &mut speculative,
+                        &mut on_token,
+                    )?;
+                    pending_token = None;
+                    if generated.len() < options.max_new_tokens {
+                        let logits = next_logits.i(next_logits.dim(0)? - 1)?.to_vec1::<f32>()?;
+                        let answer = sampler.sample(&logits)?;
+                        generated.push(answer);
+                        pending_token = Some(answer);
+                        if let Err(error) = on_token(answer) {
+                            self.pending_token = Some(answer);
+                            return Err(error);
+                        }
+                    }
+                    continue 'generation;
+                }
+                if generated.len() == options.max_new_tokens || is_stop {
                     break 'generation;
                 }
             }
         }
 
-        self.pending_token = generated.last().copied();
+        self.pending_token = pending_token;
         let decode_wall_time = decode_started.elapsed();
         let expert_cache = self
             .model
@@ -487,6 +868,10 @@ impl<'a> QuantizedRuntime<'a> {
                 decode_profile,
                 expert_cache,
                 speculative,
+                thinking: thinking
+                    .as_ref()
+                    .map(ThinkingBudget::metrics)
+                    .unwrap_or_default(),
             },
             prompt_token_ids,
             evaluated_input_token_ids,
@@ -501,7 +886,7 @@ impl<'a> QuantizedRuntime<'a> {
         target_hidden: &[f32],
         max_drafts: usize,
         options: &GenerationOptions,
-    ) -> Result<(Vec<u32>, QuantizedMtpTimings)> {
+    ) -> Result<(Vec<MtpDraftCandidate>, QuantizedMtpTimings)> {
         let hidden_size = self.model.config().hidden_size;
         ensure!(
             target_hidden.len() == hidden_size,
@@ -530,12 +915,16 @@ impl<'a> QuantizedRuntime<'a> {
                 .context("MTP draft forward did not produce logits")?
                 .i(0)?
                 .to_vec1::<f32>()?;
-            let draft = argmax(&logits)? as u32;
+            let (draft, logit_margin) = top1_with_margin(&logits)?;
+            let draft = draft as u32;
             hidden = output.normalized_hidden.i(0)?.to_vec1::<f32>()?;
             if self.is_stop_token(draft, options) {
                 break;
             }
-            drafts.push(draft);
+            drafts.push(MtpDraftCandidate {
+                token: draft,
+                logit_margin,
+            });
             token = draft;
         }
         Ok((drafts, timings))
@@ -647,6 +1036,32 @@ fn accepted_draft_prefix(drafts: &[u32], verifier_logits: &[Vec<f32>]) -> Result
     Ok(accepted)
 }
 
+fn top1_with_margin(logits: &[f32]) -> Result<(usize, f32)> {
+    let top = argmax(logits)?;
+    let second = logits
+        .iter()
+        .enumerate()
+        .filter(|(index, value)| *index != top && value.is_finite())
+        .map(|(_, &value)| value)
+        .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .context("MTP logits do not contain a finite runner-up")?;
+    Ok((top, logits[top] - second))
+}
+
+fn speculative_committed_outputs(
+    drafts: &[u32],
+    accepted: usize,
+    authoritative: u32,
+) -> Vec<(u32, bool)> {
+    let mut outputs = drafts[..accepted]
+        .iter()
+        .copied()
+        .map(|token| (token, true))
+        .collect::<Vec<_>>();
+    outputs.push((authoritative, false));
+    outputs
+}
+
 fn continuation_input(prompt_token_ids: &[u32], pending_token: Option<u32>) -> Vec<u32> {
     let mut input =
         Vec::with_capacity(prompt_token_ids.len() + usize::from(pending_token.is_some()));
@@ -659,7 +1074,22 @@ fn continuation_input(prompt_token_ids: &[u32], pending_token: Option<u32>) -> V
 mod quantized_runtime_tests {
     use candle_core::{Device, Tensor};
 
-    use super::{accepted_draft_prefix, continuation_input, shifted_hidden_inputs};
+    use super::{
+        ThinkingBoundary, ThinkingBudget, accepted_draft_prefix, continuation_input,
+        shifted_hidden_inputs, speculative_committed_outputs,
+    };
+
+    fn thinking_budget(budget: usize) -> ThinkingBudget {
+        ThinkingBudget {
+            budget,
+            committed: 0,
+            close_tokens: vec![90, 91],
+            forced_close_tokens: vec![90, 91, 92],
+            recent: Vec::new(),
+            active: true,
+            forced: false,
+        }
+    }
 
     #[test]
     fn persistent_turn_evaluates_pending_generated_token_first() {
@@ -684,6 +1114,95 @@ mod quantized_runtime_tests {
         assert_eq!(accepted_draft_prefix(&[1], &logits).unwrap(), 1);
         assert_eq!(accepted_draft_prefix(&[], &logits).unwrap(), 0);
     }
+
+    #[test]
+    fn natural_thinking_close_spanning_tokens_wins_before_budget() {
+        let mut thinking = thinking_budget(5);
+        assert_eq!(
+            thinking.observe_committed(7, true),
+            ThinkingBoundary::Continue
+        );
+        assert_eq!(
+            thinking.observe_committed(90, true),
+            ThinkingBoundary::Continue
+        );
+        assert_eq!(
+            thinking.observe_committed(91, true),
+            ThinkingBoundary::NaturalClosure
+        );
+        assert_eq!(thinking.metrics().committed_thinking_tokens, 3);
+        assert_eq!(thinking.metrics().forced_closures, 0);
+    }
+
+    #[test]
+    fn thinking_budget_forces_the_complete_tokenized_closure() {
+        let mut thinking = thinking_budget(2);
+        assert_eq!(
+            thinking.observe_committed(7, true),
+            ThinkingBoundary::Continue
+        );
+        assert_eq!(
+            thinking.observe_committed(8, true),
+            ThinkingBoundary::ForceClosure
+        );
+        assert_eq!(thinking.forced_close_tokens(), [90, 91, 92]);
+        assert_eq!(thinking.metrics().forced_closures, 1);
+    }
+
+    #[test]
+    fn thinking_budget_state_resets_for_each_repl_turn() {
+        for _turn in 0..2 {
+            let mut thinking = thinking_budget(1);
+            assert_eq!(
+                thinking.observe_committed(7, true),
+                ThinkingBoundary::ForceClosure
+            );
+            assert_eq!(thinking.metrics().committed_thinking_tokens, 1);
+        }
+    }
+
+    #[test]
+    fn accepted_speculative_drafts_stop_at_the_budget_boundary() {
+        let outputs = speculative_committed_outputs(&[11, 12], 2, 13);
+        let mut thinking = thinking_budget(2);
+        let mut committed = Vec::new();
+        for (token, _) in outputs {
+            committed.push(token);
+            if thinking.observe_committed(token, true) == ThinkingBoundary::ForceClosure {
+                break;
+            }
+        }
+        assert_eq!(committed, [11, 12]);
+        assert_eq!(thinking.metrics().forced_closures, 1);
+    }
+
+    #[test]
+    fn rejected_speculative_drafts_do_not_consume_thinking_budget() {
+        let outputs = speculative_committed_outputs(&[11, 77], 1, 12);
+        let mut thinking = thinking_budget(2);
+        let events = outputs
+            .into_iter()
+            .map(|(token, _)| (token, thinking.observe_committed(token, true)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            events,
+            [
+                (11, ThinkingBoundary::Continue),
+                (12, ThinkingBoundary::ForceClosure)
+            ]
+        );
+        assert_eq!(thinking.metrics().committed_thinking_tokens, 2);
+    }
+
+    #[test]
+    fn stop_token_does_not_trigger_a_forced_closure() {
+        let mut thinking = thinking_budget(1);
+        assert_eq!(
+            thinking.observe_committed(7, false),
+            ThinkingBoundary::Continue
+        );
+        assert_eq!(thinking.metrics().forced_closures, 0);
+    }
 }
 
 impl Default for GenerationOptions {
@@ -694,6 +1213,8 @@ impl Default for GenerationOptions {
             stop_tokens: vec![],
             add_special_tokens: false,
             speculative_mtp_draft_tokens: 0,
+            speculative_mtp_min_margin: None,
+            thinking_budget: None,
         }
     }
 }

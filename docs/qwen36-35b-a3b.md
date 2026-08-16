@@ -133,17 +133,18 @@ sensitivity.
 Pass `--speculative-mtp N` to use block 40 as an in-model draft predictor for
 up to `N` tokens before each target-model verification pass. This mode is
 currently restricted to greedy decoding and cannot be combined with routing
-traces or expert censuses. It is an opt-in correctness
-baseline rather than a recommended performance mode: the current generic
-multi-row verifier does not amortize the target weights enough to overcome MTP
-execution, rejected rows, and state repair.
+traces or expert censuses. It remains opt-in: expert-grouped routed execution,
+and large-matrix small-M kernels improved the verifier substantially, but have
+not yet overcome MTP execution, rejected rows, and state repair end to end.
 
 The fully resident Q4 benchmark produced exactly the same 128 greedy token IDs
 with draft lengths 0, 1, 2, and 3, including runs that exercised rejection and
 rollback. Draft length 1 accepted 59 of 67 proposals (88.1%), but decoded at
-6.31 token/s versus 8.10 token/s without speculation. See
+7.17 token/s versus 8.09 token/s without speculation after optimization. An
+experimental 0.3 logit-margin gate reached 7.51 token/s, also below break-even.
+See
 [Speculative decoding](speculative-decoding.md) for the command, complete
-results, state semantics, and next critical optimization.
+K=1/2/4/8 verifier measurements, state semantics, and remaining measured work.
 
 `--warmup-all-experts` includes the auxiliary block's experts when the model
 declares an MTP layer. This adds about 0.84 GiB of Q4 compressed weights to the
