@@ -26,6 +26,16 @@ state. `Runtime::decode` accepts exactly one previously sampled token and
 updates that state. Greedy decoding is selected with temperature zero; seeded
 temperature, top-k, top-p, and min-p sampling are also available.
 
+For Qwen3.6 models that declare one auxiliary MTP layer, the quantized runtime
+also has an opt-in speculative path. It feeds the previous target hidden state
+and current token embedding through the auxiliary predictor, drafts up to the
+requested number of greedy tokens, verifies them in one target-model batch,
+accepts the matching prefix, and restores/replays target recurrent state after
+a rejection. The MTP KV cache is then synchronized from authoritative target
+hidden states. Ordinary generation does not execute this layer. See
+[speculative-decoding.md](speculative-decoding.md) for the exact data flow,
+current restrictions, correctness evidence, and measured performance.
+
 The scalar Delta Rule, causal convolution, attention loop, and expert selection
 are intentionally readable reference implementations. Candle supplies tensor
 storage, dtype conversion, and matrix multiplication. Because Candle CPU does

@@ -12,6 +12,36 @@ pub struct QuantizedAttentionState {
     pub positions: usize,
 }
 
+impl QuantizedAttentionState {
+    pub fn truncate(&mut self, positions: usize) -> Result<()> {
+        ensure!(
+            positions <= self.positions,
+            "cannot extend attention state from {} to {positions} positions",
+            self.positions
+        );
+        if positions == self.positions {
+            return Ok(());
+        }
+        if positions == 0 {
+            self.keys.clear();
+            self.values.clear();
+            self.positions = 0;
+            return Ok(());
+        }
+        ensure!(
+            self.keys.len().is_multiple_of(self.positions)
+                && self.values.len().is_multiple_of(self.positions),
+            "attention state storage is inconsistent with its position"
+        );
+        let keys_per_position = self.keys.len() / self.positions;
+        let values_per_position = self.values.len() / self.positions;
+        self.keys.truncate(positions * keys_per_position);
+        self.values.truncate(positions * values_per_position);
+        self.positions = positions;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct QuantizedAttentionTimings {
     pub wall: Duration,
@@ -274,5 +304,21 @@ mod tests {
         let rms = (12.5f32).sqrt();
         assert!((values[0] - 6. / rms).abs() < 1e-6);
         assert!((values[1] - 12. / rms).abs() < 1e-6);
+    }
+
+    #[test]
+    fn attention_state_truncation_preserves_position_stride() {
+        let mut state = QuantizedAttentionState {
+            keys: (0..12).map(|value| value as f32).collect(),
+            values: (0..18).map(|value| value as f32).collect(),
+            positions: 3,
+        };
+        state.truncate(2).unwrap();
+        assert_eq!(state.positions, 2);
+        assert_eq!(state.keys.len(), 8);
+        assert_eq!(state.values.len(), 12);
+        state.truncate(0).unwrap();
+        assert!(state.keys.is_empty());
+        assert!(state.values.is_empty());
     }
 }

@@ -11,8 +11,8 @@ use crate::{
 };
 
 use super::{
-    QuantizedAttentionState, QuantizedDeltaState, QuantizedFullLayer, QuantizedLayerTimings,
-    QuantizedLinearLayer, quantized_layer::gguf_rms_norm,
+    QuantizedAttentionState, QuantizedDeltaCheckpoint, QuantizedDeltaState, QuantizedFullLayer,
+    QuantizedLayerTimings, QuantizedLinearLayer, QuantizedMtpHead, quantized_layer::gguf_rms_norm,
 };
 
 enum DecoderLayer<'a> {
@@ -27,9 +27,65 @@ enum DecoderState {
 }
 
 #[derive(Debug, Clone)]
+enum DecoderCheckpoint {
+    Full { position: usize },
+    Linear(QuantizedDeltaCheckpoint),
+}
+
+#[derive(Debug, Clone)]
+pub struct QuantizedModelCheckpoint {
+    layers: Vec<DecoderCheckpoint>,
+    position: usize,
+}
+
+#[derive(Debug, Clone)]
 pub struct QuantizedModelState {
     layers: Vec<DecoderState>,
     pub position: usize,
+}
+
+impl QuantizedModelState {
+    pub fn checkpoint(&self) -> QuantizedModelCheckpoint {
+        QuantizedModelCheckpoint {
+            layers: self
+                .layers
+                .iter()
+                .map(|layer| match layer {
+                    DecoderState::Full(state) => DecoderCheckpoint::Full {
+                        position: state.positions,
+                    },
+                    DecoderState::Linear(state) => DecoderCheckpoint::Linear(state.checkpoint()),
+                })
+                .collect(),
+            position: self.position,
+        }
+    }
+
+    pub fn restore(&mut self, checkpoint: &QuantizedModelCheckpoint) -> Result<()> {
+        ensure!(
+            self.layers.len() == checkpoint.layers.len(),
+            "model checkpoint belongs to a different model"
+        );
+        for (index, (state, saved)) in self.layers.iter_mut().zip(&checkpoint.layers).enumerate() {
+            match (state, saved) {
+                (DecoderState::Full(state), DecoderCheckpoint::Full { position }) => {
+                    state.truncate(*position)?;
+                }
+                (DecoderState::Linear(state), DecoderCheckpoint::Linear(saved)) => {
+                    state.restore(saved)?;
+                }
+                _ => anyhow::bail!("checkpoint state type does not match layer {index}"),
+            }
+        }
+        self.position = checkpoint.position;
+        Ok(())
+    }
+}
+
+pub struct QuantizedForwardOutput {
+    pub logits: Tensor,
+    pub normalized_hidden: Tensor,
+    pub timings: QuantizedForwardTimings,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -209,6 +265,7 @@ pub struct QuantizedModel<'a> {
     layers: Vec<DecoderLayer<'a>>,
     final_norm: Tensor,
     lm_head: QuantizedMatrix,
+    mtp: Option<QuantizedMtpHead<'a>>,
 }
 
 impl std::fmt::Debug for QuantizedModel<'_> {
@@ -256,6 +313,16 @@ impl<'a> QuantizedModel<'a> {
             "invalid LM head shape {:?}",
             lm_head.shape()
         );
+        let mtp = if config.mtp_num_hidden_layers == 1 {
+            Some(QuantizedMtpHead::load(
+                checkpoint,
+                &config,
+                embedding.clone(),
+                lm_head.clone(),
+            )?)
+        } else {
+            None
+        };
         Ok(Self {
             checkpoint,
             config,
@@ -263,6 +330,7 @@ impl<'a> QuantizedModel<'a> {
             layers,
             final_norm,
             lm_head,
+            mtp,
         })
     }
 
@@ -272,6 +340,10 @@ impl<'a> QuantizedModel<'a> {
 
     pub fn expert_cache_stats(&self) -> Result<ExpertCacheStats> {
         self.checkpoint.expert_cache_stats()
+    }
+
+    pub fn mtp(&self) -> Option<&QuantizedMtpHead<'a>> {
+        self.mtp.as_ref()
     }
 
     pub fn new_state(&self) -> QuantizedModelState {
@@ -294,15 +366,34 @@ impl<'a> QuantizedModel<'a> {
         token_ids: &[u32],
         state: &mut QuantizedModelState,
     ) -> Result<(Tensor, QuantizedForwardTimings)> {
-        self.forward_with_trace(token_ids, state, None)
+        let output = self.forward_detailed_with_trace(token_ids, state, None)?;
+        Ok((output.logits, output.timings))
     }
 
     pub fn forward_with_trace(
         &self,
         token_ids: &[u32],
         state: &mut QuantizedModelState,
-        mut trace: Option<&mut dyn RoutingTrace>,
+        trace: Option<&mut dyn RoutingTrace>,
     ) -> Result<(Tensor, QuantizedForwardTimings)> {
+        let output = self.forward_detailed_with_trace(token_ids, state, trace)?;
+        Ok((output.logits, output.timings))
+    }
+
+    pub fn forward_detailed(
+        &self,
+        token_ids: &[u32],
+        state: &mut QuantizedModelState,
+    ) -> Result<QuantizedForwardOutput> {
+        self.forward_detailed_with_trace(token_ids, state, None)
+    }
+
+    pub fn forward_detailed_with_trace(
+        &self,
+        token_ids: &[u32],
+        state: &mut QuantizedModelState,
+        mut trace: Option<&mut dyn RoutingTrace>,
+    ) -> Result<QuantizedForwardOutput> {
         ensure!(!token_ids.is_empty(), "forward requires at least one token");
         ensure!(
             state.layers.len() == self.layers.len(),
@@ -370,7 +461,11 @@ impl<'a> QuantizedModel<'a> {
         timings.lm_head = lm_started.elapsed();
         state.position += token_ids.len();
         timings.wall = wall_started.elapsed();
-        Ok((logits, timings))
+        Ok(QuantizedForwardOutput {
+            logits,
+            normalized_hidden: hidden,
+            timings,
+        })
     }
 }
 

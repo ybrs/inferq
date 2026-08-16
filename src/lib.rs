@@ -22,5 +22,5 @@ pub use residency::{
 };
 pub use runtime::{
     GenerationMetrics, GenerationOptions, GenerationResult, QuantizedGenerationMetrics,
-    QuantizedGenerationResult, QuantizedRuntime, Runtime,
+    QuantizedGenerationResult, QuantizedRuntime, QuantizedSpeculativeMetrics, Runtime,
 };

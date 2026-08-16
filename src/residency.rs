@@ -41,8 +41,9 @@ pub fn warm_all_experts(
     config: &Qwen3NextConfig,
     mut on_progress: impl FnMut(FullExpertWarmupProgress),
 ) -> Result<FullExpertWarmupReport> {
-    let mut tensors = Vec::with_capacity(config.num_hidden_layers * 3);
-    for layer in 0..config.num_hidden_layers {
+    let resident_layers = config.num_hidden_layers + config.mtp_num_hidden_layers;
+    let mut tensors = Vec::with_capacity(resident_layers * 3);
+    for layer in 0..resident_layers {
         for suffix in [
             "ffn_gate_exps.weight",
             "ffn_up_exps.weight",
@@ -103,7 +104,7 @@ pub fn warm_all_experts(
         // File-order warmup keeps HDD access sequential. Once all matrices are
         // resident, replace each gate/up pair with one row-concatenated cache
         // entry without changing the byte footprint or rereading the GGUF.
-        for layer in 0..config.num_hidden_layers {
+        for layer in 0..resident_layers {
             let prefix = format!("blk.{layer}");
             checkpoint.fuse_cached_expert_pair(
                 &format!("{prefix}.ffn_gate_exps.weight"),

@@ -72,6 +72,7 @@ fn main() -> Result<()> {
             },
             stop_tokens: args.stop_token,
             add_special_tokens: false,
+            speculative_mtp_draft_tokens: 0,
         },
     )?;
     print!("{}", result.text);

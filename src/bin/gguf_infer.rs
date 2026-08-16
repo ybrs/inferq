@@ -61,6 +61,9 @@ struct Args {
     /// Warm every fused expert tensor, pinning it when an expert cache is configured.
     #[arg(long, conflicts_with = "warmup_census")]
     warmup_all_experts: bool,
+    /// Enable Qwen3.5/3.6 MTP speculation with at most N draft tokens per verification pass.
+    #[arg(long, default_value_t = 0)]
+    speculative_mtp: usize,
 }
 
 fn prepare_all_experts(checkpoint: &GgufCheckpoint, runtime: &QuantizedRuntime<'_>) -> Result<()> {
@@ -174,6 +177,22 @@ fn report(
         result.metrics.decode_tokens_per_second(),
         context_tokens,
     );
+    let speculative = &result.metrics.speculative;
+    if speculative.max_draft_tokens > 0 {
+        eprintln!(
+            "MTP speculation: {}/{} draft tokens accepted ({:.1}%); {} verification passes over {} tokens; {} rollback replays over {} tokens; draft {:.3}s, verify {:.3}s, resync {:.3}s",
+            speculative.accepted_tokens,
+            speculative.drafted_tokens,
+            speculative.acceptance_rate() * 100.,
+            speculative.verification_passes,
+            speculative.verification_tokens,
+            speculative.rollback_replays,
+            speculative.replayed_tokens,
+            speculative.draft_wall_time.as_secs_f64(),
+            speculative.verification_wall_time.as_secs_f64(),
+            speculative.resync_wall_time.as_secs_f64(),
+        );
+    }
     let cache = result.metrics.expert_cache;
     eprintln!(
         "expert cache: {}/{} hits ({:.1}%); loaded {:.1} MiB of GGUF ranges; resident {:.1}/{:.1} MiB in {} entries (fully resident: {}); {} evictions",
@@ -328,6 +347,11 @@ fn main() -> Result<()> {
         args.routing_trace.is_some() || !args.trace_router_logits,
         "--trace-router-logits requires --routing-trace"
     );
+    ensure!(
+        args.speculative_mtp == 0
+            || (args.routing_trace.is_none() && args.routing_census.is_none()),
+        "--speculative-mtp does not yet support routing traces or censuses"
+    );
 
     let checkpoint = GgufCheckpoint::open(&args.model)?;
     let expert_cache_bytes = args
@@ -378,6 +402,7 @@ fn main() -> Result<()> {
 
     let options = GenerationOptions {
         max_new_tokens: args.max_new_tokens,
+        speculative_mtp_draft_tokens: args.speculative_mtp,
         ..GenerationOptions::default()
     };
     if args.interactive {

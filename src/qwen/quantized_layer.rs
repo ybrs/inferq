@@ -145,9 +145,12 @@ impl<'a> QuantizedFullLayer<'a> {
         config: &Qwen3NextConfig,
         layer: usize,
     ) -> Result<Self> {
+        let is_trunk_full = layer < config.num_hidden_layers
+            && config.layer_type(layer) == LayerType::FullAttention;
+        let is_mtp_full = layer == config.num_hidden_layers && config.mtp_num_hidden_layers == 1;
         ensure!(
-            config.layer_type(layer) == LayerType::FullAttention,
-            "layer {layer} is not a full-attention layer"
+            is_trunk_full || is_mtp_full,
+            "layer {layer} is not a supported full-attention or MTP layer"
         );
         let prefix = format!("blk.{layer}");
         let input_norm = checkpoint.load_f32_vector(&format!("{prefix}.attn_norm.weight"))?;

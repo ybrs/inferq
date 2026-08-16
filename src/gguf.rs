@@ -108,6 +108,7 @@ pub struct QuantizedMatrix {
     storage_bytes: usize,
 }
 
+#[derive(Clone)]
 pub struct QuantizedEmbedding {
     tensor: Arc<QTensor>,
     rows: usize,
@@ -242,9 +243,14 @@ impl QuantizedMatrix {
         ensure!(
             matches!(
                 tensor.dtype(),
-                GgmlDType::Q4K | GgmlDType::Q5K | GgmlDType::Q6K | GgmlDType::Q8_0 | GgmlDType::F32
+                GgmlDType::Q4K
+                    | GgmlDType::Q5K
+                    | GgmlDType::Q6K
+                    | GgmlDType::Q8_0
+                    | GgmlDType::F32
+                    | GgmlDType::BF16
             ),
-            "unsupported executable GGUF matrix dtype {:?}; expected Q4_K, Q5_K, Q6_K, Q8_0, or F32",
+            "unsupported executable GGUF matrix dtype {:?}; expected Q4_K, Q5_K, Q6_K, Q8_0, F32, or BF16",
             tensor.dtype()
         );
         let (rows, columns) = tensor.shape().dims2()?;
@@ -993,8 +999,8 @@ impl GgufCheckpoint {
             .get(name)
             .with_context(|| format!("GGUF is missing tensor {name:?}"))?;
         ensure!(
-            info.ggml_dtype == GgmlDType::F32,
-            "GGUF tensor {name:?} has dtype {:?}, expected F32",
+            matches!(info.ggml_dtype, GgmlDType::F32 | GgmlDType::BF16),
+            "GGUF tensor {name:?} has dtype {:?}, expected F32 or BF16",
             info.ggml_dtype
         );
         let mut file = self

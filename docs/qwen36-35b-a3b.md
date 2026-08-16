@@ -2,8 +2,9 @@
 
 This branch adds text-only Qwen3.6-35B-A3B execution to the optimized GGUF
 runtime and compares Bartowski's Q4_K_M and Q8_0 artifacts. The implementation
-uses the model's 40 trunk layers and deliberately ignores its one auxiliary MTP
-predictor layer during ordinary autoregressive decoding.
+uses the model's 40 trunk layers. Its one auxiliary MTP predictor layer remains
+inactive during ordinary autoregressive decoding and can be enabled explicitly
+for greedy speculative decoding.
 
 ## Qualified artifacts
 
@@ -126,6 +127,29 @@ Within Qwen3.6, Q8 costs 14.46 GiB more RSS and is 22.7% slower than Q4 on
 this AVX2 host. Q4 and Q8 agree for the first 27 sustained-output tokens and
 then take different but coherent greedy paths, which is normal quantization
 sensitivity.
+
+## Auxiliary MTP predictor
+
+Pass `--speculative-mtp N` to use block 40 as an in-model draft predictor for
+up to `N` tokens before each target-model verification pass. This mode is
+currently restricted to greedy decoding and cannot be combined with routing
+traces or expert censuses. It is an opt-in correctness
+baseline rather than a recommended performance mode: the current generic
+multi-row verifier does not amortize the target weights enough to overcome MTP
+execution, rejected rows, and state repair.
+
+The fully resident Q4 benchmark produced exactly the same 128 greedy token IDs
+with draft lengths 0, 1, 2, and 3, including runs that exercised rejection and
+rollback. Draft length 1 accepted 59 of 67 proposals (88.1%), but decoded at
+6.31 token/s versus 8.10 token/s without speculation. See
+[Speculative decoding](speculative-decoding.md) for the command, complete
+results, state semantics, and next critical optimization.
+
+`--warmup-all-experts` includes the auxiliary block's experts when the model
+declares an MTP layer. This adds about 0.84 GiB of Q4 compressed weights to the
+18.16 GiB trunk-only expert set. The results table above predates MTP support
+and therefore reports trunk-only residency; the speculative comparison reports
+the current all-block warmup behavior separately.
 
 Warmup time is intentionally excluded from the architectural comparison. The
 observed Q4 warmup was 14.6 seconds from a hot page cache; Q8 took 163.6

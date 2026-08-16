@@ -15,6 +15,12 @@ pub struct QuantizedDeltaState {
 }
 
 #[derive(Debug, Clone)]
+pub struct QuantizedDeltaCheckpoint {
+    conv: Vec<f32>,
+    recurrent: Vec<f32>,
+}
+
+#[derive(Debug, Clone)]
 struct QuantizedDeltaScratch {
     q: Vec<f32>,
     k: Vec<f32>,
@@ -79,6 +85,24 @@ impl QuantizedDeltaState {
                 config.linear_value_head_dim,
             )),
         }
+    }
+
+    pub fn checkpoint(&self) -> QuantizedDeltaCheckpoint {
+        QuantizedDeltaCheckpoint {
+            conv: self.conv.clone(),
+            recurrent: self.recurrent.clone(),
+        }
+    }
+
+    pub fn restore(&mut self, checkpoint: &QuantizedDeltaCheckpoint) -> Result<()> {
+        ensure!(
+            self.conv.len() == checkpoint.conv.len()
+                && self.recurrent.len() == checkpoint.recurrent.len(),
+            "DeltaNet checkpoint dimensions do not match the live state"
+        );
+        self.conv.copy_from_slice(&checkpoint.conv);
+        self.recurrent.copy_from_slice(&checkpoint.recurrent);
+        Ok(())
     }
 }
 

@@ -45,6 +45,10 @@ pub struct Qwen3NextConfig {
     #[serde(default)]
     pub intermediate_size: usize,
     pub num_hidden_layers: usize,
+    #[serde(default)]
+    pub mtp_num_hidden_layers: usize,
+    #[serde(default)]
+    pub mtp_use_dedicated_embeddings: bool,
     pub num_attention_heads: usize,
     pub num_key_value_heads: usize,
     pub head_dim: usize,
@@ -204,6 +208,14 @@ impl Qwen3NextConfig {
                 self.num_hidden_layers
             );
         }
+        ensure!(
+            self.mtp_num_hidden_layers <= 1,
+            "this runtime supports at most one MTP predictor layer"
+        );
+        ensure!(
+            !self.mtp_use_dedicated_embeddings,
+            "dedicated MTP token embeddings are not supported"
+        );
         for &layer in &self.mlp_only_layers {
             if layer >= self.num_hidden_layers {
                 bail!("mlp_only_layers contains out-of-range layer {layer}");
@@ -247,6 +259,8 @@ mod tests {
             hidden_size: 8,
             intermediate_size: 16,
             num_hidden_layers: 4,
+            mtp_num_hidden_layers: 0,
+            mtp_use_dedicated_embeddings: false,
             num_attention_heads: 2,
             num_key_value_heads: 1,
             head_dim: 4,
@@ -295,6 +309,8 @@ mod tests {
                 "vocab_size": 248320,
                 "hidden_size": 2048,
                 "num_hidden_layers": 4,
+                "mtp_num_hidden_layers": 1,
+                "mtp_use_dedicated_embeddings": false,
                 "num_attention_heads": 16,
                 "num_key_value_heads": 2,
                 "head_dim": 256,
@@ -328,6 +344,7 @@ mod tests {
         assert_eq!(config.rope_theta, 10_000_000.);
         assert!(config.norm_topk_prob);
         assert_eq!(config.num_experts_per_tok, 8);
+        assert_eq!(config.mtp_num_hidden_layers, 1);
         assert_eq!(config.layer_type(3), LayerType::FullAttention);
     }
 }

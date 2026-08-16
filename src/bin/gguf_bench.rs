@@ -17,7 +17,7 @@ use qwen_engine::{
 };
 use serde::{Deserialize, Serialize};
 
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Parser)]
 #[command(about = "Persistent multi-case benchmark for quantized Qwen inference")]
@@ -47,6 +47,9 @@ struct Args {
     /// Create a JSONL artifact instead of writing records to stdout.
     #[arg(long)]
     output: Option<PathBuf>,
+    /// Enable Qwen3.5/3.6 MTP speculation with at most N draft tokens.
+    #[arg(long, default_value_t = 0)]
+    speculative_mtp: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -141,6 +144,21 @@ struct TimingInfo {
 }
 
 #[derive(Debug, Serialize)]
+struct SpeculativeInfo {
+    max_draft_tokens: usize,
+    drafted_tokens: usize,
+    accepted_tokens: usize,
+    acceptance_rate: f64,
+    verification_passes: usize,
+    verification_tokens: usize,
+    rollback_replays: usize,
+    replayed_tokens: usize,
+    draft_seconds: f64,
+    verification_seconds: f64,
+    resync_seconds: f64,
+}
+
+#[derive(Debug, Serialize)]
 struct Record<'a> {
     schema_version: u32,
     timestamp_unix_ms: u128,
@@ -158,6 +176,7 @@ struct Record<'a> {
     expert_cache: ExpertCacheStats,
     process: ProcessDelta,
     timings: TimingInfo,
+    speculative: SpeculativeInfo,
 }
 
 fn prepare_prompts(args: &Args, tokenizer: &ModelTokenizer) -> Result<Vec<PreparedPrompt>> {
@@ -341,6 +360,7 @@ fn main() -> Result<()> {
             runtime.reset();
             let options = GenerationOptions {
                 max_new_tokens: prompt.definition.max_new_tokens,
+                speculative_mtp_draft_tokens: args.speculative_mtp,
                 ..GenerationOptions::default()
             };
             eprintln!(
@@ -422,6 +442,23 @@ fn main() -> Result<()> {
                 timings: TimingInfo {
                     prefill: result.metrics.prefill_profile.report(),
                     decode: result.metrics.decode_profile.report(),
+                },
+                speculative: SpeculativeInfo {
+                    max_draft_tokens: result.metrics.speculative.max_draft_tokens,
+                    drafted_tokens: result.metrics.speculative.drafted_tokens,
+                    accepted_tokens: result.metrics.speculative.accepted_tokens,
+                    acceptance_rate: result.metrics.speculative.acceptance_rate(),
+                    verification_passes: result.metrics.speculative.verification_passes,
+                    verification_tokens: result.metrics.speculative.verification_tokens,
+                    rollback_replays: result.metrics.speculative.rollback_replays,
+                    replayed_tokens: result.metrics.speculative.replayed_tokens,
+                    draft_seconds: result.metrics.speculative.draft_wall_time.as_secs_f64(),
+                    verification_seconds: result
+                        .metrics
+                        .speculative
+                        .verification_wall_time
+                        .as_secs_f64(),
+                    resync_seconds: result.metrics.speculative.resync_wall_time.as_secs_f64(),
                 },
             };
             serde_json::to_writer(&mut output, &record)?;

@@ -25,6 +25,7 @@ Performance is not the primary objective in Phase 1. Correctness and observabili
 * `docs/quantized-execution.md` – direct compressed GGUF projections and selected-expert range loading.
 * `docs/usable-performance-roadmap.md` – measured baseline and the critical path from the reference engine to usable CPU performance.
 * `docs/qwen36-35b-a3b.md` – Qwen3.6-35B-A3B compatibility, Q4/Q8 reproduction commands, and measured architecture/performance comparison.
+* `docs/speculative-decoding.md` – Qwen3.6 auxiliary MTP execution, correctness gates, benchmark results, and the optimization path required for a speedup.
 * `qwen-cpu-inference-target-architecture.md` – Long-term target architecture, design principles, language split Rust/Python/C++, and the 14-phase roadmap toward workload-aware specialization.
 
 ## Development focus
@@ -56,6 +57,14 @@ i7-6700 host, its fully resident Q4_K_M artifact reached 8.12 decode tok/s at
 20.26 GiB RSS; Q8_0 reached 6.27 tok/s at 34.72 GiB RSS. See the
 [Qwen3.6 Q4/Q8 comparison](docs/qwen36-35b-a3b.md) for exact artifacts,
 commands, compatibility details, and methodology.
+
+Qwen3.6's bundled MTP predictor can also be used for opt-in greedy speculative
+decoding. This is currently a correctness/reference implementation: its
+128-token output exactly matches ordinary greedy decoding, including when
+rejections occur, but its generic multi-row verifier is slower than the normal
+single-token path on the qualified host. Try it with `--speculative-mtp 1` and
+see [Speculative decoding](docs/speculative-decoding.md) for the complete
+command, measurements, restrictions, and next optimization target.
 
 ## Installation on a new server
 
