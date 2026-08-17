@@ -24,7 +24,8 @@ pub use quantized_attention::{
     QuantizedAttentionLayer, QuantizedAttentionState, QuantizedAttentionTimings,
 };
 pub use quantized_deltanet::{
-    QuantizedDeltaCheckpoint, QuantizedDeltaLayer, QuantizedDeltaState, QuantizedDeltaTimings,
+    QuantizedDeltaCheckpoint, QuantizedDeltaLayer, QuantizedDeltaSnapshots, QuantizedDeltaState,
+    QuantizedDeltaTimings,
 };
 pub use quantized_layer::{
     QuantizedFullLayer, QuantizedLayerOutput, QuantizedLayerTimings, QuantizedLinearLayer,
@@ -32,7 +33,7 @@ pub use quantized_layer::{
 pub use quantized_model::{
     QuantizedForwardOutput, QuantizedForwardTimingReport, QuantizedForwardTimings,
     QuantizedLayerTimingReport, QuantizedModel, QuantizedModelCheckpoint, QuantizedModelState,
-    QuantizedOperationTimingReport, QuantizedStageTimingReport,
+    QuantizedOperationTimingReport, QuantizedStageTimingReport, QuantizedStateSnapshots,
 };
 pub use quantized_moe::{
     QuantizedMoeLayer, QuantizedMoeOutput, QuantizedMoeRoutingStats, QuantizedMoeTimings,

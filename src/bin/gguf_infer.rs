@@ -10,6 +10,7 @@ use qwen_engine::{
     GenerationOptions, GgufCheckpoint, GgufModelIdentity, QuantizedGenerationResult,
     QuantizedRuntime,
     profile::{ProcessDelta, ProcessSnapshot},
+    runtime::DEFAULT_NGRAM_MIN_MATCH,
     trace::{JsonRoutingCensus, JsonlRoutingTrace, RoutingCensusArtifact, RoutingTraceSet},
     warm_all_experts,
 };
@@ -78,6 +79,25 @@ struct Args {
     /// Skip MTP proposals whose raw top-1/top-2 logit margin is below this value.
     #[arg(long, value_name = "MARGIN")]
     speculative_mtp_min_margin: Option<f32>,
+    /// Enable n-gram (prompt-lookup) speculation with at most N draft tokens
+    /// per verification pass. Zero, the default, keeps ordinary decoding.
+    #[arg(long, default_value_t = 0, conflicts_with = "speculative_mtp")]
+    speculative_ngram: usize,
+    /// Shortest token suffix the n-gram drafter will match on.
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_NGRAM_MIN_MATCH)]
+    ngram_min_match: usize,
+    /// How verification snapshots copy recurrent state. Both produce identical
+    /// state; `plain` exists to measure what the streaming stores buy.
+    #[arg(long, value_enum, default_value_t = SnapshotCopy::Streaming)]
+    snapshot_copy: SnapshotCopy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum SnapshotCopy {
+    /// Non-temporal stores, skipping read-for-ownership and L3 pollution.
+    Streaming,
+    /// Ordinary `copy_from_slice`.
+    Plain,
 }
 
 fn prepare_all_experts(checkpoint: &GgufCheckpoint, runtime: &QuantizedRuntime<'_>) -> Result<()> {
@@ -209,6 +229,74 @@ fn report(
             speculative.restore_wall_time.as_secs_f64(),
             speculative.replay_wall_time.as_secs_f64(),
             speculative.resync_wall_time.as_secs_f64(),
+        );
+    }
+    let ngram = &result.metrics.ngram;
+    if ngram.max_draft_tokens > 0 {
+        eprintln!(
+            "n-gram speculation: draft {} / min match {}; {}/{} steps matched ({:.1}%); {} drafts, {}/{} draft tokens accepted ({:.1}%); {:.2} tokens per verification pass; {} verification passes over {} tokens; {} rollbacks ({} replays over {} tokens); lookup {:.3}s, verify {:.3}s, snapshot {:.3}s, rollback {:.3}s, replay {:.3}s, no-match decode {:.3}s",
+            ngram.max_draft_tokens,
+            ngram.min_match,
+            ngram.steps_with_match,
+            ngram.steps,
+            ngram.match_rate() * 100.,
+            ngram.drafts_issued,
+            ngram.draft_tokens_accepted,
+            ngram.draft_tokens_proposed,
+            ngram.acceptance_rate() * 100.,
+            ngram.tokens_per_verification(),
+            ngram.verification_passes,
+            ngram.verification_tokens,
+            ngram.rollbacks,
+            ngram.rollback_replays,
+            ngram.replayed_tokens,
+            ngram.lookup_wall_time.as_secs_f64(),
+            ngram.verification_wall_time.as_secs_f64(),
+            ngram.snapshot_wall_time.as_secs_f64(),
+            ngram.rollback_wall_time.as_secs_f64(),
+            ngram.replay_wall_time.as_secs_f64(),
+            ngram.target_only_wall_time.as_secs_f64(),
+        );
+        let histogram = ngram
+            .position_acceptance()
+            .iter()
+            .enumerate()
+            .map(|(position, rate)| {
+                format!(
+                    "{position}:{}/{} ({:.0}%)",
+                    ngram.accepted_by_position[position],
+                    ngram.proposed_by_position[position],
+                    rate * 100.
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        eprintln!("n-gram acceptance by draft position: {histogram}");
+        let matches = ngram
+            .matches_by_len
+            .iter()
+            .map(|stats| {
+                format!(
+                    "len {}: {} drafts, {}/{} tokens ({:.0}%), {} full, {} rejected at once",
+                    stats.match_len,
+                    stats.drafts,
+                    stats.accepted_tokens,
+                    stats.proposed_tokens,
+                    stats.acceptance_rate() * 100.,
+                    stats.fully_accepted_drafts,
+                    stats.rejected_immediately,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        eprintln!("n-gram drafts by match length: {matches}");
+        eprintln!(
+            "n-gram draft outcomes: {} fully accepted, {} rejected at once, {} truncated at a stop token; snapshots {} rows x {:.1} MiB",
+            ngram.fully_accepted_drafts,
+            ngram.rejected_immediately,
+            ngram.drafts_truncated_at_stop,
+            ngram.snapshot_rows,
+            ngram.snapshot_bytes_per_row as f64 / (1024. * 1024.),
         );
     }
     if let Some(budget) = result.metrics.thinking.budget {
@@ -389,6 +477,15 @@ fn main() -> Result<()> {
         args.speculative_mtp_min_margin.is_none() || args.speculative_mtp > 0,
         "--speculative-mtp-min-margin requires --speculative-mtp"
     );
+    ensure!(
+        args.speculative_mtp == 0 || args.speculative_ngram == 0,
+        "--speculative-ngram and --speculative-mtp cannot be combined"
+    );
+    ensure!(
+        args.speculative_ngram == 0
+            || (args.routing_trace.is_none() && args.routing_census.is_none()),
+        "--speculative-ngram does not support routing traces or censuses"
+    );
 
     let checkpoint = GgufCheckpoint::open(&args.model)?;
     let expert_cache_bytes = args
@@ -399,6 +496,7 @@ fn main() -> Result<()> {
     let identity = checkpoint.identity()?;
     let load_started = Instant::now();
     let mut runtime = QuantizedRuntime::load(&checkpoint, &args.tokenizer_model)?;
+    runtime.set_snapshot_nontemporal(args.snapshot_copy == SnapshotCopy::Streaming);
     ensure!(
         (!args.no_thinking && args.thinking_budget.is_none())
             || runtime.tokenizer().supports_thinking_generation(),
@@ -446,6 +544,8 @@ fn main() -> Result<()> {
         max_new_tokens: args.max_new_tokens,
         speculative_mtp_draft_tokens: args.speculative_mtp,
         speculative_mtp_min_margin: args.speculative_mtp_min_margin,
+        speculative_ngram_draft_tokens: args.speculative_ngram,
+        ngram_min_match: args.ngram_min_match,
         thinking_budget: args.thinking_budget,
         ..GenerationOptions::default()
     };

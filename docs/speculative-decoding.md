@@ -1,12 +1,21 @@
-# Qwen3.6 MTP speculative decoding
+# Qwen3.6 speculative decoding
 
-Qwen3.6-35B-A3B includes one auxiliary multi-token-prediction (MTP) transformer
-block in the same GGUF as the target model. Inferq can use it as an opt-in
-greedy draft predictor with `--speculative-mtp N`. Speculation remains disabled
-by default: the optimized draft=1 path is now closer to break-even, but it is
-still slower than target-only decoding on the qualified host.
+Inferq has two opt-in greedy draft sources. Both propose tokens, both verify
+every proposal through the same multi-row target pass, and both commit only
+what the target model would have decoded on its own, so neither changes
+output. Speculation stays disabled by default.
 
-## Try it
+- `--speculative-ngram N` drafts by **prompt lookup**: when the recent token
+  tail repeats an earlier tail in the same context, the continuation that
+  followed it last time is proposed. No model runs to produce a draft.
+- `--speculative-mtp N` drafts with the auxiliary multi-token-prediction
+  transformer block Qwen3.6-35B-A3B ships inside the same GGUF.
+
+The two cannot be enabled together.
+
+## n-gram (prompt-lookup) speculation
+
+### Try it
 
 Build host-native binaries first:
 
@@ -17,34 +26,278 @@ cargo build --release \
   --bin gguf_infer --bin gguf_bench --bin gguf_verify_bench
 ```
 
-Then run the fully resident Q4 model with one draft token per verification
-boundary:
-
 ```bash
-MODEL_ROOT=/data/projects/localllm/models/Qwen3.6-35B-A3B
+MODEL_ROOT=/models/Qwen3.6-35B-A3B
 
-INFERQ_NUM_THREADS=4 \
 ./target-native/release/gguf_infer \
   --model "${MODEL_ROOT}/Qwen_Qwen3.6-35B-A3B-Q4_K_M.gguf" \
   --tokenizer-model "${MODEL_ROOT}" \
-  --chat \
-  --prompt 'Write a detailed Rust implementation of a thread-safe LRU cache with tests.' \
-  --max-new-tokens 128 \
-  --expert-cache-mib 46000 \
-  --warmup-all-experts \
-  --speculative-mtp 1
+  --chat --no-thinking \
+  --prompt 'Rewrite this function, adding error context to each failure path: ...' \
+  --max-new-tokens 256 \
+  --expert-cache-mib 46000 --warmup-all-experts \
+  --speculative-ngram 7 --ngram-min-match 4
 ```
 
-Use `--speculative-mtp 0`, or omit it, for target-only generation. The optional
-`--speculative-mtp-min-margin 0.3` gate falls back to a one-row target pass when
-the MTP top-1/top-2 raw-logit margin is below 0.3. It improved this particular
-workload, but remains experimental and is not enabled automatically.
-
+`--speculative-ngram 0`, or omitting it, keeps target-only generation.
+`--ngram-min-match N` sets the shortest token suffix the drafter will match on.
 Speculation requires greedy sampling and does not support routing traces or
-censuses. The final report includes draft acceptance, gated proposals,
-verification rows, rollback/replay counts, and draft, verification,
-checkpoint, restore, replay, and MTP-resynchronization time. `gguf_bench`
-records the same data in JSONL schema version 6.
+censuses.
+
+### Why prompt lookup rather than a draft model
+
+Verification amortises well on this host but drafting does not. A batched
+target pass costs about 148 ms for its first row and about 77 ms for each
+additional row, so extra rows are worth roughly half a decode step. MTP
+drafting never converted that into a win because every step paid a draft
+forward through the MTP block plus a resynchronisation, whether or not
+speculation was going to help.
+
+A prompt-lookup draft costs a hash-map read and a slice comparison — measured
+at 0.000 s of lookup time across whole runs — and it is issued only when the
+index actually has a match. A step without a match runs exactly the one-row
+pass ordinary decoding would run: no draft, no snapshot, no verification, no
+rollback.
+
+That makes the economics entirely a question of **match precision**. A
+correct proposal of *d* tokens turns *d+1* decode steps into one pass; an
+incorrect one pays for *d* extra rows and commits a single token. The measured
+results below are dominated by this trade, not by any overhead in the drafter.
+
+### The index
+
+One map per indexed key length (2, 3 and 4 tokens) from an FNV-1a hash of the
+last *k* token IDs to the most recent position at which that key ended.
+Committing a token costs one map insert per length. Prompt tokens are indexed
+at prefill and every committed token thereafter.
+
+Correctness does not depend on the hash: a lookup compares the candidate
+position's actual token IDs against the current suffix before proposing
+anything, so a colliding key produces a miss rather than a wrong draft. The
+index feeds proposals only — a stale or incomplete index costs speed, never
+correctness — so a turn that follows a `reset`, or that follows a turn decoded
+in another mode, simply reseeds it.
+
+### The draft policy
+
+Per decode step, with the pending authoritative token included in the suffix:
+
+1. Try key lengths longest-first, down to `--ngram-min-match`.
+2. On a verified match at position `p`, propose
+   `tokens[p+1 .. p+1+draft_len]`, clamped to the end of the sequence and
+   truncated at the first stop token it contains.
+3. On no match, decode normally.
+4. Verify `[pending, draft...]` in one target pass, accept the longest
+   greedy-matching prefix, commit it plus the authoritative token from the row
+   after it, and roll back the rest.
+
+Accepted drafts respect the thinking budget through the same `ThinkingBudget`
+commit path the MTP route uses. The draft length is additionally clamped to
+what the turn's token limit and the remaining thinking budget can absorb, which
+keeps the committed rows and the emitted tokens in step at every boundary.
+
+### Metrics
+
+The end-of-run report prints steps with and without a match, drafts issued,
+draft tokens proposed and accepted, tokens committed per verification pass,
+rollbacks, replays (always zero, see below), the lookup, verification,
+snapshot, rollback and no-match decode wall times, an **acceptance histogram by
+draft position**, and a per-match-length breakdown carrying how many drafts
+were accepted in full and how many were rejected at their first token.
+
+The histogram and the match-length breakdown are the tuning signal. Acceptance
+is bimodal in practice — a proposal is usually either right to its end or wrong
+immediately — so a flat histogram means longer drafts are paying off, while a
+histogram that collapses after position 0 or 1 means the key length is too
+short to be selective and is buying rejected passes.
+
+## Snapshot rollback
+
+Both speculation paths share one rollback mechanism. Rolling a verification
+pass back to any of its row boundaries costs a state copy and never a replayed
+forward pass.
+
+`QuantizedModelState` holds, per layer, either a full-attention KV cache or a
+DeltaNet `{conv, recurrent}` pair. The KV cache is append-only and rolls back
+with `truncate`. The recurrent state cannot, so the multi-row forward takes an
+optional per-row snapshot sink: the DeltaNet recurrence consumes verification
+rows sequentially, and the sink copies `{conv, recurrent}` into a preallocated
+slot at each row boundary that loop crosses.
+
+Slot `r` holds the state **before** row `r` is consumed. Slot 0 is therefore
+the pre-pass checkpoint, which is why the separate `state.checkpoint()` clone —
+a fresh 63 MiB allocation on every pass — is gone. The final row is never
+snapshotted, since a fully accepted draft has nothing to roll back to.
+
+The replay disappears for a second reason as well. The rows a verification pass
+computed for the committed prefix are authoritative: row *r* was computed from
+exactly the prefix a sequential decode would have fed it. The rejection path
+therefore narrows the pass's own hidden rows to the committed prefix rather
+than recomputing them, which is what lets the MTP resynchronisation drop its
+replay too.
+
+`rollback_replays`, `replayed_tokens` and `replay_wall_time` are retained in
+the metrics for comparability with earlier measurements and now read zero.
+
+### Snapshot cost
+
+One snapshot row is 62.8 MiB on this model: 30 linear layers x (2.00 MiB
+recurrent + 96 KiB conv). Copying that with `copy_from_slice` is bandwidth-
+bound at this host's STREAM limit and cannot be brought under 3 ms/row by
+threading it. The copy therefore uses AVX non-temporal stores, which move two
+lines of traffic per line copied instead of three and, inside the forward,
+avoid evicting the live recurrent state from L3 between rows. A
+`copy_from_slice` fallback is used where AVX is unavailable and can be selected
+with `--snapshot-copy plain`; a unit test asserts the two produce identical
+bytes.
+
+## Measured results
+
+### Verdict against the task's gates
+
+| gate | required | measured | verdict |
+| --- | --- | --- | --- |
+| Greedy equivalence, W1/W2/W3 | token ids bit-identical to target-only | identical in all 12 comparisons | **pass** |
+| Snapshot rollback replays | `rollback_replays == 0` | 0 in every speculative run, n-gram and MTP | **pass** |
+| MTP non-regression | smoke run executes, metrics line prints, tests pass | yes; MTP refitted onto the same rollback | **pass** |
+| W2 no-match overhead | regression <= 2% | **-0.23%** on the no-match path itself | **pass** |
+| W2 end-to-end throughput | regression <= 2% (literal reading) | -6.1% at the best setting | **fail** |
+| W1 speedup | >= 1.25x | **1.228x** at the best setting | **fail** |
+| Snapshot overhead | < 3 ms/row | 3.41 ms/row streaming, 5.38 ms/row plain | **fail** |
+
+Three gates fail. Per the task's instructions the analysis stops here rather
+than moving into the kernel or dispatch layer; sections below isolate each
+cause with the histograms and stage timings.
+
+### Greedy equivalence
+
+Every n-gram run below emitted a token id sequence bit-identical to the
+target-only run of the same workload at the same settings. This covers both
+repetitions, both match lengths, and both snapshot copy strategies.
+
+| workload | comparisons | tokens each | identical |
+| --- | ---: | ---: | --- |
+| W1 copy-heavy (semver rewrite) | 6 | 256 | **yes** |
+| W2 prose (B-tree vs LSM tree) | 3 | 256 | **yes** |
+| W3 self-repetitive (10 stack tests) | 3 | 256 | **yes** |
+
+The integration test `partial_acceptance_rollback_matches_sequential_decoding`
+adds the stricter check the task asked for against the real checkpoint: force a
+pass whose first two proposals are right and last two are wrong, roll back to
+the interior row boundary, then decode 32 more tokens and require token
+equality with a purely sequential decode. It passes, as do the
+`rollback_replays == 0` and thinking-budget integration tests.
+
+### Decode throughput, best of two
+
+| workload | target-only | draft 7, min-match 3 | draft 7, min-match 4 |
+| --- | ---: | ---: | ---: |
+| W1 copy-heavy | 6.90 tok/s | 7.30 (1.058x) | **8.47 (1.228x)** |
+| W2 prose | 7.75 tok/s | 6.95 (0.897x) | 7.26 (0.937x) |
+| W3 self-repetitive | 7.70 tok/s | 5.76 (0.748x) | 6.23 (0.809x) |
+
+| workload | match rate | acceptance | tokens/pass | drafts fully accepted | rejected at first token |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| W1, min-match 4 | 25.2% | 80.4% | 6.48 | 20 / 27 | 2 / 27 |
+| W2, min-match 4 | 2.4% | 13.2% | 1.83 | 0 / 6 | 2 / 6 |
+| W3, min-match 4 | 11.3% | 18.9% | 2.32 | 1 / 25 | 15 / 25 |
+
+The n-gram runs are highly reproducible (W1 min-match 4: 8.47, 8.45, 8.37
+across three runs); the target-only baseline is the noisy side (6.55 then 6.90,
+a 5.3% spread), and the best-of-2 protocol takes the faster baseline, which is
+the conservative choice for the ratio.
+
+### Why W1 stops at 1.228x
+
+Nothing in the drafter or the rollback is the cost. At the best setting:
+
+| component | measured |
+| --- | --- |
+| index lookup, whole run | 0.000 s |
+| no-match decode | 148.2 ms/step, identical to the 148.5 ms/step baseline |
+| rollback | 0.053 s over 7 rollbacks |
+| snapshot | 0.731 s (2.4% of decode) |
+| matched steps | 105 ms/token against 148 ms/token sequential — **1.41x** |
+
+Speculation is 1.41x on the steps it fires on. The overall figure is 1.228x
+because it only fires on 25.2% of steps. Raising the match rate means shortening
+the key, and the sweep shows that trade is a straight loss: min-match 2 lifts
+the match rate to 51.1% but drops acceptance to 52.4% and ends up *below*
+target-only at 0.962x.
+
+### The 8-row cliff, and why draft length cannot go past 7
+
+Per-row verification cost improves monotonically as passes widen — until a pass
+exceeds eight rows, where it jumps 25%:
+
+| draft length | rows/pass | ms/row | ms/pass | W1 tok/s (min-match 4) |
+| ---: | ---: | ---: | ---: | ---: |
+| 4 | 4.98 | 96.0 | 478 | 7.43 (min-match 3) |
+| 6 | 6.82 | 91.2 | 622 | 8.01 |
+| **7** | **7.81** | **87.4** | **683** | **8.47** |
+| 8 | 8.76 | **109.6** | 960 | 7.07 |
+| 12 | 12.35 | 105.7 | 1306 | 5.06 (min-match 3) |
+
+A pass evaluates the pending token plus the drafts, so `--speculative-ngram 8`
+is a nine-row pass and falls off the small-M dense path, whose measured range is
+2..=8 rows. As the task instructed, this is reported rather than fixed: the
+row range, `SMALL_M_MIN_STORAGE_BYTES` and the block kernels are untouched.
+
+This matters because the acceptance histogram says the drafts are being cut off
+while they are still paying. At draft 7 / min-match 4, acceptance by draft
+position is:
+
+```
+0: 25/27 (93%)   1: 23/27 (85%)   2: 21/26 (81%)   3: 21/26 (81%)
+4: 20/26 (77%)   5: 19/26 (73%)   6: 19/26 (73%)
+```
+
+Still 73% at the last position, and flat from position 3 onward — acceptance is
+bimodal, so a proposal that survives its third token almost always survives to
+the end. A longer draft would keep converting those at roughly 77 ms/token
+instead of 148, but only if a pass wider than eight rows kept the fast path.
+Widening that range is the single highest-value follow-up this measurement
+identifies, and it belongs to the kernel layer, outside this task.
+
+### Why W2 and W3 regress
+
+W2's *no-match* overhead — what the gate was written to measure — is nil:
+
+| W2, draft 7, min-match 4 | value |
+| --- | ---: |
+| steps without a match | 244 of 250 |
+| no-match decode | 31.498 s = **129.1 ms/step** |
+| target-only baseline | **129.4 ms/token** |
+| no-match overhead | **-0.23%** |
+
+The whole regression is six proposals. Those 2.4% of steps committed 11 tokens
+in 3.477 s — 316 ms/token against 129 ms sequential — wasting 2.05 s on a 33 s
+run, which is the entire -6.1% end-to-end difference. None of the six was
+accepted in full.
+
+W3 fails for the same reason more severely: 25 proposals, 15 rejected at their
+first token, 18.9% acceptance. The workload repeats *structure* ("one test per
+method, same test structure") but not literal token spans, so a four-token key
+matches scaffolding like an assertion opening and then jumps to the wrong
+continuation. Prompt lookup cannot distinguish the two cases; only verification
+can, and verification is what costs.
+
+The practical consequence is that this drafter is a per-workload switch, not a
+global one. It is off by default and the report recommends leaving it off unless
+the workload is known to be copy-heavy.
+
+### Draft length and match length sweep
+
+Full sweep tables, the raw command log and the design notes are in
+`ngram-report-702d043633e0.md`. The recommendation from it is
+`--speculative-ngram 7 --ngram-min-match 4`: acceptance rises with match length
+at every draft length (52-63% at min-match 2, 74-80% at min-match 4), and
+throughput falls off a cliff at draft 8 and beyond for every match length.
+
+`DEFAULT_NGRAM_MIN_MATCH` is 4. Draft length defaults to 0, so speculation is
+off unless asked for, and it should stay off unless the workload is known to be
+copy-heavy: the two non-repetitive workloads measured both regress, not from
+drafter overhead but from the handful of wrong proposals they do produce.
 
 ## Bounded thinking
 
@@ -60,11 +313,11 @@ of these options is supplied:
   through the target model before answer generation continues.
 
 The budget is per assistant turn, including in `--interactive` mode. Only
-authoritative output tokens count: rejected MTP drafts are neither emitted nor
-charged to the budget. A real two-turn Q4 smoke test with
-`--thinking-budget 2 --speculative-mtp 1` force-closed both turns independently,
-kept 100% of the exercised drafts accepted, and continued with `Hi!` and
-`Bye!` after the evaluated closures.
+authoritative output tokens count: rejected drafts are neither emitted nor
+charged to the budget, under either drafter. A real two-turn Q4 smoke test with
+`--thinking-budget 2 --speculative-mtp 1` force-closed both turns
+independently, kept 100% of the exercised drafts accepted, and continued with
+`Hi!` and `Bye!` after the evaluated closures.
 
 Example:
 
@@ -83,7 +336,36 @@ INFERQ_NUM_THREADS=4 \
 `--no-thinking` and `--thinking-budget` are mutually exclusive and require a
 Qwen chat template that declares thinking support.
 
-## Execution and state semantics
+## Qwen3.6 MTP speculative decoding
+
+Qwen3.6-35B-A3B includes one auxiliary multi-token-prediction (MTP) transformer
+block in the same GGUF as the target model. Inferq can use it as an opt-in
+greedy draft predictor with `--speculative-mtp N`.
+
+> **Superseded.** The measurements in this section were taken on the Intel
+> i7-6700 qualified host before the pool unification and before snapshot
+> rollback. Two of its conclusions no longer describe the code: rejection is no
+> longer handled by restoring and replaying, so the "1.01 seconds replaying
+> rejected prefixes" and "0.52 seconds checkpointing" components of the draft=1
+> breakdown below no longer exist, and the checkpoint/restore/replay figures
+> from `gguf_verify_bench` describe a path only that benchmark still uses. The
+> section's central finding stands and is the reason the n-gram drafter exists:
+> MTP drafting pays its draft and resynchronisation cost on **every** step
+> regardless of whether speculation was going to help, which is what kept
+> draft=1 below break-even.
+
+The optional `--speculative-mtp-min-margin 0.3` gate falls back to a one-row
+target pass when the MTP top-1/top-2 raw-logit margin is below 0.3. It improved
+that particular workload, but remains experimental and is not enabled
+automatically.
+
+Speculation requires greedy sampling and does not support routing traces or
+censuses. The final report includes draft acceptance, gated proposals,
+verification rows, rollback/replay counts, and draft, verification,
+checkpoint, restore, replay, and MTP-resynchronization time. `gguf_bench`
+records the same data in JSONL schema version 6.
+
+### Execution and state semantics
 
 The MTP predictor matches the architecture encoded by the Qwen config and
 GGUF:
@@ -97,8 +379,8 @@ previous target hidden -- RMSNorm ---+                         |
 
 At a speculation boundary the runtime drafts up to `N` tokens, evaluates the
 pending target token plus the drafts in one target pass, accepts the longest
-greedy-matching prefix, and restores/replays target recurrent state after a
-rejection. Output is transactional: rejected draft bytes are never emitted.
+greedy-matching prefix, and rolls target recurrent state back to the accepted
+row boundary. Output is transactional: rejected draft bytes are never emitted.
 Stop tokens come only from the authoritative target result.
 
 After every verification, MTP state is truncated to the pre-draft boundary and
@@ -109,7 +391,7 @@ is deliberately not treated as synchronized state. Forced thinking-closure
 tokens use the same authoritative target-plus-MTP path, keeping target state,
 MTP position, and the interactive pending token aligned.
 
-## Reproducible verifier benchmark
+### Reproducible verifier benchmark
 
 `gguf_verify_bench` holds one deterministic prefetched context, keeps every
 expert resident, and evaluates the same fixed tokens at K=1,2,4,8. It reports
@@ -135,7 +417,7 @@ token-to-expert assignments, unique selected experts, duplicate assignment
 rate, average rows per selected expert, and the maximum rows assigned to one
 expert.
 
-## What changed
+### What changed in the verifier
 
 The routed MoE small-batch path is now expert-major. It computes all routes,
 groups `(row, route weight)` records by expert, gathers each expert's input
@@ -154,7 +436,12 @@ cache-hot, and transposes the output. The size threshold is important: using
 the same path for the much smaller expert matrices regressed their stages by
 18-42%, so routed experts continue to use Candle's grouped multi-row path.
 
-## K=1/2/4/8 verification scaling
+**This path covers 2 to 8 rows.** A verification pass of more than 8 rows —
+`--speculative-ngram 8` or higher, since a pass evaluates the pending token
+plus the drafts — falls back to the slower per-row traversal. The n-gram
+results below show what that costs.
+
+### K=1/2/4/8 verification scaling
 
 Qualified host: Intel i7-6700, four physical cores, four Candle/Rayon threads,
 native release build, fully resident Q4_K_M, three repetitions.
@@ -201,7 +488,7 @@ Aggregating the benchmark's per-layer reuse records gives:
 The JSON report retains all 40 individual layer records rather than hiding
 layer-to-layer variation behind these aggregates.
 
-## End-to-end result
+### MTP end-to-end result
 
 The workload is the same 25-token rendered chat prompt followed by 128 greedy
 output tokens. All runs emitted the exact same complete target token sequence.
@@ -217,7 +504,7 @@ output tokens. All runs emitted the exact same complete target token sequence.
 Draft=1 is substantially faster than the earlier implementation, but has not
 crossed break-even: the ungated result is 11.4% slower than target-only, and
 the measured margin gate is still 7.1% slower. Consequently speculation stays
-opt-in, and there is no reason yet to tune draft lengths 2 or 3.
+opt-in.
 
 For ungated draft=1, target verification is the largest measured component at
 14.15 seconds. The avoidable work separating it from target-only includes

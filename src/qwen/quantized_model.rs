@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use candle_core::{DType, Device, Tensor};
 use serde::Serialize;
 
@@ -11,8 +11,9 @@ use crate::{
 };
 
 use super::{
-    QuantizedAttentionState, QuantizedDeltaCheckpoint, QuantizedDeltaState, QuantizedFullLayer,
-    QuantizedLayerTimings, QuantizedLinearLayer, QuantizedMtpHead, quantized_layer::gguf_rms_norm,
+    QuantizedAttentionState, QuantizedDeltaCheckpoint, QuantizedDeltaSnapshots,
+    QuantizedDeltaState, QuantizedFullLayer, QuantizedLayerTimings, QuantizedLinearLayer,
+    QuantizedMtpHead, quantized_layer::gguf_rms_norm,
 };
 
 enum DecoderLayer<'a> {
@@ -38,6 +39,76 @@ pub struct QuantizedModelCheckpoint {
     position: usize,
 }
 
+/// Reusable per-row rollback snapshots for one multi-row verification pass.
+///
+/// Full-attention layers need no storage: their KV cache is append-only and
+/// rolls back with `truncate`. Only the linear layers' recurrent state is
+/// copied, one slot per row boundary the pass crosses.
+#[derive(Debug, Clone, Default)]
+pub struct QuantizedStateSnapshots {
+    linear_layers: Vec<QuantizedDeltaSnapshots>,
+    /// `state.position` immediately before the pass began.
+    position: usize,
+    rows: usize,
+    nontemporal: bool,
+}
+
+impl QuantizedStateSnapshots {
+    /// Prepare the arena for a pass of `rows` rows starting at `state`.
+    ///
+    /// Buffers are allocated on the first pass that needs them and reused
+    /// afterwards; a later pass with fewer rows keeps the larger allocation.
+    pub fn begin_pass(&mut self, state: &QuantizedModelState, rows: usize) {
+        let linear = state
+            .layers
+            .iter()
+            .filter(|layer| matches!(layer, DecoderState::Linear(_)))
+            .count();
+        if self.linear_layers.len() != linear {
+            self.linear_layers
+                .resize_with(linear, QuantizedDeltaSnapshots::default);
+        }
+        let mut index = 0;
+        for layer in &state.layers {
+            if let DecoderState::Linear(delta) = layer {
+                self.linear_layers[index].reserve(rows, delta.conv_len(), delta.recurrent_len());
+                index += 1;
+            }
+        }
+        self.position = state.position;
+        self.rows = rows;
+    }
+
+    /// Use streaming stores for the snapshot copy where the CPU supports them.
+    pub fn set_nontemporal(&mut self, nontemporal: bool) {
+        self.nontemporal = nontemporal;
+    }
+
+    pub fn nontemporal(&self) -> bool {
+        self.nontemporal
+    }
+
+    pub fn position(&self) -> usize {
+        self.position
+    }
+
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// Bytes copied per stored row across every linear layer.
+    pub fn bytes_per_row(&self) -> usize {
+        self.linear_layers
+            .iter()
+            .map(QuantizedDeltaSnapshots::bytes_per_row)
+            .sum()
+    }
+
+    fn layer_mut(&mut self, linear_index: usize) -> Option<&mut QuantizedDeltaSnapshots> {
+        self.linear_layers.get_mut(linear_index)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct QuantizedModelState {
     layers: Vec<DecoderState>,
@@ -45,6 +116,42 @@ pub struct QuantizedModelState {
 }
 
 impl QuantizedModelState {
+    /// Roll the state back to the boundary after `committed_rows` rows of the
+    /// pass that produced `snapshots`.
+    ///
+    /// This costs one state copy per linear layer plus a KV-cache truncation
+    /// per full-attention layer; it never replays a forward pass. Passing
+    /// `committed_rows == snapshots.rows()` is rejected because a fully
+    /// accepted pass has no snapshot to roll back to and needs none.
+    pub fn rollback(
+        &mut self,
+        snapshots: &QuantizedStateSnapshots,
+        committed_rows: usize,
+    ) -> Result<()> {
+        ensure!(
+            committed_rows < snapshots.rows || snapshots.rows == 0,
+            "cannot roll back to {committed_rows} of {} committed rows",
+            snapshots.rows
+        );
+        let position = snapshots.position + committed_rows;
+        let mut linear = 0;
+        for (index, layer) in self.layers.iter_mut().enumerate() {
+            match layer {
+                DecoderState::Full(state) => state.truncate(position)?,
+                DecoderState::Linear(state) => {
+                    let saved = snapshots
+                        .linear_layers
+                        .get(linear)
+                        .with_context(|| format!("snapshot arena is missing layer {index}"))?;
+                    saved.restore_into(committed_rows, state)?;
+                    linear += 1;
+                }
+            }
+        }
+        self.position = position;
+        Ok(())
+    }
+
     pub fn checkpoint(&self) -> QuantizedModelCheckpoint {
         QuantizedModelCheckpoint {
             layers: self
@@ -146,6 +253,7 @@ impl QuantizedForwardTimings {
                 total.deltanet_gated_norm_seconds += layer.delta.gated_norm.as_secs_f64();
                 total.deltanet_output_projection_seconds +=
                     layer.delta.output_projection.as_secs_f64();
+                total.deltanet_snapshot_seconds += layer.delta.snapshot.as_secs_f64();
                 total.moe_router_seconds += layer.moe.router.as_secs_f64();
                 total.moe_top_k_seconds += layer.moe.top_k.as_secs_f64();
                 total.moe_expert_lookup_seconds += layer.moe.expert_load.as_secs_f64();
@@ -218,6 +326,7 @@ pub struct QuantizedOperationTimingReport {
     pub deltanet_recurrence_seconds: f64,
     pub deltanet_gated_norm_seconds: f64,
     pub deltanet_output_projection_seconds: f64,
+    pub deltanet_snapshot_seconds: f64,
     pub moe_router_seconds: f64,
     pub moe_top_k_seconds: f64,
     pub moe_expert_lookup_seconds: f64,
@@ -401,11 +510,34 @@ impl<'a> QuantizedModel<'a> {
         self.forward_detailed_with_trace(token_ids, state, None)
     }
 
+    /// Run a multi-row pass that records a rollback snapshot at every row
+    /// boundary. Rolling back to any of them afterwards costs a state copy
+    /// rather than a replayed forward pass.
+    pub fn forward_detailed_with_snapshots(
+        &self,
+        token_ids: &[u32],
+        state: &mut QuantizedModelState,
+        snapshots: &mut QuantizedStateSnapshots,
+    ) -> Result<QuantizedForwardOutput> {
+        snapshots.begin_pass(state, token_ids.len());
+        self.forward_inner(token_ids, state, None, Some(snapshots))
+    }
+
     pub fn forward_detailed_with_trace(
         &self,
         token_ids: &[u32],
         state: &mut QuantizedModelState,
+        trace: Option<&mut dyn RoutingTrace>,
+    ) -> Result<QuantizedForwardOutput> {
+        self.forward_inner(token_ids, state, trace, None)
+    }
+
+    fn forward_inner(
+        &self,
+        token_ids: &[u32],
+        state: &mut QuantizedModelState,
         mut trace: Option<&mut dyn RoutingTrace>,
+        mut snapshots: Option<&mut QuantizedStateSnapshots>,
     ) -> Result<QuantizedForwardOutput> {
         ensure!(!token_ids.is_empty(), "forward requires at least one token");
         ensure!(
@@ -423,6 +555,7 @@ impl<'a> QuantizedModel<'a> {
         let mut hidden = self.embedding.forward(&ids)?.to_dtype(DType::F32)?;
         timings.embedding = embedding_started.elapsed();
         let position = state.position;
+        let mut linear_index = 0;
         for (index, (layer, layer_state)) in
             self.layers.iter().zip(state.layers.iter_mut()).enumerate()
         {
@@ -432,7 +565,16 @@ impl<'a> QuantizedModel<'a> {
                     layer.forward(&hidden, position, layer_state)?
                 }
                 (DecoderLayer::Linear(layer), DecoderState::Linear(layer_state)) => {
-                    layer.forward(&hidden, layer_state)?
+                    let sink = snapshots.as_deref_mut();
+                    let nontemporal = sink.as_ref().is_some_and(|sink| sink.nontemporal);
+                    let output = layer.forward_with_snapshots(
+                        &hidden,
+                        layer_state,
+                        sink.and_then(|sink| sink.layer_mut(linear_index)),
+                        nontemporal,
+                    )?;
+                    linear_index += 1;
+                    output
                 }
                 _ => anyhow::bail!("state type does not match layer {index}"),
             };

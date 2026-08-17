@@ -65,6 +65,160 @@ impl QuantizedDeltaScratch {
     }
 }
 
+/// Preallocated per-row snapshots of one linear layer's recurrent state.
+///
+/// A multi-row verification pass advances the DeltaNet recurrence one row at a
+/// time. Slot `r` holds `{conv, recurrent}` as they were *before* row `r` was
+/// consumed, so slot 0 is the pre-pass checkpoint and slot `r` restores the
+/// state a sequential decode would hold after committing rows `0..r`. Rolling
+/// back a partially accepted draft is then a copy rather than a replayed
+/// forward pass.
+///
+/// Buffers are sized once and reused across passes; `store` never allocates.
+#[derive(Debug, Clone, Default)]
+pub struct QuantizedDeltaSnapshots {
+    conv: Vec<f32>,
+    recurrent: Vec<f32>,
+    conv_len: usize,
+    recurrent_len: usize,
+    rows: usize,
+    stored_rows: usize,
+}
+
+impl QuantizedDeltaSnapshots {
+    /// Size the arena for `rows` snapshot slots, reusing existing capacity.
+    pub fn reserve(&mut self, rows: usize, conv_len: usize, recurrent_len: usize) {
+        if self.rows != rows || self.conv_len != conv_len || self.recurrent_len != recurrent_len {
+            self.conv.resize(rows * conv_len, 0.);
+            self.recurrent.resize(rows * recurrent_len, 0.);
+            self.rows = rows;
+            self.conv_len = conv_len;
+            self.recurrent_len = recurrent_len;
+        }
+        self.stored_rows = 0;
+    }
+
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    pub fn stored_rows(&self) -> usize {
+        self.stored_rows
+    }
+
+    /// Bytes of live state copied per stored row.
+    pub fn bytes_per_row(&self) -> usize {
+        (self.conv_len + self.recurrent_len) * std::mem::size_of::<f32>()
+    }
+
+    fn store(&mut self, row: usize, conv: &[f32], recurrent: &[f32], nontemporal: bool) {
+        debug_assert_eq!(conv.len(), self.conv_len);
+        debug_assert_eq!(recurrent.len(), self.recurrent_len);
+        debug_assert!(row < self.rows);
+        copy_state(
+            &mut self.conv[row * self.conv_len..(row + 1) * self.conv_len],
+            conv,
+            nontemporal,
+        );
+        copy_state(
+            &mut self.recurrent[row * self.recurrent_len..(row + 1) * self.recurrent_len],
+            recurrent,
+            nontemporal,
+        );
+        self.stored_rows = self.stored_rows.max(row + 1);
+    }
+
+    /// Restore `state` to snapshot slot `row`.
+    ///
+    /// A layer that did not run during the interrupted pass has no stored rows
+    /// and is already at the pre-pass state, so restoring it is a no-op.
+    pub fn restore_into(&self, row: usize, state: &mut QuantizedDeltaState) -> Result<()> {
+        if self.stored_rows == 0 {
+            return Ok(());
+        }
+        ensure!(
+            row < self.stored_rows,
+            "DeltaNet snapshot row {row} was not stored ({} rows available)",
+            self.stored_rows
+        );
+        ensure!(
+            state.conv.len() == self.conv_len && state.recurrent.len() == self.recurrent_len,
+            "DeltaNet snapshot dimensions do not match the live state"
+        );
+        state
+            .conv
+            .copy_from_slice(&self.conv[row * self.conv_len..(row + 1) * self.conv_len]);
+        state.recurrent.copy_from_slice(
+            &self.recurrent[row * self.recurrent_len..(row + 1) * self.recurrent_len],
+        );
+        Ok(())
+    }
+}
+
+/// Copy live recurrent state into a snapshot slot.
+///
+/// The recurrent state is 2 MiB per layer on Qwen3.6-35B-A3B, so an ordinary
+/// `copy_from_slice` both costs full read-for-ownership traffic on the
+/// destination and evicts the live state from L3 between rows. Streaming
+/// stores avoid both; they measured 2.78 ms/row against 4.84 ms/row for
+/// `copy_from_slice` on the qualified host. The safe copy stays available as
+/// a fallback and as the reference the equivalence test compares against.
+fn copy_state(dst: &mut [f32], src: &[f32], nontemporal: bool) {
+    debug_assert_eq!(dst.len(), src.len());
+    #[cfg(target_arch = "x86_64")]
+    if nontemporal && dst.len() >= NONTEMPORAL_MIN_ELEMENTS && has_avx() {
+        // SAFETY: `has_avx` confirms AVX is available on this CPU, and `dst`
+        // and `src` are same-length slices of `f32` the caller owns
+        // exclusively. `copy_state_nontemporal` only reads `src` and writes
+        // `dst` inside those bounds.
+        unsafe { copy_state_nontemporal(dst, src) };
+        return;
+    }
+    let _ = nontemporal;
+    dst.copy_from_slice(src);
+}
+
+#[cfg(target_arch = "x86_64")]
+const NONTEMPORAL_MIN_ELEMENTS: usize = 4096;
+
+#[cfg(target_arch = "x86_64")]
+fn has_avx() -> bool {
+    use std::sync::OnceLock;
+    static AVX: OnceLock<bool> = OnceLock::new();
+    *AVX.get_or_init(|| std::arch::is_x86_feature_detected!("avx"))
+}
+
+/// # Safety
+///
+/// The caller must guarantee AVX is available and that `dst` and `src` have
+/// equal lengths.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+unsafe fn copy_state_nontemporal(dst: &mut [f32], src: &[f32]) {
+    use std::arch::x86_64::{_mm_sfence, _mm256_loadu_ps, _mm256_stream_ps};
+
+    const LANES: usize = 8;
+    let len = dst.len();
+    let dst_ptr = dst.as_mut_ptr();
+    // Streaming stores require a 32-byte aligned destination; copy the
+    // unaligned head and tail with ordinary stores.
+    let head = (dst_ptr.align_offset(32)).min(len);
+    dst[..head].copy_from_slice(&src[..head]);
+    let body = (len - head) / LANES * LANES;
+    // SAFETY: `head + body <= len`, so every load and store below stays inside
+    // both slices, and `dst_ptr.add(head)` is 32-byte aligned by construction.
+    unsafe {
+        let src_ptr = src.as_ptr();
+        let mut offset = head;
+        while offset < head + body {
+            _mm256_stream_ps(dst_ptr.add(offset), _mm256_loadu_ps(src_ptr.add(offset)));
+            offset += LANES;
+        }
+        _mm_sfence();
+    }
+    dst[head + body..].copy_from_slice(&src[head + body..]);
+}
+
 impl QuantizedDeltaState {
     pub fn new(config: &Qwen3NextConfig) -> Self {
         let key_dim = config.linear_num_key_heads * config.linear_key_head_dim;
@@ -94,6 +248,14 @@ impl QuantizedDeltaState {
         }
     }
 
+    pub fn conv_len(&self) -> usize {
+        self.conv.len()
+    }
+
+    pub fn recurrent_len(&self) -> usize {
+        self.recurrent.len()
+    }
+
     pub fn restore(&mut self, checkpoint: &QuantizedDeltaCheckpoint) -> Result<()> {
         ensure!(
             self.conv.len() == checkpoint.conv.len()
@@ -114,6 +276,8 @@ pub struct QuantizedDeltaTimings {
     pub recurrence: Duration,
     pub gated_norm: Duration,
     pub output_projection: Duration,
+    /// Time spent copying recurrent state into per-row rollback snapshots.
+    pub snapshot: Duration,
 }
 
 impl QuantizedDeltaTimings {
@@ -124,6 +288,7 @@ impl QuantizedDeltaTimings {
         self.recurrence += other.recurrence;
         self.gated_norm += other.gated_norm;
         self.output_projection += other.output_projection;
+        self.snapshot += other.snapshot;
     }
 }
 
@@ -313,6 +478,21 @@ impl QuantizedDeltaLayer {
         xs: &Tensor,
         state: &mut QuantizedDeltaState,
     ) -> Result<(Tensor, QuantizedDeltaTimings)> {
+        self.forward_with_snapshots(xs, state, None, false)
+    }
+
+    /// Run the layer, optionally recording a rollback snapshot at every row
+    /// boundary the recurrence crosses.
+    ///
+    /// Slot `r` is written *before* row `r` is consumed, so the final row is
+    /// never snapshotted: a fully accepted draft needs no rollback.
+    pub fn forward_with_snapshots(
+        &self,
+        xs: &Tensor,
+        state: &mut QuantizedDeltaState,
+        mut snapshots: Option<&mut QuantizedDeltaSnapshots>,
+        nontemporal: bool,
+    ) -> Result<(Tensor, QuantizedDeltaTimings)> {
         let wall_started = Instant::now();
         ensure!(
             xs.elem_count().is_multiple_of(self.hidden_size),
@@ -368,6 +548,16 @@ impl QuantizedDeltaLayer {
             recurrent,
             scratch,
         } = state;
+        if let Some(sink) = snapshots.as_deref_mut() {
+            ensure!(
+                sink.rows() >= seq,
+                "DeltaNet snapshot arena holds {} rows, need {seq}",
+                sink.rows()
+            );
+            let snapshot_started = Instant::now();
+            sink.store(0, conv, recurrent, nontemporal);
+            timings.snapshot += snapshot_started.elapsed();
+        }
         for token in 0..seq {
             let projected = &projected[token * projected_width..token * projected_width + conv_dim];
             let convolution_started = Instant::now();
@@ -451,6 +641,16 @@ impl QuantizedDeltaLayer {
                 &mut scratch.recurrent_output[token * value_dim..(token + 1) * value_dim],
             );
             timings.recurrence += recurrence_started.elapsed();
+            // The state now reflects rows `0..=token`; record it as the entry
+            // state of the next row so a rollback that commits `token + 1`
+            // rows becomes a copy. The last row needs no slot.
+            if let Some(sink) = snapshots.as_deref_mut()
+                && token + 1 < seq
+            {
+                let snapshot_started = Instant::now();
+                sink.store(token + 1, conv, recurrent, nontemporal);
+                timings.snapshot += snapshot_started.elapsed();
+            }
         }
         let norm_started = Instant::now();
         let output = Tensor::from_slice(
@@ -530,8 +730,98 @@ fn causal_depthwise_conv_step(
 }
 
 #[cfg(test)]
+impl QuantizedDeltaState {
+    fn for_test(conv: Vec<f32>, recurrent: Vec<f32>) -> Self {
+        Self {
+            conv,
+            recurrent,
+            scratch: Box::new(QuantizedDeltaScratch::new(1, 1, 2, 2)),
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    fn state_snapshots(
+        rows: usize,
+        conv_len: usize,
+        recurrent_len: usize,
+    ) -> QuantizedDeltaSnapshots {
+        let mut snapshots = QuantizedDeltaSnapshots::default();
+        snapshots.reserve(rows, conv_len, recurrent_len);
+        snapshots
+    }
+
+    #[test]
+    fn snapshots_restore_the_state_recorded_for_each_row() {
+        let mut snapshots = state_snapshots(3, 2, 3);
+        for row in 0..3 {
+            let base = row as f32;
+            snapshots.store(
+                row,
+                &[base, base + 0.5],
+                &[base, base + 1., base + 2.],
+                false,
+            );
+        }
+        for row in 0..3 {
+            let mut state = QuantizedDeltaState::for_test(vec![0.; 2], vec![0.; 3]);
+            snapshots.restore_into(row, &mut state).unwrap();
+            let base = row as f32;
+            assert_eq!(state.conv, [base, base + 0.5]);
+            assert_eq!(state.recurrent, [base, base + 1., base + 2.]);
+        }
+    }
+
+    #[test]
+    fn restoring_a_row_the_pass_never_reached_is_rejected() {
+        let mut snapshots = state_snapshots(4, 1, 1);
+        snapshots.store(0, &[1.], &[2.], false);
+        let mut state = QuantizedDeltaState::for_test(vec![0.], vec![0.]);
+        assert!(snapshots.restore_into(1, &mut state).is_err());
+        assert!(snapshots.restore_into(0, &mut state).is_ok());
+    }
+
+    #[test]
+    fn a_layer_that_never_ran_is_left_untouched() {
+        // An interrupted pass leaves later layers with no stored rows; they
+        // still hold the pre-pass state, so restoring them is a no-op.
+        let snapshots = state_snapshots(4, 1, 1);
+        let mut state = QuantizedDeltaState::for_test(vec![7.], vec![9.]);
+        snapshots.restore_into(0, &mut state).unwrap();
+        assert_eq!(state.conv, [7.]);
+        assert_eq!(state.recurrent, [9.]);
+    }
+
+    #[test]
+    fn reserve_reuses_buffers_and_clears_the_stored_row_count() {
+        let mut snapshots = state_snapshots(4, 8, 16);
+        snapshots.store(0, &[1.; 8], &[2.; 16], false);
+        assert_eq!(snapshots.stored_rows(), 1);
+        let capacity = snapshots.recurrent.capacity();
+        snapshots.reserve(4, 8, 16);
+        assert_eq!(snapshots.stored_rows(), 0);
+        assert_eq!(snapshots.recurrent.capacity(), capacity);
+        assert_eq!(snapshots.bytes_per_row(), (8 + 16) * 4);
+    }
+
+    #[test]
+    fn streaming_and_ordinary_copies_produce_identical_state() {
+        // Large enough to take the streaming path, and copied at every offset
+        // that changes the aligned head and tail it has to handle.
+        let source: Vec<f32> = (0..9_001).map(|value| value as f32 * 0.25).collect();
+        for offset in 0..9 {
+            let source = &source[offset..];
+            let mut streamed = vec![0.; source.len()];
+            let mut ordinary = vec![0.; source.len()];
+            copy_state(&mut streamed, source, true);
+            copy_state(&mut ordinary, source, false);
+            assert_eq!(streamed, ordinary, "offset {offset}");
+            assert_eq!(streamed, source, "offset {offset}");
+        }
+    }
 
     #[test]
     fn scratch_output_reuses_capacity_and_clears_values() {

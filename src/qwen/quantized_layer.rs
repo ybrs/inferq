@@ -7,8 +7,8 @@ use crate::{GgufCheckpoint, LayerType, Qwen3NextConfig};
 
 use super::{
     QuantizedAttentionLayer, QuantizedAttentionState, QuantizedAttentionTimings,
-    QuantizedDeltaLayer, QuantizedDeltaState, QuantizedDeltaTimings, QuantizedMoeLayer,
-    QuantizedMoeTimings, Route,
+    QuantizedDeltaLayer, QuantizedDeltaSnapshots, QuantizedDeltaState, QuantizedDeltaTimings,
+    QuantizedMoeLayer, QuantizedMoeTimings, Route,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -103,11 +103,23 @@ impl<'a> QuantizedLinearLayer<'a> {
         xs: &Tensor,
         state: &mut QuantizedDeltaState,
     ) -> Result<QuantizedLayerOutput> {
+        self.forward_with_snapshots(xs, state, None, false)
+    }
+
+    pub fn forward_with_snapshots(
+        &self,
+        xs: &Tensor,
+        state: &mut QuantizedDeltaState,
+        snapshots: Option<&mut QuantizedDeltaSnapshots>,
+        nontemporal: bool,
+    ) -> Result<QuantizedLayerOutput> {
         let wall_started = Instant::now();
         let norm_started = Instant::now();
         let normalized = gguf_rms_norm(xs, &self.input_norm, self.eps)?;
         let mut normalization = norm_started.elapsed();
-        let (mixed, delta) = self.delta.forward(&normalized, state)?;
+        let (mixed, delta) =
+            self.delta
+                .forward_with_snapshots(&normalized, state, snapshots, nontemporal)?;
         let hidden = (xs.to_dtype(DType::F32)? + mixed)?;
         let norm_started = Instant::now();
         let normalized = gguf_rms_norm(&hidden, &self.post_attention_norm, self.eps)?;

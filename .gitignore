@@ -7,3 +7,5 @@
 benchmark-results/
 reference-artifacts/
 __pycache__/
+ngram-run-logs/*.log
+ngram-run-logs/*.summary

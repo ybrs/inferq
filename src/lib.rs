@@ -3,6 +3,7 @@
 pub mod config;
 pub mod gguf;
 pub mod loader;
+pub mod ngram;
 pub mod profile;
 pub mod qwen;
 pub mod residency;
@@ -22,7 +23,7 @@ pub use residency::{
     FullExpertWarmupMode, FullExpertWarmupProgress, FullExpertWarmupReport, warm_all_experts,
 };
 pub use runtime::{
-    GenerationMetrics, GenerationOptions, GenerationResult, QuantizedDraftObservation,
-    QuantizedGenerationMetrics, QuantizedGenerationResult, QuantizedRuntime,
-    QuantizedSpeculativeMetrics, Runtime, ThinkingMetrics,
+    GenerationMetrics, GenerationOptions, GenerationResult, NgramMatchLengthStats,
+    QuantizedDraftObservation, QuantizedGenerationMetrics, QuantizedGenerationResult,
+    QuantizedNgramMetrics, QuantizedRuntime, QuantizedSpeculativeMetrics, Runtime, ThinkingMetrics,
 };
