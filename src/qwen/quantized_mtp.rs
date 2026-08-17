@@ -128,6 +128,16 @@ impl<'a> QuantizedMtpHead<'a> {
         })
     }
 
+    /// A draft-only LM head covering the first `vocab` rows of the shared one.
+    pub fn draft_head(&self, vocab: usize) -> Result<QuantizedMatrix> {
+        self.lm_head.leading_rows(vocab)
+    }
+
+    /// Rows in the shared LM head, i.e. the full vocabulary.
+    pub fn vocab_size(&self) -> usize {
+        self.lm_head.shape()[0]
+    }
+
     pub fn new_state(&self) -> QuantizedMtpState {
         QuantizedMtpState {
             attention: self.layer.new_state(),
@@ -140,6 +150,25 @@ impl<'a> QuantizedMtpHead<'a> {
         hidden_inputs: &Tensor,
         state: &mut QuantizedMtpState,
         produce_logits: bool,
+    ) -> Result<QuantizedMtpOutput> {
+        self.forward_with_head(token_ids, hidden_inputs, state, produce_logits, None)
+    }
+
+    /// As `forward`, but scoring the draft against `head` instead of the full
+    /// LM head.
+    ///
+    /// `head` is expected to be a leading row slice of the shared LM head, so
+    /// the returned logits cover a vocabulary prefix rather than the whole
+    /// vocabulary. That is admissible **only** on the drafting path: a draft is
+    /// a proposal, and one the prefix gets wrong is rejected by the target,
+    /// which always scores against the full head.
+    pub fn forward_with_head(
+        &self,
+        token_ids: &[u32],
+        hidden_inputs: &Tensor,
+        state: &mut QuantizedMtpState,
+        produce_logits: bool,
+        head: Option<&QuantizedMatrix>,
     ) -> Result<QuantizedMtpOutput> {
         ensure!(
             !token_ids.is_empty(),
@@ -171,7 +200,7 @@ impl<'a> QuantizedMtpHead<'a> {
         let head_norm = norm_started.elapsed();
         let lm_started = Instant::now();
         let logits = produce_logits
-            .then(|| self.lm_head.forward(&normalized_hidden))
+            .then(|| head.unwrap_or(&self.lm_head).forward(&normalized_hidden))
             .transpose()?;
         let lm_head = lm_started.elapsed();
         Ok(QuantizedMtpOutput {

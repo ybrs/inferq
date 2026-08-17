@@ -310,6 +310,41 @@ impl QuantizedMatrix {
     /// Concatenate two identically quantized matrices along their output rows.
     /// Quantized GGUF blocks are row-major, so this preserves every row's bytes
     /// while allowing callers to share one kernel launch for related outputs.
+    /// A new matrix holding this one's first `rows` output rows.
+    ///
+    /// GGUF quantized blocks are row-major and every row occupies the same
+    /// number of bytes, so a leading row range is a contiguous byte prefix and
+    /// needs no requantization. Used to build a cheap draft-only LM head: the
+    /// MTP predictor's argmax over a vocabulary prefix reads a fraction of the
+    /// weight traffic, and a draft the prefix gets wrong is simply rejected by
+    /// the target, which never uses this path.
+    pub fn leading_rows(&self, rows: usize) -> Result<Self> {
+        ensure!(
+            rows > 0 && rows <= self.rows,
+            "cannot take {rows} leading rows of a {}-row matrix",
+            self.rows
+        );
+        ensure!(
+            self.tensor.device().is_cpu(),
+            "leading-row slicing currently supports CPU quantized matrices only"
+        );
+        ensure!(
+            self.storage_bytes.is_multiple_of(self.rows),
+            "quantized matrix of {} bytes does not divide evenly into {} rows",
+            self.storage_bytes,
+            self.rows
+        );
+        if rows == self.rows {
+            return Ok(self.clone());
+        }
+        let bytes_per_row = self.storage_bytes / self.rows;
+        let data = self.tensor.data()?;
+        let prefix = data[..rows * bytes_per_row].to_vec();
+        let storage = QStorage::from_data(Cow::Owned(prefix), &Device::Cpu, self.dtype)?;
+        let tensor = QTensor::new(storage, (rows, self.columns))?;
+        Self::new(tensor)
+    }
+
     pub fn concatenate_rows(&self, other: &Self) -> Result<Self> {
         ensure!(
             self.dtype == other.dtype,

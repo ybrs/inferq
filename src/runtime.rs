@@ -7,7 +7,7 @@ use anyhow::{Context, Result, ensure};
 use candle_core::{Device, IndexOp, Tensor};
 
 use crate::{
-    Checkpoint, ExpertCacheStats, GgufCheckpoint, Qwen3NextConfig,
+    Checkpoint, ExpertCacheStats, GgufCheckpoint, QuantizedMatrix, Qwen3NextConfig,
     ngram::{NgramDraft, NgramIndex},
     qwen::{
         ForwardTimings, Model, ModelState, QuantizedForwardTimings, QuantizedModel,
@@ -17,9 +17,9 @@ use crate::{
     speculative::{
         ArmConfig, ArmController, DEFAULT_BACKOFF_CAP, DEFAULT_BACKOFF_TOKENS, DEFAULT_EWMA_ALPHA,
         DEFAULT_MTP_DEPTH_CAP, DEFAULT_MTP_DEPTH_FLOOR, DEFAULT_MTP_DEPTH_START,
-        DEFAULT_MTP_MIN_CONFIDENCE, DEFAULT_MTP_SUSPEND_BELOW, DEFAULT_NGRAM_DRAFT_CAP,
-        DEFAULT_NGRAM_DRAFT_FLOOR, DEFAULT_NGRAM_SUSPEND_BELOW, PolicyStepRecord,
-        QuantizedPolicyMetrics, SpanCursor, SpeculativeMode, StepArm, chain_span,
+        DEFAULT_MTP_DRAFT_VOCAB, DEFAULT_MTP_MIN_CONFIDENCE, DEFAULT_MTP_SUSPEND_BELOW,
+        DEFAULT_NGRAM_DRAFT_CAP, DEFAULT_NGRAM_DRAFT_FLOOR, DEFAULT_NGRAM_SUSPEND_BELOW,
+        PolicyStepRecord, QuantizedPolicyMetrics, SpanCursor, SpeculativeMode, StepArm, chain_span,
     },
     tokenizer::ModelTokenizer,
     trace::RoutingTrace,
@@ -97,6 +97,9 @@ pub struct GenerationOptions {
     /// by `mtp_min_confidence`, which is on a scale the cost model can be
     /// compared against; retained for comparability with earlier measurements.
     pub speculative_mtp_min_margin: Option<f32>,
+    /// Vocabulary prefix the MTP predictor scores drafts against. Zero uses
+    /// the full LM head.
+    pub mtp_draft_vocab: usize,
     /// Softmax confidence below which a chained MTP draft stops extending.
     ///
     /// Unlike the margin gate this acts *inside* the drafting loop, so the
@@ -508,6 +511,9 @@ pub struct QuantizedRuntime<'a> {
     /// Target hidden row for the token immediately before the gap, which is
     /// the MTP block's input at the gap's first position.
     mtp_gap_prior_hidden: Option<Vec<f32>>,
+    /// Draft-only LM head covering a vocabulary prefix, built on first use.
+    /// The target model always scores against its own full head.
+    mtp_draft_head: Option<QuantizedMatrix>,
     /// Whether the retained gap still describes the whole distance between the
     /// synced position and the target. A turn decoded with the MTP arm off
     /// stops retaining rows and clears this.
@@ -546,6 +552,7 @@ impl<'a> QuantizedRuntime<'a> {
             mtp_gap_hidden: Vec::new(),
             mtp_gap_prior_hidden: None,
             mtp_gap_valid: true,
+            mtp_draft_head: None,
             trace: None,
             snapshots,
             ngram: NgramIndex::new(),
@@ -990,6 +997,39 @@ impl<'a> QuantizedRuntime<'a> {
 
         let (ngram_config, mtp_config) = arm_configs(options, mode, has_mtp_block && mtp_aligned);
         let track_mtp = mtp_config.enabled;
+        // Build the draft-only LM head once per turn, and only when the arm
+        // that uses it is live. The target model keeps its own full head; this
+        // one is never on a path whose output is committed without
+        // verification.
+        let draft_vocab = if mtp_config.enabled {
+            self.model
+                .mtp()
+                .map(|mtp| {
+                    let full = mtp.vocab_size();
+                    match options.mtp_draft_vocab {
+                        0 => full,
+                        requested => requested.min(full),
+                    }
+                })
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let full_vocab = self.model.mtp().map_or(0, |mtp| mtp.vocab_size());
+        if draft_vocab == 0 || draft_vocab >= full_vocab {
+            self.mtp_draft_head = None;
+        } else if self
+            .mtp_draft_head
+            .as_ref()
+            .is_none_or(|head| head.shape()[0] != draft_vocab)
+        {
+            let head = self
+                .model
+                .mtp()
+                .context("MTP availability validated")?
+                .draft_head(draft_vocab)?;
+            self.mtp_draft_head = Some(head);
+        }
         self.mtp_gap_valid = track_mtp;
         let mut ngram_arm = ArmController::new(ngram_config);
         let mut mtp_arm = ArmController::new(mtp_config);
@@ -1038,6 +1078,11 @@ impl<'a> QuantizedRuntime<'a> {
         };
         let mut policy = QuantizedPolicyMetrics {
             mode,
+            draft_vocab: self
+                .mtp_draft_head
+                .as_ref()
+                .map_or(full_vocab, |h| h.shape()[0]),
+            full_vocab,
             ..Default::default()
         };
         let mut generated = Vec::with_capacity(options.max_new_tokens);
@@ -1522,6 +1567,7 @@ impl<'a> QuantizedRuntime<'a> {
             "MTP seed hidden row has {} values, expected {hidden_size}",
             target_hidden.len()
         );
+        let draft_head = self.mtp_draft_head.as_ref();
         let mut token = seed;
         let mut hidden = target_hidden.to_vec();
         let mut drafts = Vec::with_capacity(max_drafts);
@@ -1533,11 +1579,12 @@ impl<'a> QuantizedRuntime<'a> {
                 .model
                 .mtp()
                 .expect("MTP availability validated")
-                .forward(
+                .forward_with_head(
                     &[token],
                     &input,
                     self.mtp_state.as_mut().expect("MTP availability validated"),
                     true,
+                    draft_head,
                 )?;
             timings.accumulate(&output.timings);
             let logits = output
@@ -2049,6 +2096,7 @@ impl Default for GenerationOptions {
             policy: PolicyTuning::default(),
             speculative_mtp_draft_tokens: 0,
             speculative_mtp_min_margin: None,
+            mtp_draft_vocab: DEFAULT_MTP_DRAFT_VOCAB,
             mtp_min_confidence: DEFAULT_MTP_MIN_CONFIDENCE,
             speculative_ngram_draft_tokens: 0,
             ngram_min_match: DEFAULT_NGRAM_MIN_MATCH,

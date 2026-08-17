@@ -1,0 +1,6 @@
+[
+  {"name": "W1", "path": "draft-run-logs/prompts/w1.txt", "max_new_tokens": 256},
+  {"name": "W2", "path": "draft-run-logs/prompts/w2.txt", "max_new_tokens": 256},
+  {"name": "W3", "path": "draft-run-logs/prompts/w3.txt", "max_new_tokens": 256},
+  {"name": "W4", "path": "draft-run-logs/prompts/w4.txt", "max_new_tokens": 768}
+]

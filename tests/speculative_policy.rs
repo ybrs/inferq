@@ -414,3 +414,50 @@ fn batching_perturbs_logits_but_not_the_greedy_choice() -> Result<()> {
     );
     Ok(())
 }
+
+/// The draft-only LM head must never touch the target's decisions.
+///
+/// A vocabulary prefix is admissible for drafting because a wrong draft is
+/// rejected. It would be a correctness bug anywhere else, so this pins both
+/// halves: the slice really is the leading rows of the full head, and a run
+/// using it still emits exactly what target-only decoding emits.
+#[test]
+fn a_shortlisted_draft_head_changes_speed_but_not_output() -> Result<()> {
+    let Some(test) = checkpoint() else {
+        return Ok(());
+    };
+    let config = qwen_engine::Qwen3NextConfig::from_path(test.model_dir.join("config.json"))?;
+    let model = qwen_engine::qwen::QuantizedModel::load(&test.checkpoint, config)?;
+    let mtp = model.mtp().expect("this checkpoint carries an MTP block");
+
+    // The slice is the leading rows of the shared head, byte for byte.
+    let full = mtp.vocab_size();
+    let sliced = mtp.draft_head(1024)?;
+    assert_eq!(sliced.shape(), [1024, model.config().hidden_size]);
+    assert!(
+        sliced.storage_bytes() * full / 1024 == mtp.draft_head(full)?.storage_bytes(),
+        "a leading row slice must be a contiguous byte prefix"
+    );
+
+    let mut runtime = QuantizedRuntime::load(&test.checkpoint, &test.model_dir)?;
+    let baseline = runtime.generate(MIXED_PROMPT, &options(SpeculativeMode::Off, 64))?;
+    for vocab in [0usize, 8192, 32768] {
+        runtime.reset();
+        let shortlisted = runtime.generate(
+            MIXED_PROMPT,
+            &GenerationOptions {
+                mtp_draft_vocab: vocab,
+                ..options(SpeculativeMode::Mtp, 64)
+            },
+        )?;
+        assert_eq!(
+            shortlisted.generated_token_ids, baseline.generated_token_ids,
+            "draft vocabulary {vocab} changed the emitted tokens"
+        );
+        let policy = &shortlisted.metrics.policy;
+        if vocab > 0 {
+            assert_eq!(policy.draft_vocab, vocab.min(policy.full_vocab));
+        }
+    }
+    Ok(())
+}

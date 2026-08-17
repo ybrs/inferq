@@ -122,6 +122,20 @@ pub const DEFAULT_MTP_SUSPEND_BELOW: f64 = 0.5;
 /// measured one agree. See `draft-report-702d043633e0.md`.
 pub const DEFAULT_MTP_MIN_CONFIDENCE: f32 = 0.7;
 
+/// Vocabulary prefix the MTP predictor scores its drafts against.
+///
+/// The LM head is [248320, 2048] Q6_K = 397.9 MiB, and streaming it is the
+/// entire draft cost — 24-26 ms per drafted token on this host, which matches
+/// 397.9 MiB at its measured memory bandwidth. Drafting does not need the whole
+/// vocabulary: BPE gives frequent tokens low ids, and the target's actual next
+/// token lies below id 32768 for 91-98% of decode steps across the measured
+/// workloads. A leading row slice is a contiguous byte prefix, so this is a
+/// shorter matmul over sequential memory rather than a gather.
+///
+/// A draft the prefix gets wrong is rejected by the target exactly like any
+/// other wrong draft; only speed is at stake, never output.
+pub const DEFAULT_MTP_DRAFT_VOCAB: usize = 32_768;
+
 /// Shared backoff constants.
 pub const DEFAULT_EWMA_ALPHA: f64 = 0.2;
 pub const DEFAULT_BACKOFF_TOKENS: usize = 64;
@@ -514,6 +528,10 @@ pub struct QuantizedPolicyMetrics {
     pub plain_wall_time: Duration,
     /// Lazy MTP catch-up, kept separate so the scheme's cost is visible.
     pub resync_wall_time: Duration,
+    /// Vocabulary the MTP predictor scored its drafts against, and the full
+    /// vocabulary it would otherwise have streamed.
+    pub draft_vocab: usize,
+    pub full_vocab: usize,
     /// Chained drafts the confidence gate cut short.
     pub confidence_stops: usize,
     /// MTP tokens actually drafted, including the one whose confidence ended

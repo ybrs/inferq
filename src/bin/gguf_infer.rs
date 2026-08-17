@@ -13,9 +13,9 @@ use qwen_engine::{
     runtime::{DEFAULT_NGRAM_MIN_MATCH, PolicyTuning},
     speculative::{
         DEFAULT_BACKOFF_CAP, DEFAULT_BACKOFF_TOKENS, DEFAULT_EWMA_ALPHA, DEFAULT_MTP_DEPTH_CAP,
-        DEFAULT_MTP_DEPTH_FLOOR, DEFAULT_MTP_DEPTH_START, DEFAULT_MTP_MIN_CONFIDENCE,
-        DEFAULT_MTP_SUSPEND_BELOW, DEFAULT_NGRAM_DRAFT_CAP, DEFAULT_NGRAM_DRAFT_FLOOR,
-        DEFAULT_NGRAM_SUSPEND_BELOW, QuantizedPolicyMetrics,
+        DEFAULT_MTP_DEPTH_FLOOR, DEFAULT_MTP_DEPTH_START, DEFAULT_MTP_DRAFT_VOCAB,
+        DEFAULT_MTP_MIN_CONFIDENCE, DEFAULT_MTP_SUSPEND_BELOW, DEFAULT_NGRAM_DRAFT_CAP,
+        DEFAULT_NGRAM_DRAFT_FLOOR, DEFAULT_NGRAM_SUSPEND_BELOW, QuantizedPolicyMetrics,
     },
     trace::{JsonRoutingCensus, JsonlRoutingTrace, RoutingCensusArtifact, RoutingTraceSet},
     warm_all_experts,
@@ -91,6 +91,12 @@ struct Args {
     /// value. Superseded by --mtp-min-confidence; kept for comparability.
     #[arg(long, value_name = "MARGIN")]
     speculative_mtp_min_margin: Option<f32>,
+    /// Score MTP drafts against only the first N rows of the LM head. The LM
+    /// head is 398 MiB and streaming it is the entire draft cost; BPE puts
+    /// frequent tokens at low ids, so a prefix covers most steps. Zero uses the
+    /// full head. Only drafts are affected — the target always scores in full.
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_MTP_DRAFT_VOCAB)]
+    mtp_draft_vocab: usize,
     /// Stop a chained MTP draft at the first token whose own softmax
     /// confidence is below this. Zero disables the gate. The default is the
     /// measured break-even: a drafted token pays for itself only when the
@@ -226,6 +232,14 @@ fn report_policy(policy: &QuantizedPolicyMetrics) {
         policy.resync_tokens,
         policy.max_resync_tokens,
     );
+    if policy.draft_vocab > 0 && policy.draft_vocab < policy.full_vocab {
+        eprintln!(
+            "policy mtp draft head: scoring against {} of {} vocabulary rows ({:.1}% of the LM head)",
+            policy.draft_vocab,
+            policy.full_vocab,
+            100. * policy.draft_vocab as f64 / policy.full_vocab as f64,
+        );
+    }
     if policy.drafted_tokens > 0 {
         eprintln!(
             "policy mtp confidence gate: {} tokens drafted, {} submitted, {} chains stopped early ({:.1}% of drafted tokens declined)",
@@ -842,6 +856,7 @@ fn main() -> Result<()> {
         },
         speculative_mtp_draft_tokens: mtp_cap,
         speculative_mtp_min_margin: args.speculative_mtp_min_margin,
+        mtp_draft_vocab: args.mtp_draft_vocab,
         mtp_min_confidence: args.mtp_min_confidence,
         speculative_ngram_draft_tokens: ngram_cap,
         ngram_min_match: args.ngram_min_match,

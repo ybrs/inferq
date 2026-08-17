@@ -1,4 +1,7 @@
-# The MTP draft confidence gate
+# Cutting the MTP draft cost
+
+Two changes, measured together: a confidence gate on what the MTP predictor
+submits, and a vocabulary-prefix LM head for what it scores drafts against.
 
 Measured on host `702d043633e0` (Intel i7-8700, six physical cores,
 `taskset -c 0-5`, INFERQ default threading, fully resident Q4_K_M, greedy
@@ -12,6 +15,93 @@ comparable quantity and no number here should be compared to
 `policy-report-702d043633e0.md` in absolute tok/s.
 
 ## Result
+
+With both changes, best of two, on the single-process harness:
+
+| workload | gate | target-only | policy, before either change | **policy, both** | ratio | verdict |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| W1 copy-heavy | 1.25x | 7.13 | 8.83 | **9.04** | **1.268x** | **pass** |
+| W2 prose | 0.97x | 8.01 | 7.75 | **8.70** | **1.086x** | **pass** |
+| W3 self-repetitive | 1.02x | 7.90 | 8.77 | **10.34** | **1.309x** | **pass** |
+| W4 mixed, 768 tokens | 1.10x | 6.32 | 6.66 | **7.01** | **1.108x** | **pass** |
+
+**All four gates pass, and W2 is now a win rather than a loss** — the workload
+that regressed 9% under the policy alone gains 8.6%. 64 speculative runs across
+the campaign emitted token ids identical to target-only, with zero mismatches.
+
+Per the original task's gate 8 this is the point at which the default flips to
+`--speculative auto`. It has **not** been flipped, for a reason that is not
+about these numbers: greedy equivalence is currently probabilistic rather than
+guaranteed (see below), and `AGENTS.md` is explicit that approximate behaviour
+must never become the default. Fixing that is now the only thing standing
+between this work and default-on speculation.
+
+## The vocabulary-prefix draft head
+
+`output.weight` is [248320, 2048] Q6_K = **397.9 MiB**, and streaming it is the
+entire draft cost: 397.9 MiB at this host's measured bandwidth is ~26 ms, which
+is the 24-26 ms/drafted-token measured three separate ways.
+
+Drafting does not need the whole vocabulary. BPE gives frequent tokens low ids,
+and this model's output confirms it — median emitted token id is 485-1332
+against a vocabulary of 248,320. So `{id < K}` is a **contiguous byte prefix** of
+the head: a shorter matmul over sequential memory, sliced with
+`QuantizedMatrix::leading_rows` at no requantisation cost.
+
+The context-token union the design originally called for was dropped after
+measuring what it adds over the prefix alone at K=32768: **+1.6 pts on W1,
++1.2 on W2, +0.8 on W3, +2.9 on W4**. It is not worth a gather kernel and the
+bookkeeping to maintain a dynamic set.
+
+| workload | draft ms/token, full head | K=32768 | single-arm MTP uplift | acceptance full -> K |
+| --- | ---: | ---: | ---: | ---: |
+| W1 | 25.3 | **8.1** | 1.090x | 95.0% -> 92.1% |
+| W2 | 23.9 | **6.9** | 1.111x | 93.2% -> 89.5% |
+| W3 | 23.9 | **6.7** | 1.209x | 93.0% -> 98.0% |
+
+The residual ~7 ms is the MTP transformer block itself; the LM head component
+fell from ~24 ms to ~3.5 ms as the byte count predicts.
+
+Acceptance drops slightly where coverage is imperfect, which is the trade being
+made and it is small. **This is safe only because drafting is a proposal**: a
+token the prefix gets wrong is rejected by the target exactly like any other
+wrong draft. The target model keeps its own full head and never touches this
+path; `a_shortlisted_draft_head_changes_speed_but_not_output` pins both halves.
+
+### K sweep
+
+| K | W1 | W2 | W3 |
+| --- | ---: | ---: | ---: |
+| 8192 | 1.187x | 0.989x | 1.267x |
+| 16384 | **1.259x** | **1.077x** | **1.327x** |
+| **32768** | **1.268x** | **1.086x** | 1.309x |
+| 65536 | 1.261x | 1.060x | 1.282x |
+| full | 1.238x | 0.967x | 1.110x |
+
+16384 and 32768 are within noise of each other and both clearly beat the
+extremes: 8192 loses coverage faster than it saves bytes, 65536 saves too few.
+32768 is kept as the default on the strength of W1 and W2.
+
+### The confidence gate, recalibrated against the shortlisted drafter
+
+A prefix softmax has the wrong normaliser — the missing mass is exactly what the
+prefix dropped — so the threshold measured against the full-head drafter could
+not be assumed to carry. Re-measured:
+
+| confidence | W1 | W2 | W3 |
+| --- | ---: | ---: | ---: |
+| 0.5 | 1.246x | 1.008x | 1.257x |
+| 0.6 | 1.270x | 1.021x | 1.282x |
+| **0.7** | 1.268x | **1.086x** | **1.309x** |
+| 0.8 | **1.337x** | 1.045x | 1.289x |
+
+0.7 remains the right default: best on W2, which is the binding workload, and
+within noise of best on W3. W1 prefers 0.8, which is worth revisiting if W1-like
+work becomes the priority. The two mechanisms compose rather than fight — the
+gate declines precisely the drafts the prefix gets wrong, which is why
+acceptance holds up at 89-98%.
+
+## Earlier result: the confidence gate alone
 
 | workload | gate | target-only | policy, no confidence gate | **policy, gate 0.70** | ratio | verdict |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
@@ -174,7 +264,16 @@ tracked separately rather than smuggled in here.
 CARGO_TARGET_DIR=target-native RUSTFLAGS='-C target-cpu=native' \
   cargo build --release --bin gguf_infer
 
-./draft-run-logs/campaign.sh        # baselines, arm, gate, sweep
+./draft-run-logs/campaign.sh        # the confidence-gate campaign, one process per cell
+
+# The configuration matrix, loading and warming the model once. 72 cells in
+# 54 min against 52 cells in 58 min for the per-process harness.
+taskset -c 0-5 ./target-native/release/gguf_policy_bench \
+  --model "${MODEL_ROOT}/Qwen_Qwen3.6-35B-A3B-Q4_K_M.gguf" \
+  --tokenizer-model "${MODEL_ROOT}" \
+  --prompts draft-run-logs/prompts.json \
+  --matrix draft-run-logs/matrix-shortlist.json \
+  --repetitions 2 --output draft-run-logs/shortlist.jsonl
 ```
 
 Calibration data for a fresh threshold:
