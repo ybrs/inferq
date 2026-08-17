@@ -5,6 +5,7 @@ pub mod gguf;
 pub mod loader;
 pub mod ngram;
 pub mod profile;
+pub mod qgemm;
 pub mod qwen;
 pub mod residency;
 pub mod runtime;
@@ -16,7 +17,7 @@ pub mod trace;
 pub use config::{LayerType, Qwen3NextConfig};
 pub use gguf::{
     ExpertCacheStats, GgufCheckpoint, GgufExpertPair, GgufExpertTensor, GgufModelIdentity,
-    GgufSummary, GgufTensorInfo, QuantizedEmbedding, QuantizedMatrix, inspect_gguf,
+    GgufSummary, GgufTensorInfo, MultiRowPath, QuantizedEmbedding, QuantizedMatrix, inspect_gguf,
 };
 pub use loader::{Checkpoint, ModelSummary, TensorInfo};
 pub use residency::{

@@ -17,9 +17,36 @@ use candle_core::{
     },
 };
 use rayon::prelude::*;
+
+use crate::qgemm;
 use serde::{Deserialize, Serialize};
 
 const SMALL_M_MIN_STORAGE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Input row counts routed to a multi-row kernel.
+///
+/// One row stays on Candle's matvec, which is a different problem: no weight
+/// byte is reused, so there is nothing to fuse. Above sixteen rows the tiling
+/// stops paying and Candle's generic loop takes over; a verification pass is
+/// bounded by the draft length, which is capped below that.
+const MULTI_ROW_RANGE: std::ops::RangeInclusive<usize> = 2..=16;
+
+/// Which multi-row matmul implementation to run.
+///
+/// `forward` chooses one of these per call; the kernel benchmarks pin a
+/// choice so the same matrix and input can be timed on each path at any row
+/// count, including counts the dispatch would never route there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MultiRowPath {
+    /// Candle's own CPU implementation: a `BarrierPool` matvec at one row, a
+    /// generic per-row loop above that.
+    Candle,
+    /// Traverse each compressed weight row once and apply it to every input
+    /// row while it is cache-hot, decoding the block once per input row.
+    SmallM,
+    /// As `SmallM`, but decode each weight block once for all input rows.
+    Fused,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GgufSummary {
@@ -311,6 +338,169 @@ impl QuantizedMatrix {
     }
 
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let xs = self.validated_input(xs)?;
+        let input_rows = xs.elem_count() / self.columns;
+        if MULTI_ROW_RANGE.contains(&input_rows)
+            && self.tensor.device().is_cpu()
+            && (self.storage_bytes >= SMALL_M_MIN_STORAGE_BYTES || cfg!(test))
+        {
+            let values = xs.flatten_all()?.to_vec1::<f32>()?;
+            if let Some(output) =
+                self.multi_row_forward(&values, input_rows, MultiRowPath::Fused)?
+            {
+                let mut shape = xs.dims().to_vec();
+                *shape.last_mut().expect("rank validated above") = self.rows;
+                return Ok(Tensor::from_vec(output, shape, xs.device())?);
+            }
+        }
+        Ok(xs.apply_op1_no_bwd(self.tensor.as_ref())?)
+    }
+
+    /// Run one specific multi-row implementation, bypassing dispatch.
+    ///
+    /// Benchmarks and differential tests use this to hold everything but the
+    /// kernel constant. `forward` is the production entry point.
+    pub fn forward_via(&self, xs: &Tensor, path: MultiRowPath) -> Result<Tensor> {
+        let xs = self.validated_input(xs)?;
+        let input_rows = xs.elem_count() / self.columns;
+        match path {
+            MultiRowPath::Candle => Ok(xs.apply_op1_no_bwd(self.tensor.as_ref())?),
+            MultiRowPath::SmallM | MultiRowPath::Fused => {
+                ensure!(
+                    self.tensor.device().is_cpu(),
+                    "the multi-row kernels require a CPU matrix"
+                );
+                let values = xs.flatten_all()?.to_vec1::<f32>()?;
+                let output = self
+                    .multi_row_forward(&values, input_rows, path)?
+                    .with_context(|| format!("{:?} has no multi-row kernel", self.dtype))?;
+                let mut shape = xs.dims().to_vec();
+                *shape.last_mut().expect("rank validated above") = self.rows;
+                Ok(Tensor::from_vec(output, shape, xs.device())?)
+            }
+        }
+    }
+
+    /// Run whichever multi-row kernel `path` selects, or `None` when this
+    /// dtype has none and the caller should fall back to Candle.
+    fn multi_row_forward(
+        &self,
+        values: &[f32],
+        input_rows: usize,
+        path: MultiRowPath,
+    ) -> Result<Option<Vec<f32>>> {
+        let fused = path == MultiRowPath::Fused && qgemm::supported();
+        let output = match (self.dtype, fused) {
+            (GgmlDType::Q4K, true) => self
+                .fused_forward::<BlockQ4K, qgemm::Q4KBlock, qgemm::Q8KBlock>(
+                    values,
+                    input_rows,
+                    qgemm::q4k_q8k_row,
+                )?,
+            (GgmlDType::Q6K, true) => self
+                .fused_forward::<BlockQ6K, qgemm::Q6KBlock, qgemm::Q8KBlock>(
+                    values,
+                    input_rows,
+                    qgemm::q6k_q8k_row,
+                )?,
+            (GgmlDType::Q8_0, true) => self
+                .fused_forward::<BlockQ8_0, qgemm::Q80Block, qgemm::Q80Block>(
+                    values,
+                    input_rows,
+                    qgemm::q80_q80_row,
+                )?,
+            // Q5K carries 0.3% of this model's bytes and keeps the per-row
+            // kernel; see multirow-report-702d043633e0.md.
+            (GgmlDType::Q4K, false) => self.small_m_forward::<BlockQ4K>(values, input_rows)?,
+            (GgmlDType::Q5K, _) => self.small_m_forward::<BlockQ5K>(values, input_rows)?,
+            (GgmlDType::Q6K, false) => self.small_m_forward::<BlockQ6K>(values, input_rows)?,
+            (GgmlDType::Q8_0, false) => self.small_m_forward::<BlockQ8_0>(values, input_rows)?,
+            _ => return Ok(None),
+        };
+        Ok(Some(output))
+    }
+
+    /// Multi-row product that decodes each weight block once for all input
+    /// rows. Layout and parallelism match `small_m_forward`; only the inner
+    /// kernel differs, which is what keeps the two directly comparable.
+    fn fused_forward<W, WeightBlock, InputBlock>(
+        &self,
+        xs: &[f32],
+        input_rows: usize,
+        kernel: fn(&[WeightBlock], &[InputBlock], usize, &mut [f32]),
+    ) -> Result<Vec<f32>>
+    where
+        W: GgmlType,
+        WeightBlock: Sync,
+        InputBlock: Sync,
+    {
+        ensure!(
+            self.dtype == W::DTYPE,
+            "fused kernel dtype mismatch: matrix {:?}, block {:?}",
+            self.dtype,
+            W::DTYPE
+        );
+        let blocks_per_row = self.columns.div_ceil(W::BLCK_SIZE);
+        let bytes = self.tensor.data()?;
+        // SAFETY: identical to `small_m_forward` — Candle's CPU QStorage owns
+        // a correctly aligned Vec<W> of repr(C) numeric PODs, and the
+        // prefix/suffix checks reject misalignment or a partial block.
+        let (prefix, weights, suffix) = unsafe { bytes.align_to::<W>() };
+        ensure!(
+            prefix.is_empty() && suffix.is_empty(),
+            "quantized matrix bytes are not aligned to complete {:?} blocks",
+            W::DTYPE
+        );
+        ensure!(
+            weights.len() == self.rows * blocks_per_row,
+            "quantized matrix has {} {:?} blocks, expected {}",
+            weights.len(),
+            W::DTYPE,
+            self.rows * blocks_per_row
+        );
+        // SAFETY: `WeightBlock` is the layout mirror of `W`, pinned by the
+        // compile-time size assertions in `qgemm`.
+        let weights = unsafe { qgemm::as_mirror::<W, WeightBlock>(weights) };
+
+        let mut quantized_inputs = vec![W::VecDotType::zeros(); input_rows * blocks_per_row];
+        for row in 0..input_rows {
+            W::VecDotType::from_float(
+                &xs[row * self.columns..(row + 1) * self.columns],
+                &mut quantized_inputs[row * blocks_per_row..(row + 1) * blocks_per_row],
+            );
+        }
+        // Repack block-major so the kernel's inner loop over input rows walks
+        // contiguous memory: at 16 rows the row-major layout alternates
+        // between two halves that together exceed L1.
+        let mut packed = Vec::with_capacity(quantized_inputs.len());
+        for block in 0..blocks_per_row {
+            for row in 0..input_rows {
+                packed.push(quantized_inputs[row * blocks_per_row + block].clone());
+            }
+        }
+        // SAFETY: `InputBlock` is the layout mirror of `W::VecDotType`.
+        let inputs = unsafe { qgemm::as_mirror::<W::VecDotType, InputBlock>(&packed) };
+
+        let mut transposed = vec![0f32; self.rows * input_rows];
+        transposed
+            .par_chunks_mut(input_rows)
+            .enumerate()
+            .for_each(|(output_row, output)| {
+                let weight =
+                    &weights[output_row * blocks_per_row..(output_row + 1) * blocks_per_row];
+                kernel(weight, inputs, input_rows, output);
+            });
+        let mut output = vec![0f32; input_rows * self.rows];
+        for input_row in 0..input_rows {
+            for output_row in 0..self.rows {
+                output[input_row * self.rows + output_row] =
+                    transposed[output_row * input_rows + input_row];
+            }
+        }
+        Ok(output)
+    }
+
+    fn validated_input(&self, xs: &Tensor) -> Result<Tensor> {
         ensure!(
             xs.rank() >= 2,
             "quantized matrix input must have rank at least two"
@@ -321,29 +511,11 @@ impl QuantizedMatrix {
             xs.dim(xs.rank() - 1)?,
             self.columns
         );
-        let xs = if xs.dtype() == DType::F32 {
+        Ok(if xs.dtype() == DType::F32 {
             xs.clone()
         } else {
             xs.to_dtype(DType::F32)?
-        };
-        let input_rows = xs.elem_count() / self.columns;
-        if (2..=8).contains(&input_rows)
-            && self.tensor.device().is_cpu()
-            && (self.storage_bytes >= SMALL_M_MIN_STORAGE_BYTES || cfg!(test))
-        {
-            let values = xs.flatten_all()?.to_vec1::<f32>()?;
-            let output = match self.dtype {
-                GgmlDType::Q4K => self.small_m_forward::<BlockQ4K>(&values, input_rows)?,
-                GgmlDType::Q5K => self.small_m_forward::<BlockQ5K>(&values, input_rows)?,
-                GgmlDType::Q6K => self.small_m_forward::<BlockQ6K>(&values, input_rows)?,
-                GgmlDType::Q8_0 => self.small_m_forward::<BlockQ8_0>(&values, input_rows)?,
-                _ => return Ok(xs.apply_op1_no_bwd(self.tensor.as_ref())?),
-            };
-            let mut shape = xs.dims().to_vec();
-            *shape.last_mut().expect("rank validated above") = self.rows;
-            return Ok(Tensor::from_vec(output, shape, xs.device())?);
-        }
-        Ok(xs.apply_op1_no_bwd(self.tensor.as_ref())?)
+        })
     }
 
     fn small_m_forward<T: GgmlType>(&self, xs: &[f32], input_rows: usize) -> Result<Vec<f32>> {
@@ -385,7 +557,9 @@ impl QuantizedMatrix {
         // Store output-column-major while parallel workers stream disjoint
         // compressed rows. Applying all M inputs before advancing retains a
         // weight row in cache instead of traversing the complete matrix M
-        // times as Candle's generic CPU loop does.
+        // times as Candle's generic CPU loop does. This path decodes each
+        // block once per input row; `fused_forward` decodes it once in total
+        // and is preferred wherever the CPU supports it.
         let mut transposed = vec![0f32; self.rows * input_rows];
         transposed
             .par_chunks_mut(input_rows)
@@ -1190,6 +1364,114 @@ mod tests {
     use candle_core::{IndexOp, quantized::gguf_file};
 
     use super::*;
+
+    fn deterministic_matrix(dtype: GgmlDType, rows: usize, columns: usize) -> QuantizedMatrix {
+        let weights: Vec<f32> = (0..rows * columns)
+            .map(|index| {
+                let row = index / columns;
+                let column = index % columns;
+                ((column * 37 + row * 11) % 71) as f32 / 71. - 0.5
+            })
+            .collect();
+        let weights = Tensor::from_vec(weights, (rows, columns), &Device::Cpu).unwrap();
+        QuantizedMatrix::new(QTensor::quantize(&weights, dtype).unwrap()).unwrap()
+    }
+
+    fn deterministic_input(rows: usize, columns: usize) -> Tensor {
+        let values: Vec<f32> = (0..rows * columns)
+            .map(|index| {
+                let row = index / columns;
+                let column = index % columns;
+                (((column * 23 + row * 5) % 53) as f32 - 26.) / 32.
+            })
+            .collect();
+        Tensor::from_vec(values, (rows, columns), &Device::Cpu).unwrap()
+    }
+
+    /// The fused kernel decodes each weight block once instead of once per
+    /// input row, but keeps Candle's arithmetic: the per-block integer sums are
+    /// associative, and the f32 accumulators advance once per block in the same
+    /// order. Against Candle's own AVX2 kernel the results are therefore
+    /// **exact**, which is what makes greedy decoding token-identical.
+    ///
+    /// Candle only compiles that AVX2 kernel when `target_feature = "avx2"` is
+    /// set for the build; otherwise its `vec_dot` falls back to a scalar
+    /// implementation that accumulates in a different order. This kernel always
+    /// runs AVX2 once the CPU reports it, so in a build without that feature
+    /// the comparison is against a different reference and only agrees to
+    /// reordering noise. The release builds used for all measurements set
+    /// `-C target-cpu=native`, so they take the exact branch.
+    #[test]
+    fn fused_kernel_matches_candle_across_row_counts() {
+        if !qgemm::supported() {
+            eprintln!("skipping: the fused kernels need AVX2 and FMA");
+            return;
+        }
+        let candle_uses_avx2 = cfg!(target_feature = "avx2");
+        let mut worst = 0f32;
+        for dtype in [GgmlDType::Q4K, GgmlDType::Q6K, GgmlDType::Q8_0] {
+            let matrix = deterministic_matrix(dtype, 96, 512);
+            for rows in [2, 3, 4, 7, 8, 9, 15, 16] {
+                let input = deterministic_input(rows, 512);
+                let reference = matrix
+                    .forward_via(&input, MultiRowPath::Candle)
+                    .unwrap()
+                    .to_vec2::<f32>()
+                    .unwrap();
+                let fused = matrix
+                    .forward_via(&input, MultiRowPath::Fused)
+                    .unwrap()
+                    .to_vec2::<f32>()
+                    .unwrap();
+                for (row, (fused, reference)) in fused.iter().zip(&reference).enumerate() {
+                    if candle_uses_avx2 {
+                        assert_eq!(
+                            fused, reference,
+                            "{dtype:?} rows={rows} row {row} diverged from Candle's AVX2 kernel"
+                        );
+                    }
+                    for (fused, reference) in fused.iter().zip(reference) {
+                        let diff = (fused - reference).abs();
+                        worst = worst.max(diff);
+                        assert!(
+                            diff <= 1e-3,
+                            "{dtype:?} rows={rows} row {row}: {fused} vs {reference}"
+                        );
+                    }
+                }
+            }
+        }
+        if !candle_uses_avx2 {
+            eprintln!("candle used its scalar vec_dot; worst reordering difference {worst:.3e}");
+        }
+    }
+
+    /// A single row must keep taking Candle's matvec: the fused kernels are a
+    /// multi-row optimization and the one-row decode path is out of scope.
+    #[test]
+    fn one_row_input_is_left_on_the_candle_path() {
+        let matrix = deterministic_matrix(GgmlDType::Q4K, 32, 512);
+        let input = deterministic_input(1, 512);
+        let dispatched = matrix.forward(&input).unwrap().to_vec2::<f32>().unwrap();
+        let candle = matrix
+            .forward_via(&input, MultiRowPath::Candle)
+            .unwrap()
+            .to_vec2::<f32>()
+            .unwrap();
+        assert_eq!(dispatched, candle);
+    }
+
+    /// Column counts that are not a whole number of blocks cannot be
+    /// represented by these formats; the loader must reject them rather than
+    /// letting a kernel read a partial block.
+    #[test]
+    fn ragged_column_counts_are_rejected_before_reaching_a_kernel() {
+        let weights = Tensor::from_vec(vec![0.5f32; 2 * 300], (2, 300), &Device::Cpu).unwrap();
+        assert!(
+            QTensor::quantize(&weights, GgmlDType::Q4K).is_err(),
+            "a 300-column Q4K matrix is not representable and must not quantize"
+        );
+    }
 
     #[test]
     fn direct_matrix_matches_its_dequantized_reference() {

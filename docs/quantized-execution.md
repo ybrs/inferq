@@ -6,6 +6,51 @@ or F32 representation. `QuantizedMatrix::forward` accepts F32 activations and
 calls the block matmul directly; its public API intentionally has no
 whole-matrix dequantization method.
 
+## Multi-row kernels
+
+`QuantizedMatrix::forward` routes 2..=16 input rows on CPU, for matrices of at
+least 4 MiB, to a fused multi-row kernel in `src/qgemm.rs`. One row keeps
+Candle's matvec: no weight byte is reused there, so there is nothing to fuse.
+Above 16 rows Candle's generic loop takes over.
+
+The fused kernel exists because a per-row dot product re-runs the *block
+decode* — nibble unpacking and scale extraction — once per input row, and that
+decode is roughly half the per-row work. Measured on the qualified host, the
+existing per-row path was compute-bound from M=4 upward: per-row time stayed
+flat as M grew (a bandwidth-bound kernel's would fall ~8x from M=2 to M=16) and
+each pass ran 3-4x above its weight-traffic floor. The fused kernel decodes each
+weight block once and applies it to every row of a register tile, measuring
+1.58x at M=8 on a Q4K dense projection.
+
+Tile width is 8 rows, chosen by measurement across 2/4/8/12/16. Beyond 8 the
+per-row accumulators stop fitting the 16 architectural ymm registers alongside
+the decoded weight state, and the spill costs more than the saved decode. A
+16-row pass therefore decodes each block twice and runs 8-10% worse per row than
+an 8-row pass.
+
+Candle keeps its block fields `pub(crate)`, so `qgemm` re-declares the GGUF
+on-disk block layouts as `repr(C)` mirrors, each pinned by a compile-time size
+assertion against Candle's own type. Accumulation order matches Candle's
+`vec_dot`: the per-block integer sums are associative and the f32 accumulators
+advance once per block in the same sequence, so results are bit-identical to
+Candle's AVX2 kernel. Candle compiles that kernel only when the build sets
+`target_feature = "avx2"`; against its scalar fallback the kernels agree to
+about 1e-6, which is reordering noise. Build with `-C target-cpu=native`.
+
+Q4K, Q6K and Q8_0 have fused kernels. Q5K stays on the per-row path: it carries
+0.3% of Qwen3.6-35B-A3B's bytes.
+
+Routed expert matrices (576-840 KiB) stay below the 4 MiB threshold and do not
+reach either multi-row kernel. That is deliberate and measured: at the 2-3 row
+groups MoE routing actually produces, both multi-row paths are slower than
+Candle's loop, because the fixed per-call cost — input quantization, layout
+repack, output transpose, rayon dispatch — cannot be amortized by a matrix that
+small. See `multirow-report-702d043633e0.md`.
+
+`QuantizedMatrix::forward_via(xs, MultiRowPath)` pins one implementation
+regardless of dispatch; it exists for `gguf_matmul_bench` and the differential
+tests, and production code should call `forward`.
+
 Fused expert tensors use the GGUF shape `[experts, rows, columns]`.
 `load_expert_matrix` seeks directly to one expert and reads only that matrix's
 compressed range. On the local Q4_K_M checkpoint this reduces a gate/up expert
