@@ -956,6 +956,7 @@ dependencies = [
  "candle-nn",
  "clap",
  "half",
+ "num_cpus",
  "rand",
  "rayon",
  "serde",

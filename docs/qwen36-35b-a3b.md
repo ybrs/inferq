@@ -90,8 +90,7 @@ Then substitute `Q4_K_M` and `Q8_0` in this command:
 MODEL_ROOT=/data/models/Qwen3.6-35B-A3B
 QUANT=Q4_K_M
 
-CANDLE_NUM_THREADS=4 \
-RAYON_NUM_THREADS=4 \
+INFERQ_NUM_THREADS=4 \
 ./target-native/release/gguf_bench \
   --model "${MODEL_ROOT}/Qwen_Qwen3.6-35B-A3B-${QUANT}.gguf" \
   --tokenizer-model "${MODEL_ROOT}" \

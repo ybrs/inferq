@@ -23,8 +23,7 @@ boundary:
 ```bash
 MODEL_ROOT=/data/projects/localllm/models/Qwen3.6-35B-A3B
 
-CANDLE_NUM_THREADS=4 \
-RAYON_NUM_THREADS=4 \
+INFERQ_NUM_THREADS=4 \
 ./target-native/release/gguf_infer \
   --model "${MODEL_ROOT}/Qwen_Qwen3.6-35B-A3B-Q4_K_M.gguf" \
   --tokenizer-model "${MODEL_ROOT}" \
@@ -70,7 +69,7 @@ kept 100% of the exercised drafts accepted, and continued with `Hi!` and
 Example:
 
 ```bash
-CANDLE_NUM_THREADS=4 RAYON_NUM_THREADS=4 \
+INFERQ_NUM_THREADS=4 \
 ./target-native/release/gguf_infer \
   --model "${MODEL_ROOT}/Qwen_Qwen3.6-35B-A3B-Q4_K_M.gguf" \
   --tokenizer-model "${MODEL_ROOT}" \
@@ -120,8 +119,7 @@ expert-reuse metrics for every layer.
 ```bash
 MODEL_ROOT=/data/projects/localllm/models/Qwen3.6-35B-A3B
 
-CANDLE_NUM_THREADS=4 \
-RAYON_NUM_THREADS=4 \
+INFERQ_NUM_THREADS=4 \
 ./target-native/release/gguf_verify_bench \
   --model "${MODEL_ROOT}/Qwen_Qwen3.6-35B-A3B-Q4_K_M.gguf" \
   --tokenizer-model "${MODEL_ROOT}" \

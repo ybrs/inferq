@@ -74,8 +74,7 @@ CARGO_TARGET_DIR=target-native \
 RUSTFLAGS='-C target-cpu=native' \
 cargo build --release --bin gguf_bench
 
-CANDLE_NUM_THREADS=4 \
-RAYON_NUM_THREADS=4 \
+INFERQ_NUM_THREADS=4 \
 ./target-native/release/gguf_bench \
   --model /data/projects/localllm/models/Qwen3-Coder-Next-UD-Q4_K_M.gguf \
   --tokenizer-model /data/projects/localllm/models/Qwen3-Coder-Next-SafeTensors \
@@ -84,6 +83,12 @@ RAYON_NUM_THREADS=4 \
   --warmup-all-experts true \
   --output artifacts/gguf-pinned-suite.jsonl
 ```
+
+`INFERQ_NUM_THREADS` sizes candle's own CPU thread pools and inferq's
+multi-row dense-path rayon pool consistently from one value; setting
+`CANDLE_NUM_THREADS`/`RAYON_NUM_THREADS` directly still works (equal values
+take effect as before; unequal values log a warning and `CANDLE_NUM_THREADS`
+wins), and either pair still applies when `INFERQ_NUM_THREADS` is unset.
 
 The output path is created with no-overwrite semantics. Quantized schema
 version 3 embeds the source revision, compile-time AVX2/FMA status, effective

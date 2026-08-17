@@ -176,8 +176,7 @@ INFERQ_MODEL_ROOT=/data/models/qwen3-coder-next
 INFERQ_TOKENIZER_DIR="${INFERQ_MODEL_ROOT}/tokenizer"
 INFERQ_GGUF="${INFERQ_MODEL_ROOT}/Qwen3-Coder-Next-UD-Q4_K_M.gguf"
 
-CANDLE_NUM_THREADS=4 \
-RAYON_NUM_THREADS=4 \
+INFERQ_NUM_THREADS=4 \
 ./target-native/release/gguf_infer \
   --model "${INFERQ_GGUF}" \
   --tokenizer-model "${INFERQ_TOKENIZER_DIR}" \
@@ -200,8 +199,7 @@ INFERQ_MODEL_ROOT=/data/models/qwen3-coder-next
 INFERQ_TOKENIZER_DIR="${INFERQ_MODEL_ROOT}/tokenizer"
 INFERQ_GGUF="${INFERQ_MODEL_ROOT}/Qwen3-Coder-Next-UD-Q4_K_M.gguf"
 
-CANDLE_NUM_THREADS=4 \
-RAYON_NUM_THREADS=4 \
+INFERQ_NUM_THREADS=4 \
 ./target-native/release/gguf_infer \
   --model "${INFERQ_GGUF}" \
   --tokenizer-model "${INFERQ_TOKENIZER_DIR}" \
@@ -220,8 +218,13 @@ hits, zero physical inference reads, and about 47,328 MiB RSS.
 The four-thread setting reproduces the current benchmark host. On a different
 CPU, compare it with the number of physical cores using `gguf_bench`; more
 threads are not automatically faster because MoE and DeltaNet contend for
-memory bandwidth. See [Reproducible profiling](docs/profiling.md) for the full
-benchmark command and JSONL output contract.
+memory bandwidth. `INFERQ_NUM_THREADS` sizes every CPU thread pool the engine
+touches (candle's own quantized-matvec and general-op pools, and inferq's
+multi-row dense-path rayon pool) consistently in one place; set it once
+instead of pairing `CANDLE_NUM_THREADS`/`RAYON_NUM_THREADS` by hand. The old
+pair still works if both are set to the same value, and still takes effect
+when `INFERQ_NUM_THREADS` is unset. See [Reproducible profiling](docs/profiling.md)
+for the full benchmark command and JSONL output contract.
 
 ### Troubleshooting
 

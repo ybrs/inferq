@@ -296,6 +296,7 @@ fn run(args: &Args) -> Result<Report> {
 }
 
 fn main() -> Result<()> {
+    qwen_engine::threading::init();
     let args = Args::parse();
     let output_path = args.output.clone();
     let report = run(&args)?;

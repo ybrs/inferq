@@ -655,6 +655,7 @@ impl std::fmt::Debug for GgufCheckpoint {
 
 impl GgufCheckpoint {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        crate::threading::init();
         let path = path.as_ref().to_path_buf();
         let mut file =
             File::open(&path).with_context(|| format!("failed to open {}", path.display()))?;

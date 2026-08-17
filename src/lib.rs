@@ -8,6 +8,7 @@ pub mod qwen;
 pub mod residency;
 pub mod runtime;
 pub mod sampling;
+pub mod threading;
 pub mod tokenizer;
 pub mod trace;
 
