@@ -8,15 +8,75 @@ use candle_core::{Device, IndexOp, Tensor};
 
 use crate::{
     Checkpoint, ExpertCacheStats, GgufCheckpoint, Qwen3NextConfig,
-    ngram::NgramIndex,
+    ngram::{NgramDraft, NgramIndex},
     qwen::{
         ForwardTimings, Model, ModelState, QuantizedForwardTimings, QuantizedModel,
         QuantizedModelState, QuantizedMtpState, QuantizedMtpTimings, QuantizedStateSnapshots,
     },
     sampling::{Sampler, SamplingConfig, argmax},
+    speculative::{
+        ArmConfig, ArmController, DEFAULT_BACKOFF_CAP, DEFAULT_BACKOFF_TOKENS, DEFAULT_EWMA_ALPHA,
+        DEFAULT_MTP_DEPTH_CAP, DEFAULT_MTP_DEPTH_FLOOR, DEFAULT_MTP_DEPTH_START,
+        DEFAULT_MTP_SUSPEND_BELOW, DEFAULT_NGRAM_DRAFT_CAP, DEFAULT_NGRAM_DRAFT_FLOOR,
+        DEFAULT_NGRAM_SUSPEND_BELOW, PolicyStepRecord, QuantizedPolicyMetrics, SpanCursor,
+        SpeculativeMode, StepArm, chain_span,
+    },
     tokenizer::ModelTokenizer,
     trace::RoutingTrace,
 };
+
+/// Tuning for the unified speculative policy's two controllers.
+///
+/// Every field is a knob rather than a constant so the measured constants can
+/// be swept without a rebuild, and so a mechanism that does not earn its place
+/// can be switched off without removing the loop it lives in.
+#[derive(Debug, Clone)]
+pub struct PolicyTuning {
+    /// Shortest draft the n-gram controller will shrink to.
+    pub ngram_draft_floor: usize,
+    /// Shallowest depth the MTP controller will shrink to.
+    pub mtp_depth_floor: usize,
+    /// Depth the MTP controller starts each run at.
+    pub mtp_depth_start: usize,
+    pub ngram_suspend_below: f64,
+    pub mtp_suspend_below: f64,
+    pub ewma_alpha: f64,
+    pub backoff_tokens: usize,
+    pub backoff_cap: usize,
+    /// Part B1: continue an accepted n-gram draft's source span without a
+    /// fresh key match.
+    pub span_continuation: bool,
+    /// Part B2: grow and shrink each arm's draft length with acceptance.
+    pub adaptive_length: bool,
+    /// Part B3: suspend an arm whose acceptance EWMA has collapsed.
+    pub ewma_backoff: bool,
+    /// Resynchronise the MTP block after every committing pass instead of
+    /// only when its arm is about to draft.
+    ///
+    /// The lazy scheme is the shipped one; this exists so the two can be
+    /// compared directly — they must produce identical tokens, and the
+    /// difference in resync wall time is what laziness buys.
+    pub eager_mtp_resync: bool,
+}
+
+impl Default for PolicyTuning {
+    fn default() -> Self {
+        Self {
+            ngram_draft_floor: DEFAULT_NGRAM_DRAFT_FLOOR,
+            mtp_depth_floor: DEFAULT_MTP_DEPTH_FLOOR,
+            mtp_depth_start: DEFAULT_MTP_DEPTH_START,
+            ngram_suspend_below: DEFAULT_NGRAM_SUSPEND_BELOW,
+            mtp_suspend_below: DEFAULT_MTP_SUSPEND_BELOW,
+            ewma_alpha: DEFAULT_EWMA_ALPHA,
+            backoff_tokens: DEFAULT_BACKOFF_TOKENS,
+            backoff_cap: DEFAULT_BACKOFF_CAP,
+            span_continuation: true,
+            adaptive_length: true,
+            ewma_backoff: true,
+            eager_mtp_resync: false,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct GenerationOptions {
@@ -24,14 +84,19 @@ pub struct GenerationOptions {
     pub sampling: SamplingConfig,
     pub stop_tokens: Vec<u32>,
     pub add_special_tokens: bool,
-    /// Maximum tokens proposed by Qwen3.5/3.6's embedded MTP head per target
-    /// verification pass. Zero keeps ordinary autoregressive decoding.
+    /// Which draft sources the generation loop may use. `Off` with a non-zero
+    /// legacy draft-token field below is read as that arm's single-arm mode,
+    /// which is what keeps the deprecated flags working.
+    pub speculative_mode: SpeculativeMode,
+    pub policy: PolicyTuning,
+    /// Ceiling on the MTP arm's drafting depth. Zero leaves the arm at its
+    /// default cap.
     pub speculative_mtp_draft_tokens: usize,
     /// Optional raw top-1/top-2 MTP logit-margin gate. Proposals below this
     /// threshold fall back to a one-row authoritative target pass.
     pub speculative_mtp_min_margin: Option<f32>,
-    /// Maximum tokens proposed per step by the n-gram (prompt-lookup) drafter.
-    /// Zero keeps ordinary autoregressive decoding.
+    /// Ceiling on the n-gram arm's draft length. Zero leaves the arm at its
+    /// default cap.
     pub speculative_ngram_draft_tokens: usize,
     /// Shortest token suffix the n-gram drafter will match on.
     pub ngram_min_match: usize,
@@ -374,6 +439,7 @@ pub struct QuantizedGenerationMetrics {
     pub expert_cache: ExpertCacheStats,
     pub speculative: QuantizedSpeculativeMetrics,
     pub ngram: QuantizedNgramMetrics,
+    pub policy: QuantizedPolicyMetrics,
     pub thinking: ThinkingMetrics,
 }
 
@@ -411,6 +477,22 @@ pub struct QuantizedRuntime<'a> {
     pending_token: Option<u32>,
     mtp_state: Option<QuantizedMtpState>,
     last_target_hidden: Option<Vec<f32>>,
+    /// Position the MTP block's own sequence state has been brought up to.
+    /// Under the policy this trails the target whenever tokens were committed
+    /// by the n-gram arm or by plain decode; see `catch_up_mtp`.
+    mtp_synced_position: usize,
+    /// Tokens committed since that position, with the authoritative target
+    /// hidden rows the committing passes already produced for them. Retaining
+    /// the rows is what lets one batched pass close a gap of any length.
+    mtp_gap_tokens: Vec<u32>,
+    mtp_gap_hidden: Vec<f32>,
+    /// Target hidden row for the token immediately before the gap, which is
+    /// the MTP block's input at the gap's first position.
+    mtp_gap_prior_hidden: Option<Vec<f32>>,
+    /// Whether the retained gap still describes the whole distance between the
+    /// synced position and the target. A turn decoded with the MTP arm off
+    /// stops retaining rows and clears this.
+    mtp_gap_valid: bool,
     trace: Option<Box<dyn RoutingTrace>>,
     /// Rollback snapshots for multi-row verification, allocated on first use
     /// and reused for the lifetime of the session.
@@ -440,6 +522,11 @@ impl<'a> QuantizedRuntime<'a> {
             pending_token: None,
             mtp_state,
             last_target_hidden: None,
+            mtp_synced_position: 0,
+            mtp_gap_tokens: Vec::new(),
+            mtp_gap_hidden: Vec::new(),
+            mtp_gap_prior_hidden: None,
+            mtp_gap_valid: true,
             trace: None,
             snapshots,
             ngram: NgramIndex::new(),
@@ -469,6 +556,11 @@ impl<'a> QuantizedRuntime<'a> {
         self.pending_token = None;
         self.mtp_state = self.model.mtp().map(|mtp| mtp.new_state());
         self.last_target_hidden = None;
+        self.mtp_synced_position = 0;
+        self.mtp_gap_tokens.clear();
+        self.mtp_gap_hidden.clear();
+        self.mtp_gap_prior_hidden = None;
+        self.mtp_gap_valid = true;
         self.ngram.clear();
     }
 
@@ -515,58 +607,6 @@ impl<'a> QuantizedRuntime<'a> {
         logits.context("forced thinking closure produced no target logits")
     }
 
-    fn evaluate_authoritative_mtp_token(
-        &mut self,
-        token: u32,
-        decode_profile: &mut QuantizedForwardTimings,
-        speculative: &mut QuantizedSpeculativeMetrics,
-    ) -> Result<Tensor> {
-        let position = self.state.position;
-        let previous_hidden = self
-            .last_target_hidden
-            .clone()
-            .context("target hidden-state carry is missing")?;
-        let output = self.model.forward_detailed(&[token], &mut self.state)?;
-        decode_profile.accumulate(&output.timings);
-        let resync_started = Instant::now();
-        let resync = self.synchronize_mtp(
-            position,
-            Some(&previous_hidden),
-            &[token],
-            &output.normalized_hidden,
-        )?;
-        speculative.resync_wall_time += resync_started.elapsed();
-        speculative.resync_profile.accumulate(&resync);
-        self.last_target_hidden = Some(last_hidden_row(&output.normalized_hidden)?);
-        Ok(output.logits)
-    }
-
-    fn force_close_thinking_speculative(
-        &mut self,
-        pending_token: Option<u32>,
-        forced_close_tokens: &[u32],
-        generated: &mut Vec<u32>,
-        decode_profile: &mut QuantizedForwardTimings,
-        speculative: &mut QuantizedSpeculativeMetrics,
-        on_token: &mut impl FnMut(u32) -> Result<()>,
-    ) -> Result<Tensor> {
-        let mut logits = None;
-        if let Some(token) = pending_token {
-            logits =
-                Some(self.evaluate_authoritative_mtp_token(token, decode_profile, speculative)?);
-        }
-        for &token in forced_close_tokens {
-            generated.push(token);
-            if let Err(error) = on_token(token) {
-                self.pending_token = Some(token);
-                return Err(error);
-            }
-            logits =
-                Some(self.evaluate_authoritative_mtp_token(token, decode_profile, speculative)?);
-        }
-        logits.context("forced thinking closure produced no target logits")
-    }
-
     pub fn generate(
         &mut self,
         prompt: &str,
@@ -582,15 +622,15 @@ impl<'a> QuantizedRuntime<'a> {
         mut on_token: impl FnMut(u32) -> Result<()>,
     ) -> Result<QuantizedGenerationResult> {
         ensure!(
-            options.speculative_mtp_draft_tokens == 0
+            options.speculative_mode != SpeculativeMode::Off
+                || options.speculative_mtp_draft_tokens == 0
                 || options.speculative_ngram_draft_tokens == 0,
-            "n-gram and MTP speculation cannot be enabled at the same time"
+            "the deprecated --speculative-ngram and --speculative-mtp flags select \
+             single-arm modes and cannot be combined; use --speculative auto"
         );
-        if options.speculative_mtp_draft_tokens > 0 {
-            return self.generate_speculative_mtp(prompt, options, on_token);
-        }
-        if options.speculative_ngram_draft_tokens > 0 {
-            return self.generate_speculative_ngram(prompt, options, on_token);
+        let mode = effective_speculative_mode(options);
+        if mode.is_speculative() {
+            return self.generate_speculative_policy(prompt, options, mode, on_token);
         }
         ensure!(
             options.max_new_tokens > 0,
@@ -707,6 +747,7 @@ impl<'a> QuantizedRuntime<'a> {
                 expert_cache,
                 speculative: QuantizedSpeculativeMetrics::default(),
                 ngram: QuantizedNgramMetrics::default(),
+                policy: QuantizedPolicyMetrics::default(),
                 thinking: thinking
                     .as_ref()
                     .map(ThinkingBudget::metrics)
@@ -719,396 +760,80 @@ impl<'a> QuantizedRuntime<'a> {
         })
     }
 
-    fn generate_speculative_mtp(
-        &mut self,
-        prompt: &str,
-        options: &GenerationOptions,
-        mut on_token: impl FnMut(u32) -> Result<()>,
-    ) -> Result<QuantizedGenerationResult> {
+    /// Bring the MTP block's sequence state up to the target's position.
+    ///
+    /// Tokens are committed by three different passes under the policy and
+    /// only one of them is an MTP pass, so the block's state lags whenever the
+    /// n-gram arm or plain decode is doing the committing. Catching up is
+    /// deferred until the arm is actually about to draft: while it is
+    /// suspended its state may lag arbitrarily far at no cost at all, which is
+    /// the whole point of suspending it.
+    ///
+    /// The retained gap rows are the authoritative hidden rows the committing
+    /// passes already produced, so a gap of any length closes in one batched
+    /// pass rather than one pass per token.
+    fn catch_up_mtp(&mut self, policy: &mut QuantizedPolicyMetrics) -> Result<usize> {
+        let rows = self.mtp_gap_tokens.len();
+        if rows == 0 {
+            return Ok(0);
+        }
+        let hidden_size = self.model.config().hidden_size;
+        let tokens = std::mem::take(&mut self.mtp_gap_tokens);
+        let hidden = std::mem::take(&mut self.mtp_gap_hidden);
+        let prior = self.mtp_gap_prior_hidden.take();
         ensure!(
-            options.max_new_tokens > 0,
-            "max_new_tokens must be at least one"
+            hidden.len() == rows * hidden_size,
+            "retained MTP gap holds {} hidden values for {rows} tokens",
+            hidden.len()
         );
-        ensure!(
-            options.sampling.temperature == 0.,
-            "MTP speculative decoding currently requires temperature=0"
-        );
-        ensure!(
-            self.trace.is_none(),
-            "MTP speculative decoding does not yet support routing traces"
-        );
-        ensure!(
-            self.model.mtp().is_some() && self.mtp_state.is_some(),
-            "the loaded model does not contain a supported MTP predictor"
-        );
-        let prompt_token_ids = self.tokenizer.encode(prompt, options.add_special_tokens)?;
-        ensure!(
-            !prompt_token_ids.is_empty(),
-            "tokenizer produced an empty prompt"
-        );
-        let evaluated_input_token_ids =
-            continuation_input(&prompt_token_ids, self.pending_token.take());
-        let target_position_before_prefill = self.state.position;
-        let previous_hidden = self.last_target_hidden.clone();
-        ensure!(
-            self.mtp_state
-                .as_ref()
-                .is_some_and(|state| state.position() == target_position_before_prefill),
-            "MTP state is not aligned with the target; reset before enabling speculation"
-        );
-        ensure!(
-            target_position_before_prefill == 0 || previous_hidden.is_some(),
-            "target hidden-state carry is missing; reset before enabling speculation"
-        );
-
-        let cache_before = self.model.expert_cache_stats()?;
-        let prefill_started = Instant::now();
-        let prefill = self
-            .model
-            .forward_detailed(&evaluated_input_token_ids, &mut self.state)?;
-        self.synchronize_mtp(
-            target_position_before_prefill,
-            previous_hidden.as_deref(),
-            &evaluated_input_token_ids,
-            &prefill.normalized_hidden,
+        let target_hidden = Tensor::from_vec(hidden, (rows, hidden_size), &Device::Cpu)?;
+        let started = Instant::now();
+        let timings = self.synchronize_mtp(
+            self.mtp_synced_position,
+            prior.as_deref(),
+            &tokens,
+            &target_hidden,
         )?;
-        self.last_target_hidden = Some(last_hidden_row(&prefill.normalized_hidden)?);
-        let prefill_wall_time = prefill_started.elapsed();
-        let prefill_profile = prefill.timings;
-
-        let mut sampler = Sampler::new(options.sampling.clone())?;
-        let mut next_logits = prefill.logits;
-        let decode_started = Instant::now();
-        let mut decode_profile = QuantizedForwardTimings::default();
-        let mut speculative = QuantizedSpeculativeMetrics {
-            max_draft_tokens: options.speculative_mtp_draft_tokens,
-            ..Default::default()
-        };
-        let mut generated = Vec::with_capacity(options.max_new_tokens);
-        let mut thinking =
-            ThinkingBudget::from_tokenizer(&self.tokenizer, options.thinking_budget)?;
-        let mut pending_token = None;
-
-        if thinking
-            .as_mut()
-            .is_some_and(ThinkingBudget::should_force_before_sampling)
-        {
-            let closure = thinking
-                .as_ref()
-                .expect("thinking budget exists")
-                .forced_close_tokens()
-                .to_vec();
-            next_logits = self.force_close_thinking_speculative(
-                None,
-                &closure,
-                &mut generated,
-                &mut decode_profile,
-                &mut speculative,
-                &mut on_token,
-            )?;
-        }
-
-        if generated.len() < options.max_new_tokens {
-            let logits = next_logits.i(next_logits.dim(0)? - 1)?.to_vec1::<f32>()?;
-            let first = sampler.sample(&logits)?;
-            generated.push(first);
-            pending_token = Some(first);
-            if let Err(error) = on_token(first) {
-                self.pending_token = Some(first);
-                return Err(error);
-            }
-            let is_stop = self.is_stop_token(first, options);
-            let boundary = thinking
-                .as_mut()
-                .map_or(ThinkingBoundary::Continue, |budget| {
-                    budget.observe_committed(first, !is_stop)
-                });
-            if boundary == ThinkingBoundary::ForceClosure {
-                let closure = thinking
-                    .as_ref()
-                    .expect("thinking budget exists")
-                    .forced_close_tokens()
-                    .to_vec();
-                next_logits = self.force_close_thinking_speculative(
-                    pending_token.take(),
-                    &closure,
-                    &mut generated,
-                    &mut decode_profile,
-                    &mut speculative,
-                    &mut on_token,
-                )?;
-                if generated.len() < options.max_new_tokens {
-                    let logits = next_logits.i(next_logits.dim(0)? - 1)?.to_vec1::<f32>()?;
-                    let answer = sampler.sample(&logits)?;
-                    generated.push(answer);
-                    pending_token = Some(answer);
-                    if let Err(error) = on_token(answer) {
-                        self.pending_token = Some(answer);
-                        return Err(error);
-                    }
-                }
-            }
-        }
-
-        'generation: while let Some(seed) = pending_token {
-            if generated.len() >= options.max_new_tokens || self.is_stop_token(seed, options) {
-                break;
-            }
-            let remaining = options.max_new_tokens - generated.len();
-            let mut draft_limit = options
-                .speculative_mtp_draft_tokens
-                .min(remaining.saturating_sub(1));
-            if let Some(thinking_remaining) = thinking.as_ref().and_then(ThinkingBudget::remaining)
-            {
-                draft_limit = draft_limit.min(thinking_remaining);
-            }
-            let target_prefix_position = self.state.position;
-            let prior_hidden = self
-                .last_target_hidden
-                .clone()
-                .context("target hidden-state carry is missing")?;
-            ensure!(
-                self.mtp_state
-                    .as_ref()
-                    .is_some_and(|state| state.position() == target_prefix_position),
-                "MTP state position does not match the target before drafting"
-            );
-
-            let draft_started = Instant::now();
-            let (draft_candidates, draft_profile) =
-                match self.draft_mtp(seed, &prior_hidden, draft_limit, options) {
-                    Ok(result) => result,
-                    Err(error) => {
-                        self.mtp_state
-                            .as_mut()
-                            .expect("MTP availability validated")
-                            .truncate(target_prefix_position)?;
-                        return Err(error);
-                    }
-                };
-            speculative.draft_wall_time += draft_started.elapsed();
-            speculative.draft_profile.accumulate(&draft_profile);
-            speculative.drafted_tokens += draft_candidates.len();
-            let verified_draft_count =
-                options
-                    .speculative_mtp_min_margin
-                    .map_or(draft_candidates.len(), |threshold| {
-                        draft_candidates
-                            .iter()
-                            .take_while(|draft| draft.logit_margin >= threshold)
-                            .count()
-                    });
-            speculative.gated_tokens += draft_candidates.len() - verified_draft_count;
-            let drafts = draft_candidates[..verified_draft_count]
-                .iter()
-                .map(|draft| draft.token)
-                .collect::<Vec<_>>();
-
-            let mut verification_tokens = Vec::with_capacity(1 + drafts.len());
-            verification_tokens.push(seed);
-            verification_tokens.extend_from_slice(&drafts);
-            // A single-row pass has no boundary to roll back to, so it skips
-            // the snapshot sink entirely.
-            let snapshotted = !drafts.is_empty();
-            let verification_started = Instant::now();
-            let verified = match verify_rows(
-                &self.model,
-                &verification_tokens,
-                &mut self.state,
-                &mut self.snapshots,
-                snapshotted,
-            ) {
-                Ok(output) => output,
-                Err(error) => {
-                    if snapshotted {
-                        self.state.rollback(&self.snapshots, 0)?;
-                    }
-                    self.mtp_state
-                        .as_mut()
-                        .expect("MTP availability validated")
-                        .truncate(target_prefix_position)?;
-                    return Err(error);
-                }
-            };
-            speculative.verification_wall_time += verification_started.elapsed();
-            speculative.checkpoint_wall_time += snapshot_time(&verified.timings);
-            speculative.verification_passes += 1;
-            speculative.verification_tokens += verification_tokens.len();
-            decode_profile.accumulate(&verified.timings);
-            let verifier_logits = verified.logits.to_vec2::<f32>()?;
-            ensure!(
-                verifier_logits.len() == verification_tokens.len(),
-                "target verifier returned {} logit rows for {} tokens",
-                verifier_logits.len(),
-                verification_tokens.len()
-            );
-            let accepted = accepted_draft_prefix(&drafts, &verifier_logits)?;
-            speculative
-                .draft_observations
-                .extend(draft_candidates.iter().enumerate().map(|(index, draft)| {
-                    QuantizedDraftObservation {
-                        logit_margin: draft.logit_margin,
-                        accepted: index < accepted,
-                        gated: index >= verified_draft_count,
-                    }
-                }));
-            let authoritative = argmax(&verifier_logits[accepted])? as u32;
-            let committed_token_count = 1 + accepted;
-
-            // Rows the verification pass already computed for the committed
-            // prefix are authoritative, so a rejection needs no replay: roll
-            // the recurrent state back to the row boundary and keep the rows.
-            let committed_hidden = if accepted == drafts.len() {
-                verified.normalized_hidden
-            } else {
-                let restore_started = Instant::now();
-                self.state
-                    .rollback(&self.snapshots, committed_token_count)?;
-                speculative.restore_wall_time += restore_started.elapsed();
-                verified
-                    .normalized_hidden
-                    .narrow(0, 0, committed_token_count)?
-            };
-
-            let resync_started = Instant::now();
-            let resync_profile = self.synchronize_mtp(
-                target_prefix_position,
-                Some(&prior_hidden),
-                &verification_tokens[..committed_token_count],
-                &committed_hidden,
-            )?;
-            speculative.resync_wall_time += resync_started.elapsed();
-            speculative.resync_profile.accumulate(&resync_profile);
-            self.last_target_hidden = Some(last_hidden_row(&committed_hidden)?);
-
-            let outputs = speculative_committed_outputs(&drafts, accepted, authoritative);
-            for (output_index, (token, accepted_draft)) in outputs.into_iter().enumerate() {
-                generated.push(token);
-                if let Err(error) = on_token(token) {
-                    // Restore the target and MTP contexts to immediately before
-                    // the token whose output callback failed, leaving that
-                    // token pending just like ordinary generation.
-                    let successful_outputs = output_index;
-                    let evaluated = 1 + successful_outputs.min(accepted);
-                    if snapshotted && evaluated < verification_tokens.len() {
-                        self.state.rollback(&self.snapshots, evaluated)?;
-                        let hidden = committed_hidden.narrow(0, 0, evaluated)?;
-                        self.synchronize_mtp(
-                            target_prefix_position,
-                            Some(&prior_hidden),
-                            &verification_tokens[..evaluated],
-                            &hidden,
-                        )?;
-                        self.last_target_hidden = Some(last_hidden_row(&hidden)?);
-                    }
-                    self.pending_token = Some(token);
-                    return Err(error);
-                }
-                if accepted_draft {
-                    speculative.accepted_tokens += 1;
-                }
-                let is_stop = self.is_stop_token(token, options);
-                let boundary = thinking
-                    .as_mut()
-                    .map_or(ThinkingBoundary::Continue, |budget| {
-                        budget.observe_committed(token, !is_stop)
-                    });
-                pending_token = (!accepted_draft).then_some(token);
-                if boundary == ThinkingBoundary::ForceClosure {
-                    let closure = thinking
-                        .as_ref()
-                        .expect("thinking budget exists")
-                        .forced_close_tokens()
-                        .to_vec();
-                    next_logits = self.force_close_thinking_speculative(
-                        (!accepted_draft).then_some(token),
-                        &closure,
-                        &mut generated,
-                        &mut decode_profile,
-                        &mut speculative,
-                        &mut on_token,
-                    )?;
-                    pending_token = None;
-                    if generated.len() < options.max_new_tokens {
-                        let logits = next_logits.i(next_logits.dim(0)? - 1)?.to_vec1::<f32>()?;
-                        let answer = sampler.sample(&logits)?;
-                        generated.push(answer);
-                        pending_token = Some(answer);
-                        if let Err(error) = on_token(answer) {
-                            self.pending_token = Some(answer);
-                            return Err(error);
-                        }
-                    }
-                    continue 'generation;
-                }
-                if generated.len() == options.max_new_tokens || is_stop {
-                    break 'generation;
-                }
-            }
-        }
-
-        self.pending_token = pending_token;
-        let decode_wall_time = decode_started.elapsed();
-        let expert_cache = self
-            .model
-            .expert_cache_stats()?
-            .activity_since(cache_before);
-        let text = self
-            .tokenizer
-            .decode(&generated, true)
-            .context("failed to decode generated tokens")?;
-        Ok(QuantizedGenerationResult {
-            metrics: QuantizedGenerationMetrics {
-                prompt_tokens: prompt_token_ids.len(),
-                evaluated_input_tokens: evaluated_input_token_ids.len(),
-                generated_tokens: generated.len(),
-                prefill_wall_time,
-                decode_wall_time,
-                time_to_first_token: prefill_wall_time,
-                prefill_profile,
-                decode_profile,
-                expert_cache,
-                speculative,
-                ngram: QuantizedNgramMetrics::default(),
-                thinking: thinking
-                    .as_ref()
-                    .map(ThinkingBudget::metrics)
-                    .unwrap_or_default(),
-            },
-            prompt_token_ids,
-            evaluated_input_token_ids,
-            generated_token_ids: generated,
-            text,
-        })
+        policy.resync_wall_time += started.elapsed();
+        policy.resync_passes += 1;
+        policy.resync_tokens += rows;
+        policy.max_resync_tokens = policy.max_resync_tokens.max(rows);
+        policy.resync_profile.accumulate(&timings);
+        self.mtp_synced_position += rows;
+        Ok(rows)
     }
 
-    /// Force-close the thinking block through the target model, keeping the
-    /// n-gram index aligned with the injected closure tokens.
-    fn force_close_thinking_ngram(
+    /// Retain a committing pass's tokens and hidden rows for the next catch-up.
+    fn retain_mtp_gap(
         &mut self,
-        pending_token: Option<u32>,
-        closure: &[u32],
-        generated: &mut Vec<u32>,
-        decode_profile: &mut QuantizedForwardTimings,
-        on_token: &mut impl FnMut(u32) -> Result<()>,
-    ) -> Result<Tensor> {
-        let already_generated = generated.len();
-        let logits = self.force_close_thinking_target_only(
-            pending_token,
-            closure,
-            generated,
-            decode_profile,
-            on_token,
-        )?;
-        let injected = generated[already_generated..].to_vec();
-        self.ngram.extend(&injected);
-        Ok(logits)
+        tokens: &[u32],
+        hidden: &Tensor,
+        prior_hidden: Option<&[f32]>,
+    ) -> Result<()> {
+        if tokens.is_empty() {
+            return Ok(());
+        }
+        let hidden_size = self.model.config().hidden_size;
+        ensure!(
+            hidden.dims() == [tokens.len(), hidden_size],
+            "committed hidden rows have shape {:?}, expected [{}, {hidden_size}]",
+            hidden.shape(),
+            tokens.len()
+        );
+        if self.mtp_gap_tokens.is_empty() {
+            self.mtp_gap_prior_hidden = prior_hidden.map(<[f32]>::to_vec);
+        }
+        self.mtp_gap_tokens.extend_from_slice(tokens);
+        for row in hidden.to_vec2::<f32>()? {
+            self.mtp_gap_hidden.extend_from_slice(&row);
+        }
+        Ok(())
     }
 
     /// Sample the next greedy token, commit it to the transcript and the
     /// index, and hand it to the output sink. Returns the new pending token,
     /// or `None` when the turn's token budget is already spent.
-    fn sample_and_emit_ngram(
+    fn sample_and_emit(
         &mut self,
         logits: &Tensor,
         options: &GenerationOptions,
@@ -1130,23 +855,71 @@ impl<'a> QuantizedRuntime<'a> {
         Ok(Some(token))
     }
 
-    /// Greedy decoding with n-gram (prompt-lookup) speculation.
+    /// Evaluate one authoritative token through the target, keeping the n-gram
+    /// index, the hidden-state carry and the retained MTP gap aligned with it.
+    fn evaluate_authoritative(
+        &mut self,
+        token: u32,
+        decode_profile: &mut QuantizedForwardTimings,
+        track_mtp: bool,
+    ) -> Result<Tensor> {
+        let prior_hidden = self.last_target_hidden.clone();
+        let output = self.model.forward_detailed(&[token], &mut self.state)?;
+        decode_profile.accumulate(&output.timings);
+        if track_mtp {
+            self.retain_mtp_gap(&[token], &output.normalized_hidden, prior_hidden.as_deref())?;
+        }
+        self.last_target_hidden = Some(last_hidden_row(&output.normalized_hidden)?);
+        Ok(output.logits)
+    }
+
+    /// Force-close the thinking block through the target model. Injected
+    /// tokens travel the same authoritative path as any other committed token,
+    /// so index, hidden carry and MTP gap stay in step across the closure.
+    fn force_close_thinking_policy(
+        &mut self,
+        pending_token: Option<u32>,
+        closure: &[u32],
+        generated: &mut Vec<u32>,
+        decode_profile: &mut QuantizedForwardTimings,
+        track_mtp: bool,
+        on_token: &mut impl FnMut(u32) -> Result<()>,
+    ) -> Result<Tensor> {
+        let mut logits = None;
+        if let Some(token) = pending_token {
+            logits = Some(self.evaluate_authoritative(token, decode_profile, track_mtp)?);
+        }
+        for &token in closure {
+            generated.push(token);
+            self.ngram.push(token);
+            if let Err(error) = on_token(token) {
+                self.pending_token = Some(token);
+                return Err(error);
+            }
+            logits = Some(self.evaluate_authoritative(token, decode_profile, track_mtp)?);
+        }
+        logits.context("forced thinking closure produced no target logits")
+    }
+
+    /// Greedy decoding under the unified speculative policy.
     ///
-    /// Each step proposes the continuation that followed the most recent
-    /// earlier occurrence of the current token tail, then verifies the pending
-    /// token and the whole proposal in one multi-row target pass. A step whose
-    /// tail has no earlier occurrence issues no proposal and runs exactly the
-    /// single-row pass ordinary decoding would run, so a workload without
-    /// repetition pays only the index lookup.
+    /// Per step the loop takes the first of three options that applies: a free
+    /// n-gram proposal when the index holds literal evidence and that arm is
+    /// not suspended; an MTP draft when that arm is not suspended; otherwise
+    /// exactly the one-row pass unspeculated decoding would run. The two arms
+    /// never both run in one step, and an n-gram draft is never extended with
+    /// MTP tokens.
     ///
     /// Committed tokens are always the target model's own greedy choices: a
     /// draft token is committed only where the target's argmax at that row
     /// equals it, and the token after the last accepted row comes from the
-    /// target. Speculation therefore changes speed, never output.
-    fn generate_speculative_ngram(
+    /// target. That is what makes every mode here token-identical to
+    /// target-only decoding; speculation changes speed, never output.
+    fn generate_speculative_policy(
         &mut self,
         prompt: &str,
         options: &GenerationOptions,
+        mode: SpeculativeMode,
         mut on_token: impl FnMut(u32) -> Result<()>,
     ) -> Result<QuantizedGenerationResult> {
         ensure!(
@@ -1154,16 +927,12 @@ impl<'a> QuantizedRuntime<'a> {
             "max_new_tokens must be at least one"
         );
         ensure!(
-            options.speculative_mtp_draft_tokens == 0,
-            "n-gram and MTP speculation cannot be enabled at the same time"
-        );
-        ensure!(
             options.sampling.temperature == 0.,
-            "n-gram speculative decoding currently requires temperature=0"
+            "speculative decoding currently requires temperature=0"
         );
         ensure!(
             self.trace.is_none(),
-            "n-gram speculative decoding does not support routing traces"
+            "speculative decoding does not support routing traces"
         );
         ensure!(
             (crate::ngram::MIN_MATCH_LEN..=crate::ngram::MAX_MATCH_LEN)
@@ -1171,6 +940,11 @@ impl<'a> QuantizedRuntime<'a> {
             "n-gram minimum match length must be between {} and {}",
             crate::ngram::MIN_MATCH_LEN,
             crate::ngram::MAX_MATCH_LEN
+        );
+        let has_mtp_block = self.model.mtp().is_some() && self.mtp_state.is_some();
+        ensure!(
+            has_mtp_block || mode != SpeculativeMode::Mtp,
+            "the loaded model does not contain a supported MTP predictor"
         );
 
         let prompt_token_ids = self.tokenizer.encode(prompt, options.add_special_tokens)?;
@@ -1181,6 +955,27 @@ impl<'a> QuantizedRuntime<'a> {
         let carried_token = self.pending_token.take();
         let context_before = self.state.position + usize::from(carried_token.is_some());
         let evaluated_input_token_ids = continuation_input(&prompt_token_ids, carried_token);
+
+        // The MTP arm can only be used when the retained gap still describes
+        // the whole distance between the block's synced position and the
+        // target: without the committing passes' hidden rows there is nothing
+        // to catch up from. A turn decoded with the arm off stops retaining
+        // them, so the arm sits out until the session is reset.
+        let mtp_aligned = self.mtp_gap_valid
+            && self.mtp_synced_position + self.mtp_gap_tokens.len() == self.state.position
+            && (self.state.position == 0 || self.last_target_hidden.is_some());
+        ensure!(
+            mtp_aligned || mode != SpeculativeMode::Mtp,
+            "MTP state is not aligned with the target; reset before enabling speculation"
+        );
+
+        let (ngram_config, mtp_config) = arm_configs(options, mode, has_mtp_block && mtp_aligned);
+        let track_mtp = mtp_config.enabled;
+        self.mtp_gap_valid = track_mtp;
+        let mut ngram_arm = ArmController::new(ngram_config);
+        let mut mtp_arm = ArmController::new(mtp_config);
+        let span_continuation = options.policy.span_continuation;
+
         // The index only supplies proposals, so a gap in it costs speed and
         // never correctness. Extend it when it already mirrors the sequence
         // the model state represents, and reseed it from this turn otherwise
@@ -1194,19 +989,42 @@ impl<'a> QuantizedRuntime<'a> {
 
         let cache_before = self.model.expert_cache_stats()?;
         let prefill_started = Instant::now();
-        let (mut logits, prefill_profile) = self.forward(&evaluated_input_token_ids)?;
+        let prefill = self
+            .model
+            .forward_detailed(&evaluated_input_token_ids, &mut self.state)?;
+        if track_mtp {
+            let prior = self.last_target_hidden.clone();
+            self.retain_mtp_gap(
+                &evaluated_input_token_ids,
+                &prefill.normalized_hidden,
+                prior.as_deref(),
+            )?;
+        }
+        self.last_target_hidden = Some(last_hidden_row(&prefill.normalized_hidden)?);
         let prefill_wall_time = prefill_started.elapsed();
+        let prefill_profile = prefill.timings;
+        let mut logits = prefill.logits;
 
         let mut sampler = Sampler::new(options.sampling.clone())?;
         let decode_started = Instant::now();
         let mut decode_profile = QuantizedForwardTimings::default();
-        let mut ngram = QuantizedNgramMetrics::new(
-            options.speculative_ngram_draft_tokens,
-            options.ngram_min_match,
-        );
+        // A disabled arm reports a zero cap, which is what keeps its section
+        // out of the run report entirely.
+        let ngram_cap = usize::from(ngram_arm.config().enabled) * ngram_arm.config().cap;
+        let mtp_cap = usize::from(mtp_arm.config().enabled) * mtp_arm.config().cap;
+        let mut ngram = QuantizedNgramMetrics::new(ngram_cap, options.ngram_min_match);
+        let mut speculative = QuantizedSpeculativeMetrics {
+            max_draft_tokens: mtp_cap,
+            ..Default::default()
+        };
+        let mut policy = QuantizedPolicyMetrics {
+            mode,
+            ..Default::default()
+        };
         let mut generated = Vec::with_capacity(options.max_new_tokens);
         let mut thinking =
             ThinkingBudget::from_tokenizer(&self.tokenizer, options.thinking_budget)?;
+        let mut span: Option<SpanCursor> = None;
 
         if thinking
             .as_mut()
@@ -1217,15 +1035,16 @@ impl<'a> QuantizedRuntime<'a> {
                 .expect("thinking budget exists")
                 .forced_close_tokens()
                 .to_vec();
-            logits = self.force_close_thinking_ngram(
+            logits = self.force_close_thinking_policy(
                 None,
                 &closure,
                 &mut generated,
                 &mut decode_profile,
+                track_mtp,
                 &mut on_token,
             )?;
         }
-        let mut pending_token = self.sample_and_emit_ngram(
+        let mut pending_token = self.sample_and_emit(
             &logits,
             options,
             &mut sampler,
@@ -1245,14 +1064,15 @@ impl<'a> QuantizedRuntime<'a> {
                     .expect("thinking budget exists")
                     .forced_close_tokens()
                     .to_vec();
-                let closed = self.force_close_thinking_ngram(
+                let closed = self.force_close_thinking_policy(
                     Some(first),
                     &closure,
                     &mut generated,
                     &mut decode_profile,
+                    track_mtp,
                     &mut on_token,
                 )?;
-                pending_token = self.sample_and_emit_ngram(
+                pending_token = self.sample_and_emit(
                     &closed,
                     options,
                     &mut sampler,
@@ -1268,48 +1088,138 @@ impl<'a> QuantizedRuntime<'a> {
             }
             // Both clamps keep the committed rows and the emitted tokens in
             // step. A pass commits `1 + accepted` rows and emits `accepted + 1`
-            // tokens, so a boundary that stops the emission loop early would
-            // otherwise leave evaluated-but-unemitted tokens in the state.
-            // Holding the draft to what the turn and the thinking budget can
-            // still absorb means the token-limit and budget boundaries can only
-            // land on the last accepted draft or on the authoritative token,
-            // both of which end the pass with nothing evaluated left over.
+            // tokens, so a boundary that stopped the emission loop early would
+            // leave evaluated-but-unemitted tokens in the state. Holding every
+            // draft — n-gram, span continuation or MTP — to what the turn and
+            // the thinking budget can still absorb means those boundaries can
+            // only land on the last accepted draft token or on the
+            // authoritative one, both of which end a pass cleanly.
             let remaining = options.max_new_tokens - generated.len();
-            let mut draft_limit = options
-                .speculative_ngram_draft_tokens
-                .min(remaining.saturating_sub(1));
+            let mut budget = remaining.saturating_sub(1);
             if let Some(thinking_remaining) = thinking.as_ref().and_then(ThinkingBudget::remaining)
             {
-                draft_limit = draft_limit.min(thinking_remaining);
+                budget = budget.min(thinking_remaining);
             }
-
+            let committed_before = generated.len();
+            policy.steps += 1;
             ngram.steps += 1;
+
+            let ngram_available = ngram_arm.poll(committed_before);
+            let mtp_available = mtp_arm.poll(committed_before);
+
+            // Ask the index in every mode, even when the arm cannot use the
+            // answer: a lookup is a slice comparison, and recording whether
+            // literal evidence existed is what makes MTP acceptance
+            // conditioned on that evidence measurable from a single-arm run.
             let lookup_started = Instant::now();
-            let proposal = if draft_limit == 0 {
-                None
+            let requested = if ngram_available {
+                ngram_arm.draft_len().min(budget).max(1)
             } else {
-                self.ngram
-                    .draft(draft_limit, options.ngram_min_match, |token| {
-                        self.is_stop_token(token, options)
-                    })
+                1
             };
-            ngram.lookup_wall_time += lookup_started.elapsed();
-            if proposal.is_some() {
+            let key_draft = self
+                .ngram
+                .draft(requested, options.ngram_min_match, |token| {
+                    self.is_stop_token(token, options)
+                });
+            let span_draft = (span_continuation && ngram_available && budget > 0)
+                .then(|| {
+                    span.and_then(|cursor| {
+                        self.ngram.continue_from(
+                            cursor.next,
+                            ngram_arm.draft_len().min(budget),
+                            cursor.match_len,
+                            |token| self.is_stop_token(token, options),
+                        )
+                    })
+                })
+                .flatten();
+            policy.lookup_wall_time += lookup_started.elapsed();
+            let ngram_match_len = key_draft.as_ref().map_or(0, |draft| draft.match_len);
+            if ngram_match_len > 0 {
+                policy.steps_with_ngram_match += 1;
                 ngram.steps_with_match += 1;
             } else {
                 ngram.steps_without_match += 1;
             }
 
-            let drafts = proposal
+            // Arm selection. An active span continues without asking for a
+            // fresh key; otherwise a key match at or above the floor takes the
+            // step outright, and only a step neither of those claims may reach
+            // the MTP arm.
+            let mut arm = StepArm::Plain;
+            let mut proposal: Option<NgramDraft> = None;
+            if ngram_available && budget > 0 {
+                if let Some(draft) = span_draft {
+                    arm = StepArm::NgramSpan;
+                    proposal = Some(draft);
+                } else if let Some(draft) = key_draft {
+                    arm = StepArm::Ngram;
+                    proposal = Some(draft);
+                }
+            }
+            let mut drafts = proposal
                 .as_ref()
-                .map(|proposal| proposal.tokens.clone())
+                .map(|draft| draft.tokens.clone())
                 .unwrap_or_default();
+            let mut mtp_candidates: Vec<MtpDraftCandidate> = Vec::new();
+            let mut step_resync = 0;
+            if arm == StepArm::Plain && mtp_available && budget > 0 {
+                let depth = mtp_arm.draft_len().min(budget);
+                if depth > 0 {
+                    step_resync = self.catch_up_mtp(&mut policy)?;
+                    let target_position = self.state.position;
+                    debug_assert_eq!(
+                        self.mtp_synced_position, target_position,
+                        "the MTP arm drafted from a stale position"
+                    );
+                    ensure!(
+                        self.mtp_state
+                            .as_ref()
+                            .is_some_and(|state| state.position() == target_position),
+                        "MTP state position does not match the target before drafting"
+                    );
+                    let prior_hidden = self
+                        .last_target_hidden
+                        .clone()
+                        .context("target hidden-state carry is missing")?;
+                    let draft_started = Instant::now();
+                    // The next catch-up truncates the block back to its synced
+                    // position, so a failed draft leaves nothing to unwind.
+                    let (candidates, draft_profile) =
+                        self.draft_mtp(seed, &prior_hidden, depth, options)?;
+                    policy.draft_wall_time += draft_started.elapsed();
+                    speculative.draft_wall_time += draft_started.elapsed();
+                    speculative.draft_profile.accumulate(&draft_profile);
+                    speculative.drafted_tokens += candidates.len();
+                    let verified_count =
+                        options
+                            .speculative_mtp_min_margin
+                            .map_or(candidates.len(), |threshold| {
+                                candidates
+                                    .iter()
+                                    .take_while(|draft| draft.logit_margin >= threshold)
+                                    .count()
+                            });
+                    speculative.gated_tokens += candidates.len() - verified_count;
+                    drafts = candidates[..verified_count]
+                        .iter()
+                        .map(|draft| draft.token)
+                        .collect();
+                    mtp_candidates = candidates;
+                    if !drafts.is_empty() {
+                        arm = StepArm::Mtp;
+                    }
+                }
+            }
+
             let mut verification_tokens = Vec::with_capacity(1 + drafts.len());
             verification_tokens.push(seed);
             verification_tokens.extend_from_slice(&drafts);
             // With no proposal this is the ordinary one-row decode pass, which
             // has no row boundary to roll back to and takes no snapshots.
             let snapshotted = !drafts.is_empty();
+            let prior_hidden = self.last_target_hidden.clone();
             let pass_started = Instant::now();
             let verified = match verify_rows(
                 &self.model,
@@ -1328,15 +1238,27 @@ impl<'a> QuantizedRuntime<'a> {
             };
             let pass_wall_time = pass_started.elapsed();
             if snapshotted {
-                ngram.verification_wall_time += pass_wall_time;
-                ngram.verification_passes += 1;
-                ngram.verification_tokens += verification_tokens.len();
-                ngram.snapshot_wall_time += snapshot_time(&verified.timings);
-                ngram.snapshot_rows += verification_tokens.len();
-                if ngram.snapshot_bytes_per_row == 0 {
-                    ngram.snapshot_bytes_per_row = self.snapshots.bytes_per_row();
+                policy.verification_passes += 1;
+                policy.verification_tokens += verification_tokens.len();
+                policy.verification_wall_time += pass_wall_time;
+                policy.snapshot_wall_time += snapshot_time(&verified.timings);
+                if arm.is_ngram() {
+                    ngram.verification_passes += 1;
+                    ngram.verification_tokens += verification_tokens.len();
+                    ngram.verification_wall_time += pass_wall_time;
+                    ngram.snapshot_wall_time += snapshot_time(&verified.timings);
+                    ngram.snapshot_rows += verification_tokens.len();
+                    if ngram.snapshot_bytes_per_row == 0 {
+                        ngram.snapshot_bytes_per_row = self.snapshots.bytes_per_row();
+                    }
+                } else {
+                    speculative.verification_passes += 1;
+                    speculative.verification_tokens += verification_tokens.len();
+                    speculative.verification_wall_time += pass_wall_time;
+                    speculative.checkpoint_wall_time += snapshot_time(&verified.timings);
                 }
             } else {
+                policy.plain_wall_time += pass_wall_time;
                 ngram.target_only_wall_time += pass_wall_time;
             }
             decode_profile.accumulate(&verified.timings);
@@ -1351,15 +1273,120 @@ impl<'a> QuantizedRuntime<'a> {
             let accepted = accepted_draft_prefix(&drafts, &verifier_logits)?;
             let authoritative = argmax(&verifier_logits[accepted])? as u32;
             let committed_rows = 1 + accepted;
-            if let Some(proposal) = &proposal {
-                ngram.record_draft(proposal, accepted);
+
+            match arm {
+                StepArm::Ngram | StepArm::NgramSpan => {
+                    policy.ngram_steps += 1;
+                    if arm == StepArm::NgramSpan {
+                        policy.ngram_span_steps += 1;
+                    }
+                    ngram.record_draft(
+                        proposal
+                            .as_ref()
+                            .expect("an n-gram arm step has a proposal"),
+                        accepted,
+                    );
+                    ngram_arm.observe(drafts.len(), accepted, committed_before + committed_rows);
+                }
+                StepArm::Mtp => {
+                    policy.mtp_steps += 1;
+                    speculative.accepted_tokens += accepted;
+                    speculative
+                        .draft_observations
+                        .extend(mtp_candidates.iter().enumerate().map(|(index, draft)| {
+                            QuantizedDraftObservation {
+                                logit_margin: draft.logit_margin,
+                                accepted: index < accepted,
+                                gated: index >= drafts.len(),
+                            }
+                        }));
+                    if ngram_match_len > 0 {
+                        policy.mtp_proposed_on_ngram_match += drafts.len();
+                        policy.mtp_accepted_on_ngram_match += accepted;
+                    } else {
+                        policy.mtp_proposed_on_ngram_miss += drafts.len();
+                        policy.mtp_accepted_on_ngram_miss += accepted;
+                    }
+                    mtp_arm.observe(drafts.len(), accepted, committed_before + committed_rows);
+                }
+                StepArm::Plain => policy.plain_steps += 1,
             }
-            if accepted < drafts.len() {
+
+            // The rows a verification pass computed for the committed prefix
+            // are authoritative — row r saw exactly the prefix a sequential
+            // decode would have fed it — so a rejection rolls the recurrent
+            // state back to the row boundary and keeps the rows.
+            let committed_hidden = if accepted == drafts.len() {
+                verified.normalized_hidden
+            } else {
                 let rollback_started = Instant::now();
                 self.state.rollback(&self.snapshots, committed_rows)?;
-                ngram.rollback_wall_time += rollback_started.elapsed();
-                ngram.rollbacks += 1;
+                let elapsed = rollback_started.elapsed();
+                policy.rollback_wall_time += elapsed;
+                policy.rollbacks += 1;
+                if arm.is_ngram() {
+                    ngram.rollback_wall_time += elapsed;
+                    ngram.rollbacks += 1;
+                } else {
+                    speculative.restore_wall_time += elapsed;
+                }
+                verified.normalized_hidden.narrow(0, 0, committed_rows)?
+            };
+            if track_mtp {
+                self.retain_mtp_gap(
+                    &verification_tokens[..committed_rows],
+                    &committed_hidden,
+                    prior_hidden.as_deref(),
+                )?;
+                if options.policy.eager_mtp_resync {
+                    self.catch_up_mtp(&mut policy)?;
+                }
             }
+            self.last_target_hidden = Some(last_hidden_row(&committed_hidden)?);
+
+            // Chain the source span only while it is still describing what the
+            // target decoded: every drafted token was accepted, and the
+            // authoritative token after them is the one the span predicts next.
+            // Anything else — a rejection, a step this arm did not win, or a
+            // span that has run off the end of the index — ends the chain.
+            span = match arm {
+                StepArm::Ngram | StepArm::NgramSpan if span_continuation => {
+                    let draft = proposal
+                        .as_ref()
+                        .expect("an n-gram arm step has a proposal");
+                    // The index has not yet been given this pass's committed
+                    // tokens, so `follow` can only address the source region:
+                    // a span that would continue into the tokens this very
+                    // pass appends is left to a fresh key match instead.
+                    let follow = draft.source_position + 1 + draft.tokens.len();
+                    chain_span(
+                        span,
+                        draft.source_position,
+                        draft.tokens.len(),
+                        accepted,
+                        draft.match_len,
+                        self.ngram.tokens().get(follow).copied(),
+                        authoritative,
+                    )
+                }
+                _ => None,
+            };
+
+            policy.records.push(PolicyStepRecord {
+                step: policy.steps,
+                committed_before,
+                arm,
+                proposed: drafts.len(),
+                accepted,
+                ngram_len: ngram_arm.draft_len(),
+                mtp_depth: mtp_arm.draft_len(),
+                ngram_ewma: ngram_arm.ewma() as f32,
+                mtp_ewma: mtp_arm.ewma() as f32,
+                ngram_suspended: ngram_arm.is_suspended(),
+                mtp_suspended: mtp_arm.is_suspended(),
+                ngram_match_len,
+                resync_tokens: step_resync,
+            });
 
             let outputs = speculative_committed_outputs(&drafts, accepted, authoritative);
             for (output_index, (token, accepted_draft)) in outputs.into_iter().enumerate() {
@@ -1372,6 +1399,10 @@ impl<'a> QuantizedRuntime<'a> {
                     let evaluated = 1 + output_index.min(accepted);
                     if snapshotted && evaluated < verification_tokens.len() {
                         self.state.rollback(&self.snapshots, evaluated)?;
+                        // The retained gap described more tokens than survive
+                        // the rollback and its hidden rows cannot be trimmed
+                        // to match, so the MTP arm sits out until reset.
+                        self.mtp_gap_valid = false;
                     }
                     self.pending_token = Some(token);
                     return Err(error);
@@ -1389,20 +1420,22 @@ impl<'a> QuantizedRuntime<'a> {
                         .expect("thinking budget exists")
                         .forced_close_tokens()
                         .to_vec();
-                    let closed = self.force_close_thinking_ngram(
+                    let closed = self.force_close_thinking_policy(
                         (!accepted_draft).then_some(token),
                         &closure,
                         &mut generated,
                         &mut decode_profile,
+                        track_mtp,
                         &mut on_token,
                     )?;
-                    pending_token = self.sample_and_emit_ngram(
+                    pending_token = self.sample_and_emit(
                         &closed,
                         options,
                         &mut sampler,
                         &mut generated,
                         &mut on_token,
                     )?;
+                    span = None;
                     continue 'generation;
                 }
                 if generated.len() == options.max_new_tokens || is_stop {
@@ -1413,6 +1446,11 @@ impl<'a> QuantizedRuntime<'a> {
 
         self.pending_token = pending_token;
         let decode_wall_time = decode_started.elapsed();
+        policy.ngram_arm = ngram_arm.stats().clone();
+        policy.mtp_arm = mtp_arm.stats().clone();
+        speculative.resync_wall_time = policy.resync_wall_time;
+        speculative.resync_profile = policy.resync_profile.clone();
+        ngram.lookup_wall_time = policy.lookup_wall_time;
         let expert_cache = self
             .model
             .expert_cache_stats()?
@@ -1432,8 +1470,9 @@ impl<'a> QuantizedRuntime<'a> {
                 prefill_profile,
                 decode_profile,
                 expert_cache,
-                speculative: QuantizedSpeculativeMetrics::default(),
+                speculative,
                 ngram,
+                policy,
                 thinking: thinking
                     .as_ref()
                     .map(ThinkingBudget::metrics)
@@ -1445,7 +1484,6 @@ impl<'a> QuantizedRuntime<'a> {
             text,
         })
     }
-
     fn draft_mtp(
         &mut self,
         seed: u32,
@@ -1651,6 +1689,65 @@ fn speculative_committed_outputs(
         .collect::<Vec<_>>();
     outputs.push((authoritative, false));
     outputs
+}
+
+/// Which arms a run may use, reading the deprecated single-arm flags as their
+/// modes when no mode was given explicitly.
+fn effective_speculative_mode(options: &GenerationOptions) -> SpeculativeMode {
+    match options.speculative_mode {
+        SpeculativeMode::Off if options.speculative_mtp_draft_tokens > 0 => SpeculativeMode::Mtp,
+        SpeculativeMode::Off if options.speculative_ngram_draft_tokens > 0 => {
+            SpeculativeMode::Ngram
+        }
+        mode => mode,
+    }
+}
+
+/// Build both arms' controller configurations for one run.
+///
+/// Each arm starts optimistically — the n-gram arm at its cap, which is the
+/// draft length the previous report recommended, and the MTP arm at the depth
+/// where measured acceptance is still above 94% — and the controllers move it
+/// from there. An arm its mode excludes, or one whose ceiling is zero, or the
+/// MTP arm on a model that has no predictor block, is configured disabled and
+/// never polls true.
+fn arm_configs(
+    options: &GenerationOptions,
+    mode: SpeculativeMode,
+    mtp_usable: bool,
+) -> (ArmConfig, ArmConfig) {
+    let tuning = &options.policy;
+    let ngram_cap = match options.speculative_ngram_draft_tokens {
+        0 => DEFAULT_NGRAM_DRAFT_CAP,
+        cap => cap,
+    };
+    let mut ngram = ArmConfig::ngram(ngram_cap);
+    ngram.enabled = mode.allows_ngram() && ngram_cap > 0;
+    ngram.floor = tuning.ngram_draft_floor.clamp(1, ngram_cap.max(1));
+    ngram.start = ngram_cap;
+    ngram.adaptive = tuning.adaptive_length;
+    ngram.backoff = tuning.ewma_backoff;
+    ngram.alpha = tuning.ewma_alpha;
+    ngram.suspend_below = tuning.ngram_suspend_below;
+    ngram.backoff_tokens = tuning.backoff_tokens;
+    ngram.backoff_cap = tuning.backoff_cap;
+
+    let mtp_cap = match options.speculative_mtp_draft_tokens {
+        0 => DEFAULT_MTP_DEPTH_CAP,
+        cap => cap,
+    };
+    let mut mtp = ArmConfig::mtp(mtp_cap);
+    mtp.enabled = mode.allows_mtp() && mtp_cap > 0 && mtp_usable;
+    mtp.floor = tuning.mtp_depth_floor.clamp(1, mtp_cap.max(1));
+    mtp.start = tuning.mtp_depth_start;
+    mtp.probe_len = Some(mtp.floor);
+    mtp.adaptive = tuning.adaptive_length;
+    mtp.backoff = tuning.ewma_backoff;
+    mtp.alpha = tuning.ewma_alpha;
+    mtp.suspend_below = tuning.mtp_suspend_below;
+    mtp.backoff_tokens = tuning.backoff_tokens;
+    mtp.backoff_cap = tuning.backoff_cap;
+    (ngram, mtp)
 }
 
 fn continuation_input(prompt_token_ids: &[u32], pending_token: Option<u32>) -> Vec<u32> {
@@ -1895,6 +1992,8 @@ impl Default for GenerationOptions {
             sampling: SamplingConfig::default(),
             stop_tokens: vec![],
             add_special_tokens: false,
+            speculative_mode: SpeculativeMode::Off,
+            policy: PolicyTuning::default(),
             speculative_mtp_draft_tokens: 0,
             speculative_mtp_min_margin: None,
             speculative_ngram_draft_tokens: 0,

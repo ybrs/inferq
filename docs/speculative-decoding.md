@@ -1,17 +1,122 @@
 # Qwen3.6 speculative decoding
 
-Inferq has two opt-in greedy draft sources. Both propose tokens, both verify
-every proposal through the same multi-row target pass, and both commit only
-what the target model would have decoded on its own, so neither changes
-output. Speculation stays disabled by default.
+Inferq has two greedy draft sources. Both propose tokens, both verify every
+proposal through the same multi-row target pass, and both commit only what the
+target model would have decoded on its own, so neither changes output.
+Speculation stays disabled by default.
 
-- `--speculative-ngram N` drafts by **prompt lookup**: when the recent token
-  tail repeats an earlier tail in the same context, the continuation that
-  followed it last time is proposed. No model runs to produce a draft.
-- `--speculative-mtp N` drafts with the auxiliary multi-token-prediction
-  transformer block Qwen3.6-35B-A3B ships inside the same GGUF.
+- **prompt lookup (the n-gram arm)**: when the recent token tail repeats an
+  earlier tail in the same context, the continuation that followed it last time
+  is proposed. No model runs to produce a draft.
+- **MTP**: the auxiliary multi-token-prediction transformer block
+  Qwen3.6-35B-A3B ships inside the same GGUF.
 
-The two cannot be enabled together.
+`--speculative {off,auto,ngram,mtp}` selects between them. `auto` is the
+unified policy described in the next section, which uses both under their own
+controllers; `ngram` and `mtp` restrict it to one arm. The two arms never draft
+in the same step.
+
+`--speculative-ngram N` and `--speculative-mtp N` remain as deprecated aliases
+that select the corresponding single-arm mode with `N` as that arm's ceiling,
+and print a deprecation warning.
+
+## The unified speculative policy
+
+Neither draft source is a general win, which is why neither could be a default.
+The n-gram arm is free when it fires but blind to structural repetition; the
+MTP arm sees structure but pays a draft forward per drafted token whether or
+not the draft is accepted. `--speculative auto` puts both behind one loop that
+decides per decode step:
+
+1. **n-gram evidence, if the index has it** — an active span continuation, or a
+   key match tried longest-first down to `--ngram-min-match`. Free either way.
+2. **an MTP draft**, if that arm is not currently suspended.
+3. **plain decode otherwise** — exactly the one-row pass an unspeculated run
+   makes, with no draft, snapshot, rollback or resynchronisation.
+
+An n-gram match takes the step outright; the arms never both run in one step,
+and an n-gram draft is never extended with MTP tokens.
+
+### The controllers
+
+Each arm owns independent state. Suspending one never affects the other, and
+both suspended is plain decode at the cost of two integer comparisons per step.
+
+| | n-gram arm | MTP arm |
+| --- | --- | --- |
+| draft length | `[4, 7]`, starts at the cap | depth `[2, 7]`, starts at 4 |
+| after a fully accepted draft | `+2` | `+1` |
+| after acceptance below half | halve | halve |
+| suspends when the acceptance EWMA falls below | 0.4 | 0.5 |
+| suspension | 64 committed tokens, doubling to 512 after a failed probe | same |
+| probes at | its current length | depth 2 |
+
+The EWMA has alpha 0.2 and starts from an optimistic prior of 1.0, so an arm
+withdraws after about five consecutive total rejections rather than after a
+single unlucky draft — the copy-heavy workload accepts 80% of proposed tokens
+while still rejecting whole drafts occasionally.
+
+Tuning flags: `--ngram-draft-cap`, `--ngram-draft-floor`, `--mtp-depth-cap`,
+`--mtp-depth-floor`, `--mtp-depth-start`, `--ngram-suspend-below`,
+`--mtp-suspend-below`, `--ewma-alpha`, `--backoff-tokens`, `--backoff-cap`.
+Individual mechanisms switch off with `--no-span-continuation`,
+`--no-adaptive-length` and `--no-ewma-backoff`.
+
+### Span continuation
+
+After a fully accepted n-gram draft the loop keeps copying from the same source
+span without asking the index for a fresh key match. A copied region normally
+re-matches on its own suffix, but the index holds one position per key, so a
+later occurrence of the same short suffix displaces it; the chain keeps the
+copy running across those gaps. It continues only while every proposed token
+verified *and* the token the span predicts next is the one the target chose.
+Anything else — a rejection, a step the arm did not win, a span that has run off
+the end of the index — ends it.
+
+### MTP state, and lazy catch-up
+
+The MTP block keeps its own sequence state, and under the policy it is no
+longer the only thing committing tokens: the n-gram arm and plain decode commit
+too, and while the MTP arm is suspended it may commit nothing for hundreds of
+tokens.
+
+The runtime therefore tracks the block's synced position separately from the
+committed position, and retains for the tokens in between the authoritative
+target hidden rows the committing passes already produced. Every committing
+pass appends to that gap — prefill, n-gram passes, MTP passes, plain decode
+steps, and the tokens injected by a forced thinking closure. Nothing
+resynchronises eagerly.
+
+Catch-up runs **only when the MTP arm is about to draft**, and closes a gap of
+any length in one batched pass, which is possible precisely because the rows
+were retained rather than recomputed. So while the arm is suspended its state
+lags at no cost; a run that never uses the arm never touches the block at all,
+including for the prompt. A `debug_assert` and a release-mode check both
+confirm the block's position equals the target's before every draft.
+
+`--eager-mtp-resync` restores the previous behaviour of resynchronising after
+every committing pass. It decodes identically — the integration test asserts
+that the MTP arm proposes and accepts the same token counts under both — and
+only costs more time.
+
+### Metrics
+
+The end-of-run report prints, per arm, proposals and acceptance, drafts fully
+accepted and rejected at once, suspensions, suspended steps and probes; the
+split of MTP acceptance by whether literal evidence also existed for that step;
+and resynchronisation time, passes, rows and longest gap.
+`--speculative-trace PATH` writes one JSON object per decode step carrying the
+arm that fired, what it proposed and what verified, and both controllers' draft
+length, EWMA and suspension state.
+
+### Measured results
+
+`policy-report-702d043633e0.md` has the full tables. The short version: the
+policy is the only configuration measured that wins on both the copy-heavy and
+the structurally repetitive workload, and it is token-identical to target-only
+everywhere — but it is **not** the default, because the MTP arm's break-even
+acceptance on this host is 0.68-0.74 against a shipped suspend bar of 0.5, and
+prose workloads still regress.
 
 ## n-gram (prompt-lookup) speculation
 
@@ -36,13 +141,18 @@ MODEL_ROOT=/models/Qwen3.6-35B-A3B
   --prompt 'Rewrite this function, adding error context to each failure path: ...' \
   --max-new-tokens 256 \
   --expert-cache-mib 46000 --warmup-all-experts \
-  --speculative-ngram 7 --ngram-min-match 4
+  --speculative ngram --ngram-draft-cap 7 --ngram-min-match 4
 ```
 
-`--speculative-ngram 0`, or omitting it, keeps target-only generation.
+`--speculative off`, or omitting the flag, keeps target-only generation.
 `--ngram-min-match N` sets the shortest token suffix the drafter will match on.
 Speculation requires greedy sampling and does not support routing traces or
 censuses.
+
+The numbers in the rest of this section were measured with the draft length
+pinned at 7. Under `--speculative ngram` the controller starts there and moves
+it; add `--no-adaptive-length --no-ewma-backoff --no-span-continuation` to
+reproduce the pinned behaviour exactly.
 
 ### Why prompt lookup rather than a draft model
 
@@ -238,7 +348,7 @@ exceeds eight rows, where it jumps 25%:
 | 8 | 8.76 | **109.6** | 960 | 7.07 |
 | 12 | 12.35 | 105.7 | 1306 | 5.06 (min-match 3) |
 
-A pass evaluates the pending token plus the drafts, so `--speculative-ngram 8`
+A pass evaluates the pending token plus the drafts, so a draft length of 8
 is a nine-row pass and falls off the small-M dense path, whose measured range is
 2..=8 rows. As the task instructed, this is reported rather than fixed: the
 row range, `SMALL_M_MIN_STORAGE_BYTES` and the block kernels are untouched.
@@ -289,15 +399,18 @@ the workload is known to be copy-heavy.
 ### Draft length and match length sweep
 
 Full sweep tables, the raw command log and the design notes are in
-`ngram-report-702d043633e0.md`. The recommendation from it is
-`--speculative-ngram 7 --ngram-min-match 4`: acceptance rises with match length
-at every draft length (52-63% at min-match 2, 74-80% at min-match 4), and
-throughput falls off a cliff at draft 8 and beyond for every match length.
+`ngram-report-702d043633e0.md`. The recommendation from it is draft length 7 at
+`--ngram-min-match 4`: acceptance rises with match length at every draft length
+(52-63% at min-match 2, 74-80% at min-match 4), and throughput falls off a
+cliff at draft 8 and beyond for every match length. Those are now the n-gram
+controller's cap and starting length.
 
-`DEFAULT_NGRAM_MIN_MATCH` is 4. Draft length defaults to 0, so speculation is
-off unless asked for, and it should stay off unless the workload is known to be
+`DEFAULT_NGRAM_MIN_MATCH` is 4. Speculation is off unless asked for. Used on
+its own, the n-gram arm should stay off unless the workload is known to be
 copy-heavy: the two non-repetitive workloads measured both regress, not from
 drafter overhead but from the handful of wrong proposals they do produce.
+`--speculative auto` exists to remove that per-workload judgement call, and
+`policy-report-702d043633e0.md` reports how far it gets.
 
 ## Bounded thinking
 
@@ -315,7 +428,7 @@ of these options is supplied:
 The budget is per assistant turn, including in `--interactive` mode. Only
 authoritative output tokens count: rejected drafts are neither emitted nor
 charged to the budget, under either drafter. A real two-turn Q4 smoke test with
-`--thinking-budget 2 --speculative-mtp 1` force-closed both turns
+`--thinking-budget 2 --speculative mtp` force-closed both turns
 independently, kept 100% of the exercised drafts accepted, and continued with
 `Hi!` and `Bye!` after the evaluated closures.
 
@@ -330,8 +443,11 @@ INFERQ_NUM_THREADS=4 \
   --thinking-budget 64 \
   --max-new-tokens 256 \
   --expert-cache-mib 46000 --warmup-all-experts \
-  --speculative-mtp 1
+  --speculative mtp --mtp-depth-cap 1 --mtp-depth-floor 1
 ```
+
+A cap below the default floor is clamped rather than rejected, so the
+deprecated `--speculative-mtp 1` keeps working; it just warns.
 
 `--no-thinking` and `--thinking-budget` are mutually exclusive and require a
 Qwen chat template that declares thinking support.
@@ -339,8 +455,9 @@ Qwen chat template that declares thinking support.
 ## Qwen3.6 MTP speculative decoding
 
 Qwen3.6-35B-A3B includes one auxiliary multi-token-prediction (MTP) transformer
-block in the same GGUF as the target model. Inferq can use it as an opt-in
-greedy draft predictor with `--speculative-mtp N`.
+block in the same GGUF as the target model. Inferq can use it as a greedy draft
+predictor with `--speculative mtp`, either on its own or as one arm of
+`--speculative auto`.
 
 > **Superseded.** The measurements in this section were taken on the Intel
 > i7-6700 qualified host before the pool unification and before snapshot
@@ -354,7 +471,8 @@ greedy draft predictor with `--speculative-mtp N`.
 > regardless of whether speculation was going to help, which is what kept
 > draft=1 below break-even.
 
-The optional `--speculative-mtp-min-margin 0.3` gate falls back to a one-row
+The optional `--speculative-mtp-min-margin 0.3` gate (any mode that uses the
+MTP arm) falls back to a one-row
 target pass when the MTP top-1/top-2 raw-logit margin is below 0.3. It improved
 that particular workload, but remains experimental and is not enabled
 automatically.
@@ -437,7 +555,7 @@ the same path for the much smaller expert matrices regressed their stages by
 18-42%, so routed experts continue to use Candle's grouped multi-row path.
 
 **This path covers 2 to 8 rows.** A verification pass of more than 8 rows —
-`--speculative-ngram 8` or higher, since a pass evaluates the pending token
+a draft length of 8 or higher, since a pass evaluates the pending token
 plus the drafts — falls back to the slower per-row traversal. The n-gram
 results below show what that costs.
 

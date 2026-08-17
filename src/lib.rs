@@ -10,6 +10,7 @@ pub mod qwen;
 pub mod residency;
 pub mod runtime;
 pub mod sampling;
+pub mod speculative;
 pub mod threading;
 pub mod tokenizer;
 pub mod trace;
@@ -27,4 +28,8 @@ pub use runtime::{
     GenerationMetrics, GenerationOptions, GenerationResult, NgramMatchLengthStats,
     QuantizedDraftObservation, QuantizedGenerationMetrics, QuantizedGenerationResult,
     QuantizedNgramMetrics, QuantizedRuntime, QuantizedSpeculativeMetrics, Runtime, ThinkingMetrics,
+};
+pub use speculative::{
+    ArmConfig, ArmController, ArmStats, PolicyStepRecord, QuantizedPolicyMetrics, SpanCursor,
+    SpeculativeMode, StepArm,
 };

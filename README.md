@@ -58,16 +58,27 @@ i7-6700 host, its fully resident Q4_K_M artifact reached 8.12 decode tok/s at
 [Qwen3.6 Q4/Q8 comparison](docs/qwen36-35b-a3b.md) for exact artifacts,
 commands, compatibility details, and methodology.
 
-Qwen3.6's bundled MTP predictor can also be used for opt-in greedy speculative
-decoding. This is currently a correctness/reference implementation: its
-128-token output exactly matches ordinary greedy decoding, including when
-rejections occur. Expert-grouped MoE execution and measured large-matrix
-small-batch kernels raised draft=1 from 6.31 to 7.17 tok/s, but target-only is
-still faster at 8.09 tok/s, so speculation remains disabled by default. Try it
-with `--speculative-mtp 1`; use `--thinking-budget N` to retain reasoning with
-a per-turn hard limit, or `--no-thinking` to render Qwen's closed thinking
-prefix. See [Speculative decoding](docs/speculative-decoding.md) for commands,
-K=1/2/4/8 verifier measurements, state semantics, and restrictions.
+Greedy speculative decoding is opt-in through `--speculative`, and every mode
+emits the exact token sequence ordinary greedy decoding would: proposals are
+verified by the same multi-row target pass and committed only where the
+target's own choice matches. There are two draft sources — prompt lookup over
+the tokens already in context, and Qwen3.6's bundled MTP predictor — and
+`--speculative auto` runs both behind one adaptive policy that picks per decode
+step: free literal evidence where the index has it, an MTP draft where that arm
+is currently earning its cost, and otherwise exactly the pass an unspeculated
+run would make. `--speculative ngram` and `--speculative mtp` restrict it to one
+arm; `off` is the default.
+
+It stays off by default because no configuration yet wins everywhere. The
+policy is the only one measured that wins on both copy-heavy work (1.2x) and
+structurally repetitive work (1.1x), where each single arm loses badly on the
+other, but prose still regresses: the MTP block costs ~25 ms per drafted token
+on this host, which puts its break-even acceptance at 0.68-0.74. Use
+`--thinking-budget N` to retain reasoning with a per-turn hard limit, or
+`--no-thinking` to render Qwen's closed thinking prefix. See
+[Speculative decoding](docs/speculative-decoding.md) for the policy, the
+controllers, commands and restrictions, and
+`policy-report-702d043633e0.md` for the measurements.
 
 ## Installation on a new server
 

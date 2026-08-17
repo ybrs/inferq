@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail, ensure};
 use clap::{ArgAction, Parser};
 use qwen_engine::{
     ExpertCacheStats, FullExpertWarmupMode, GenerationOptions, GgufCheckpoint, GgufModelIdentity,
-    QuantizedRuntime,
+    QuantizedRuntime, SpeculativeMode,
     profile::{BuildInfo, HostInfo, ProcessDelta, ProcessSnapshot, SourceInfo},
     qwen::QuantizedForwardTimingReport,
     tokenizer::ModelTokenizer,
@@ -47,12 +47,34 @@ struct Args {
     /// Create a JSONL artifact instead of writing records to stdout.
     #[arg(long)]
     output: Option<PathBuf>,
-    /// Enable Qwen3.5/3.6 MTP speculation with at most N draft tokens.
+    /// Which draft sources decoding may use. `auto` is the unified policy.
+    #[arg(long, value_enum, default_value_t = Speculative::Off)]
+    speculative: Speculative,
+    /// Deprecated alias for `--speculative mtp` with a depth cap of N.
     #[arg(long, default_value_t = 0)]
     speculative_mtp: usize,
     /// Skip MTP proposals below this raw top-1/top-2 logit margin.
     #[arg(long, value_name = "MARGIN")]
     speculative_mtp_min_margin: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Speculative {
+    Off,
+    Auto,
+    Ngram,
+    Mtp,
+}
+
+impl From<Speculative> for SpeculativeMode {
+    fn from(value: Speculative) -> Self {
+        match value {
+            Speculative::Off => Self::Off,
+            Speculative::Auto => Self::Auto,
+            Speculative::Ngram => Self::Ngram,
+            Speculative::Mtp => Self::Mtp,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -258,6 +280,15 @@ fn main() -> Result<()> {
         .init();
     let args = Args::parse();
     ensure!(args.repetitions > 0, "--repetitions must be at least one");
+    // The deprecated alias selects the single-arm mode and that arm's ceiling.
+    let mut mode = SpeculativeMode::from(args.speculative);
+    if args.speculative_mtp > 0 {
+        ensure!(
+            mode == SpeculativeMode::Off || mode == SpeculativeMode::Mtp,
+            "--speculative-mtp is a deprecated alias for --speculative mtp"
+        );
+        mode = SpeculativeMode::Mtp;
+    }
     ensure!(
         args.speculative_mtp_min_margin.is_none() || args.speculative_mtp > 0,
         "--speculative-mtp-min-margin requires --speculative-mtp"
@@ -380,6 +411,7 @@ fn main() -> Result<()> {
             runtime.reset();
             let options = GenerationOptions {
                 max_new_tokens: prompt.definition.max_new_tokens,
+                speculative_mode: mode,
                 speculative_mtp_draft_tokens: args.speculative_mtp,
                 speculative_mtp_min_margin: args.speculative_mtp_min_margin,
                 ..GenerationOptions::default()

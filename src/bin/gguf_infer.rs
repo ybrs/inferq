@@ -4,13 +4,19 @@ use std::{
     time::Instant,
 };
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use clap::Parser;
 use qwen_engine::{
     GenerationOptions, GgufCheckpoint, GgufModelIdentity, QuantizedGenerationResult,
-    QuantizedRuntime,
+    QuantizedRuntime, SpeculativeMode,
     profile::{ProcessDelta, ProcessSnapshot},
-    runtime::DEFAULT_NGRAM_MIN_MATCH,
+    runtime::{DEFAULT_NGRAM_MIN_MATCH, PolicyTuning},
+    speculative::{
+        DEFAULT_BACKOFF_CAP, DEFAULT_BACKOFF_TOKENS, DEFAULT_EWMA_ALPHA, DEFAULT_MTP_DEPTH_CAP,
+        DEFAULT_MTP_DEPTH_FLOOR, DEFAULT_MTP_DEPTH_START, DEFAULT_MTP_SUSPEND_BELOW,
+        DEFAULT_NGRAM_DRAFT_CAP, DEFAULT_NGRAM_DRAFT_FLOOR, DEFAULT_NGRAM_SUSPEND_BELOW,
+        QuantizedPolicyMetrics,
+    },
     trace::{JsonRoutingCensus, JsonlRoutingTrace, RoutingCensusArtifact, RoutingTraceSet},
     warm_all_experts,
 };
@@ -73,23 +79,100 @@ struct Args {
     /// Warm every fused expert tensor, pinning it when an expert cache is configured.
     #[arg(long, conflicts_with = "warmup_census")]
     warmup_all_experts: bool,
-    /// Enable Qwen3.5/3.6 MTP speculation with at most N draft tokens per verification pass.
+    /// Which draft sources decoding may use. `auto` is the unified policy:
+    /// free n-gram evidence where it exists, MTP where it is earning, plain
+    /// decode otherwise.
+    #[arg(long, value_enum, default_value_t = Speculative::Off)]
+    speculative: Speculative,
+    /// Deprecated alias for `--speculative mtp --mtp-depth-cap N`.
     #[arg(long, default_value_t = 0)]
     speculative_mtp: usize,
     /// Skip MTP proposals whose raw top-1/top-2 logit margin is below this value.
     #[arg(long, value_name = "MARGIN")]
     speculative_mtp_min_margin: Option<f32>,
-    /// Enable n-gram (prompt-lookup) speculation with at most N draft tokens
-    /// per verification pass. Zero, the default, keeps ordinary decoding.
+    /// Deprecated alias for `--speculative ngram --ngram-draft-cap N`.
     #[arg(long, default_value_t = 0, conflicts_with = "speculative_mtp")]
     speculative_ngram: usize,
     /// Shortest token suffix the n-gram drafter will match on.
     #[arg(long, value_name = "N", default_value_t = DEFAULT_NGRAM_MIN_MATCH)]
     ngram_min_match: usize,
+    /// Longest draft the n-gram arm may propose. Its controller starts here.
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_NGRAM_DRAFT_CAP)]
+    ngram_draft_cap: usize,
+    /// Shortest draft the n-gram controller will shrink to.
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_NGRAM_DRAFT_FLOOR)]
+    ngram_draft_floor: usize,
+    /// Deepest chained MTP draft.
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_MTP_DEPTH_CAP)]
+    mtp_depth_cap: usize,
+    /// Shallowest depth the MTP controller will shrink to, and the depth it
+    /// probes at when a suspension expires.
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_MTP_DEPTH_FLOOR)]
+    mtp_depth_floor: usize,
+    /// Depth the MTP controller starts each run at.
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_MTP_DEPTH_START)]
+    mtp_depth_start: usize,
+    /// Acceptance EWMA below which the n-gram arm suspends itself.
+    #[arg(long, value_name = "F", default_value_t = DEFAULT_NGRAM_SUSPEND_BELOW)]
+    ngram_suspend_below: f64,
+    /// Acceptance EWMA below which the MTP arm suspends itself. Higher than
+    /// the n-gram bar because this arm pays its draft cost unconditionally.
+    #[arg(long, value_name = "F", default_value_t = DEFAULT_MTP_SUSPEND_BELOW)]
+    mtp_suspend_below: f64,
+    /// Weight of the newest proposal in each arm's acceptance EWMA.
+    #[arg(long, value_name = "F", default_value_t = DEFAULT_EWMA_ALPHA)]
+    ewma_alpha: f64,
+    /// Committed tokens a first suspension lasts.
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_BACKOFF_TOKENS)]
+    backoff_tokens: usize,
+    /// Longest suspension repeated failed probes can reach.
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_BACKOFF_CAP)]
+    backoff_cap: usize,
+    /// Disable Part B1: continuing an accepted n-gram draft's source span.
+    #[arg(long)]
+    no_span_continuation: bool,
+    /// Disable Part B2: adaptive draft length and depth.
+    #[arg(long)]
+    no_adaptive_length: bool,
+    /// Disable Part B3: EWMA backoff, so neither arm ever suspends.
+    #[arg(long)]
+    no_ewma_backoff: bool,
+    /// Resynchronise the MTP block after every committing pass instead of only
+    /// when its arm is about to draft. Same tokens, more resync time; the
+    /// comparison is what the lazy scheme is measured against.
+    #[arg(long)]
+    eager_mtp_resync: bool,
+    /// Write one JSON object per decode step describing the arm that fired and
+    /// both controllers' state.
+    #[arg(long, value_name = "PATH")]
+    speculative_trace: Option<PathBuf>,
     /// How verification snapshots copy recurrent state. Both produce identical
     /// state; `plain` exists to measure what the streaming stores buy.
     #[arg(long, value_enum, default_value_t = SnapshotCopy::Streaming)]
     snapshot_copy: SnapshotCopy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Speculative {
+    /// Ordinary autoregressive decoding.
+    Off,
+    /// The unified policy: both arms, each under its own controller.
+    Auto,
+    /// The n-gram arm only.
+    Ngram,
+    /// The MTP arm only.
+    Mtp,
+}
+
+impl From<Speculative> for SpeculativeMode {
+    fn from(value: Speculative) -> Self {
+        match value {
+            Speculative::Off => Self::Off,
+            Speculative::Auto => Self::Auto,
+            Speculative::Ngram => Self::Ngram,
+            Speculative::Mtp => Self::Mtp,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -98,6 +181,98 @@ enum SnapshotCopy {
     Streaming,
     /// Ordinary `copy_from_slice`.
     Plain,
+}
+
+/// Print the unified policy's per-arm summary. Nothing here is printed when
+/// decoding ran unspeculated.
+fn report_policy(policy: &QuantizedPolicyMetrics) {
+    if !policy.mode.is_speculative() || policy.steps == 0 {
+        return;
+    }
+    eprintln!(
+        "speculative policy: mode {}; {} steps = {} n-gram ({} span) + {} MTP + {} plain; {} steps had literal evidence ({:.1}%); {:.2} tokens per verification pass; {} verification passes over {} tokens; {} rollbacks; lookup {:.3}s, draft {:.3}s, verify {:.3}s, snapshot {:.3}s, rollback {:.3}s, plain decode {:.3}s, MTP resync {:.3}s over {} passes / {} rows (longest {})",
+        policy.mode.as_str(),
+        policy.steps,
+        policy.ngram_steps,
+        policy.ngram_span_steps,
+        policy.mtp_steps,
+        policy.plain_steps,
+        policy.steps_with_ngram_match,
+        policy.ngram_match_rate() * 100.,
+        policy.tokens_per_verification(),
+        policy.verification_passes,
+        policy.verification_tokens,
+        policy.rollbacks,
+        policy.lookup_wall_time.as_secs_f64(),
+        policy.draft_wall_time.as_secs_f64(),
+        policy.verification_wall_time.as_secs_f64(),
+        policy.snapshot_wall_time.as_secs_f64(),
+        policy.rollback_wall_time.as_secs_f64(),
+        policy.plain_wall_time.as_secs_f64(),
+        policy.resync_wall_time.as_secs_f64(),
+        policy.resync_passes,
+        policy.resync_tokens,
+        policy.max_resync_tokens,
+    );
+    for (name, arm) in [("ngram", &policy.ngram_arm), ("mtp", &policy.mtp_arm)] {
+        if arm.proposals == 0 && arm.suspended_steps == 0 {
+            continue;
+        }
+        eprintln!(
+            "policy arm {name}: {} proposals, {}/{} tokens accepted ({:.1}%), {} fully accepted, {} rejected at once; {} suspensions over {} steps, {} probes ({} resumed)",
+            arm.proposals,
+            arm.accepted_tokens,
+            arm.proposed_tokens,
+            arm.acceptance_rate() * 100.,
+            arm.fully_accepted,
+            arm.rejected_immediately,
+            arm.suspensions,
+            arm.suspended_steps,
+            arm.probes,
+            arm.probe_successes,
+        );
+    }
+    if policy.mtp_proposed_on_ngram_match + policy.mtp_proposed_on_ngram_miss > 0 {
+        eprintln!(
+            "policy arm mtp by literal evidence: {}/{} accepted on an n-gram match ({:.1}%), {}/{} accepted on a miss ({:.1}%)",
+            policy.mtp_accepted_on_ngram_match,
+            policy.mtp_proposed_on_ngram_match,
+            policy.mtp_acceptance_on_ngram_match() * 100.,
+            policy.mtp_accepted_on_ngram_miss,
+            policy.mtp_proposed_on_ngram_miss,
+            policy.mtp_acceptance_on_ngram_miss() * 100.,
+        );
+    }
+}
+
+/// Append this turn's per-step policy records to a JSONL trace.
+fn write_speculative_trace(path: &Path, policy: &QuantizedPolicyMetrics) -> Result<()> {
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    for record in &policy.records {
+        writeln!(
+            file,
+            r#"{{"step":{},"committed":{},"arm":"{}","proposed":{},"accepted":{},"ngram_len":{},"mtp_depth":{},"ngram_ewma":{:.4},"mtp_ewma":{:.4},"ngram_suspended":{},"mtp_suspended":{},"ngram_match_len":{},"resync_tokens":{}}}"#,
+            record.step,
+            record.committed_before,
+            record.arm.as_str(),
+            record.proposed,
+            record.accepted,
+            record.ngram_len,
+            record.mtp_depth,
+            record.ngram_ewma,
+            record.mtp_ewma,
+            record.ngram_suspended,
+            record.mtp_suspended,
+            record.ngram_match_len,
+            record.resync_tokens,
+        )?;
+    }
+    Ok(())
 }
 
 fn prepare_all_experts(checkpoint: &GgufCheckpoint, runtime: &QuantizedRuntime<'_>) -> Result<()> {
@@ -299,6 +474,7 @@ fn report(
             ngram.snapshot_bytes_per_row as f64 / (1024. * 1024.),
         );
     }
+    report_policy(&result.metrics.policy);
     if let Some(budget) = result.metrics.thinking.budget {
         eprintln!(
             "thinking budget: {}/{} committed thinking tokens; forced closures {}",
@@ -335,6 +511,7 @@ fn generate_and_report(
     runtime: &mut QuantizedRuntime<'_>,
     prompt: &str,
     options: &GenerationOptions,
+    speculative_trace: Option<&Path>,
 ) -> Result<QuantizedGenerationResult> {
     let before = ProcessSnapshot::capture()?;
     let tokenizer = runtime.tokenizer().clone();
@@ -350,6 +527,9 @@ fn generate_and_report(
     io::stdout().flush()?;
     let process = before.delta(&ProcessSnapshot::capture()?);
     report(&result, runtime.context_tokens(), &process)?;
+    if let Some(path) = speculative_trace {
+        write_speculative_trace(path, &result.metrics.policy)?;
+    }
     Ok(result)
 }
 
@@ -391,6 +571,7 @@ fn interactive(
     chat: bool,
     system_prompt: Option<&str>,
     enable_thinking: bool,
+    speculative_trace: Option<&Path>,
 ) -> Result<()> {
     eprintln!("interactive session ready; /reset clears sequence state, /quit exits");
     let mut first_turn = true;
@@ -405,7 +586,7 @@ fn interactive(
             system_prompt,
             enable_thinking,
         )?;
-        let result = generate_and_report(runtime, &prompt, options)?;
+        let result = generate_and_report(runtime, &prompt, options, speculative_trace)?;
         assistant_closed = emitted_im_end(runtime, &result);
         first_turn = false;
     }
@@ -437,7 +618,7 @@ fn interactive(
                     system_prompt,
                     enable_thinking,
                 )?;
-                let result = generate_and_report(runtime, &prompt, options)?;
+                let result = generate_and_report(runtime, &prompt, options, speculative_trace)?;
                 assistant_closed = emitted_im_end(runtime, &result);
                 first_turn = false;
             }
@@ -468,24 +649,61 @@ fn main() -> Result<()> {
         args.routing_trace.is_some() || !args.trace_router_logits,
         "--trace-router-logits requires --routing-trace"
     );
+    // The deprecated single-arm flags now select a mode and that arm's
+    // ceiling; everything else about them is unchanged.
+    let mut mode = SpeculativeMode::from(args.speculative);
+    let mut ngram_cap = args.ngram_draft_cap;
+    let mut mtp_cap = args.mtp_depth_cap;
+    if args.speculative_mtp > 0 {
+        ensure!(
+            mode == SpeculativeMode::Off || mode == SpeculativeMode::Mtp,
+            "--speculative-mtp is a deprecated alias for --speculative mtp and cannot select another mode"
+        );
+        eprintln!(
+            "warning: --speculative-mtp is deprecated; use --speculative mtp --mtp-depth-cap {}",
+            args.speculative_mtp
+        );
+        mode = SpeculativeMode::Mtp;
+        mtp_cap = args.speculative_mtp;
+    }
+    if args.speculative_ngram > 0 {
+        ensure!(
+            mode == SpeculativeMode::Off || mode == SpeculativeMode::Ngram,
+            "--speculative-ngram is a deprecated alias for --speculative ngram and cannot select another mode"
+        );
+        eprintln!(
+            "warning: --speculative-ngram is deprecated; use --speculative ngram --ngram-draft-cap {}",
+            args.speculative_ngram
+        );
+        mode = SpeculativeMode::Ngram;
+        ngram_cap = args.speculative_ngram;
+    }
     ensure!(
-        args.speculative_mtp == 0
-            || (args.routing_trace.is_none() && args.routing_census.is_none()),
-        "--speculative-mtp does not yet support routing traces or censuses"
+        args.speculative_mtp_min_margin.is_none() || mode.allows_mtp(),
+        "--speculative-mtp-min-margin requires a mode that uses the MTP arm"
     );
     ensure!(
-        args.speculative_mtp_min_margin.is_none() || args.speculative_mtp > 0,
-        "--speculative-mtp-min-margin requires --speculative-mtp"
+        !mode.is_speculative() || (args.routing_trace.is_none() && args.routing_census.is_none()),
+        "speculative decoding does not support routing traces or censuses"
     );
     ensure!(
-        args.speculative_mtp == 0 || args.speculative_ngram == 0,
-        "--speculative-ngram and --speculative-mtp cannot be combined"
+        args.speculative_trace.is_none() || mode.is_speculative(),
+        "--speculative-trace requires a speculative mode"
     );
     ensure!(
-        args.speculative_ngram == 0
-            || (args.routing_trace.is_none() && args.routing_census.is_none()),
-        "--speculative-ngram does not support routing traces or censuses"
+        ngram_cap > 0 && mtp_cap > 0,
+        "draft caps must be at least one"
     );
+    // A floor above the cap is clamped rather than rejected, because the
+    // deprecated aliases set only a cap: `--speculative-mtp 1` has to keep
+    // meaning what it always meant, and one is below the default depth floor.
+    if args.ngram_draft_floor > ngram_cap || args.mtp_depth_floor > mtp_cap {
+        eprintln!(
+            "warning: clamping controller floors to their caps (n-gram {}, MTP {})",
+            args.ngram_draft_floor.min(ngram_cap),
+            args.mtp_depth_floor.min(mtp_cap)
+        );
+    }
 
     let checkpoint = GgufCheckpoint::open(&args.model)?;
     let expert_cache_bytes = args
@@ -540,11 +758,33 @@ fn main() -> Result<()> {
         runtime.set_trace(Some(Box::new(traces)));
     }
 
+    // The caps are the arms' ceilings, not switches; zeroing them when
+    // speculation is off keeps `--speculative off` off.
+    let (ngram_cap, mtp_cap) = if mode.is_speculative() {
+        (ngram_cap, mtp_cap)
+    } else {
+        (0, 0)
+    };
     let options = GenerationOptions {
         max_new_tokens: args.max_new_tokens,
-        speculative_mtp_draft_tokens: args.speculative_mtp,
+        speculative_mode: mode,
+        policy: PolicyTuning {
+            ngram_draft_floor: args.ngram_draft_floor.min(ngram_cap.max(1)),
+            mtp_depth_floor: args.mtp_depth_floor.min(mtp_cap.max(1)),
+            mtp_depth_start: args.mtp_depth_start,
+            ngram_suspend_below: args.ngram_suspend_below,
+            mtp_suspend_below: args.mtp_suspend_below,
+            ewma_alpha: args.ewma_alpha,
+            backoff_tokens: args.backoff_tokens,
+            backoff_cap: args.backoff_cap,
+            span_continuation: !args.no_span_continuation,
+            adaptive_length: !args.no_adaptive_length,
+            ewma_backoff: !args.no_ewma_backoff,
+            eager_mtp_resync: args.eager_mtp_resync,
+        },
+        speculative_mtp_draft_tokens: mtp_cap,
         speculative_mtp_min_margin: args.speculative_mtp_min_margin,
-        speculative_ngram_draft_tokens: args.speculative_ngram,
+        speculative_ngram_draft_tokens: ngram_cap,
         ngram_min_match: args.ngram_min_match,
         thinking_budget: args.thinking_budget,
         ..GenerationOptions::default()
@@ -557,6 +797,7 @@ fn main() -> Result<()> {
             args.chat,
             args.system_prompt.as_deref(),
             !args.no_thinking,
+            args.speculative_trace.as_deref(),
         )
     } else {
         let prompt = user_turn_prompt(
@@ -568,7 +809,12 @@ fn main() -> Result<()> {
             args.system_prompt.as_deref(),
             !args.no_thinking,
         )?;
-        generate_and_report(&mut runtime, &prompt, &options)?;
+        generate_and_report(
+            &mut runtime,
+            &prompt,
+            &options,
+            args.speculative_trace.as_deref(),
+        )?;
         Ok(())
     }
 }

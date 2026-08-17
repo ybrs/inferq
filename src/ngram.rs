@@ -192,6 +192,42 @@ impl NgramIndex {
         }
         None
     }
+
+    /// Propose the continuation of a span already being copied, starting at
+    /// `next`, without consulting the key maps.
+    ///
+    /// A copied region normally re-matches on its own suffix, but only while a
+    /// key covering it survives in the index — the maps hold one position per
+    /// key, so a later occurrence of the same short suffix displaces it. A
+    /// chain keeps the copy running across those gaps. It costs nothing but a
+    /// bounds check, and it proposes; the target still verifies.
+    pub fn continue_from(
+        &self,
+        next: usize,
+        draft_len: usize,
+        match_len: usize,
+        is_stop: impl Fn(u32) -> bool,
+    ) -> Option<NgramDraft> {
+        if draft_len == 0 || next == 0 || next >= self.tokens.len() {
+            return None;
+        }
+        let end = (next + draft_len).min(self.tokens.len());
+        let candidate = &self.tokens[next..end];
+        let stop = candidate.iter().position(|&token| is_stop(token));
+        let tokens = candidate[..stop.unwrap_or(candidate.len())].to_vec();
+        if tokens.is_empty() {
+            return None;
+        }
+        Some(NgramDraft {
+            tokens,
+            match_len,
+            // The span's "occurrence" ends at the token before the
+            // continuation, which keeps the chaining arithmetic identical to a
+            // fresh key match's.
+            source_position: next - 1,
+            truncated_at_stop: stop.is_some(),
+        })
+    }
 }
 
 #[cfg(test)]
