@@ -17,9 +17,9 @@ use crate::{
     speculative::{
         ArmConfig, ArmController, DEFAULT_BACKOFF_CAP, DEFAULT_BACKOFF_TOKENS, DEFAULT_EWMA_ALPHA,
         DEFAULT_MTP_DEPTH_CAP, DEFAULT_MTP_DEPTH_FLOOR, DEFAULT_MTP_DEPTH_START,
-        DEFAULT_MTP_SUSPEND_BELOW, DEFAULT_NGRAM_DRAFT_CAP, DEFAULT_NGRAM_DRAFT_FLOOR,
-        DEFAULT_NGRAM_SUSPEND_BELOW, PolicyStepRecord, QuantizedPolicyMetrics, SpanCursor,
-        SpeculativeMode, StepArm, chain_span,
+        DEFAULT_MTP_MIN_CONFIDENCE, DEFAULT_MTP_SUSPEND_BELOW, DEFAULT_NGRAM_DRAFT_CAP,
+        DEFAULT_NGRAM_DRAFT_FLOOR, DEFAULT_NGRAM_SUSPEND_BELOW, PolicyStepRecord,
+        QuantizedPolicyMetrics, SpanCursor, SpeculativeMode, StepArm, chain_span,
     },
     tokenizer::ModelTokenizer,
     trace::RoutingTrace,
@@ -93,8 +93,16 @@ pub struct GenerationOptions {
     /// default cap.
     pub speculative_mtp_draft_tokens: usize,
     /// Optional raw top-1/top-2 MTP logit-margin gate. Proposals below this
-    /// threshold fall back to a one-row authoritative target pass.
+    /// threshold fall back to a one-row authoritative target pass. Superseded
+    /// by `mtp_min_confidence`, which is on a scale the cost model can be
+    /// compared against; retained for comparability with earlier measurements.
     pub speculative_mtp_min_margin: Option<f32>,
+    /// Softmax confidence below which a chained MTP draft stops extending.
+    ///
+    /// Unlike the margin gate this acts *inside* the drafting loop, so the
+    /// tokens it declines are never drafted at all and their ~25 ms each is
+    /// never paid. Zero disables it.
+    pub mtp_min_confidence: f32,
     /// Ceiling on the n-gram arm's draft length. Zero leaves the arm at its
     /// default cap.
     pub speculative_ngram_draft_tokens: usize,
@@ -108,6 +116,10 @@ pub struct GenerationOptions {
 #[derive(Debug, Clone, Default)]
 pub struct QuantizedDraftObservation {
     pub logit_margin: f32,
+    /// The MTP head's own top-1 softmax probability for this draft.
+    pub probability: f32,
+    /// Position of this token within its chained draft, zero-based.
+    pub depth: usize,
     pub accepted: bool,
     pub gated: bool,
 }
@@ -130,6 +142,13 @@ enum ThinkingBoundary {
 struct MtpDraftCandidate {
     token: u32,
     logit_margin: f32,
+    /// Softmax probability the MTP head assigned to its own top-1 choice.
+    ///
+    /// Unlike the raw logit margin this is on a scale the cost model can be
+    /// compared against directly: a drafted token is worth submitting only if
+    /// the probability the target agrees exceeds
+    /// `(draft_ms + row_ms) / plain_step_ms`.
+    probability: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -1186,8 +1205,12 @@ impl<'a> QuantizedRuntime<'a> {
                     let draft_started = Instant::now();
                     // The next catch-up truncates the block back to its synced
                     // position, so a failed draft leaves nothing to unwind.
-                    let (candidates, draft_profile) =
+                    let (candidates, draft_profile, stopped_early) =
                         self.draft_mtp(seed, &prior_hidden, depth, options)?;
+                    if stopped_early {
+                        policy.confidence_stops += 1;
+                    }
+                    policy.drafted_tokens += candidates.len() + usize::from(stopped_early);
                     policy.draft_wall_time += draft_started.elapsed();
                     speculative.draft_wall_time += draft_started.elapsed();
                     speculative.draft_profile.accumulate(&draft_profile);
@@ -1296,6 +1319,8 @@ impl<'a> QuantizedRuntime<'a> {
                         .extend(mtp_candidates.iter().enumerate().map(|(index, draft)| {
                             QuantizedDraftObservation {
                                 logit_margin: draft.logit_margin,
+                                probability: draft.probability,
+                                depth: index,
                                 accepted: index < accepted,
                                 gated: index >= drafts.len(),
                             }
@@ -1490,7 +1515,7 @@ impl<'a> QuantizedRuntime<'a> {
         target_hidden: &[f32],
         max_drafts: usize,
         options: &GenerationOptions,
-    ) -> Result<(Vec<MtpDraftCandidate>, QuantizedMtpTimings)> {
+    ) -> Result<(Vec<MtpDraftCandidate>, QuantizedMtpTimings, bool)> {
         let hidden_size = self.model.config().hidden_size;
         ensure!(
             target_hidden.len() == hidden_size,
@@ -1501,6 +1526,7 @@ impl<'a> QuantizedRuntime<'a> {
         let mut hidden = target_hidden.to_vec();
         let mut drafts = Vec::with_capacity(max_drafts);
         let mut timings = QuantizedMtpTimings::default();
+        let mut stopped_early = false;
         for _ in 0..max_drafts {
             let input = Tensor::from_vec(hidden, (1, hidden_size), &Device::Cpu)?;
             let output = self
@@ -1519,19 +1545,29 @@ impl<'a> QuantizedRuntime<'a> {
                 .context("MTP draft forward did not produce logits")?
                 .i(0)?
                 .to_vec1::<f32>()?;
-            let (draft, logit_margin) = top1_with_margin(&logits)?;
+            let (draft, logit_margin, probability) = top1_with_scores(&logits)?;
             let draft = draft as u32;
             hidden = output.normalized_hidden.i(0)?.to_vec1::<f32>()?;
             if self.is_stop_token(draft, options) {
                 break;
             }
+            // Stop the chain rather than submit a token the target is more
+            // likely than not to reject. The confidence of this token is
+            // exactly why we stop, so drafting it was unavoidable — but every
+            // token after it now costs nothing, which is the whole point of
+            // gating here instead of after the loop.
+            if probability < options.mtp_min_confidence {
+                stopped_early = true;
+                break;
+            }
             drafts.push(MtpDraftCandidate {
                 token: draft,
                 logit_margin,
+                probability,
             });
             token = draft;
         }
-        Ok((drafts, timings))
+        Ok((drafts, timings, stopped_early))
     }
 
     fn synchronize_mtp(
@@ -1665,8 +1701,16 @@ fn accepted_draft_prefix(drafts: &[u32], verifier_logits: &[Vec<f32>]) -> Result
     Ok(accepted)
 }
 
-fn top1_with_margin(logits: &[f32]) -> Result<(usize, f32)> {
+/// The MTP head's top-1 choice with the two confidence signals worth having:
+/// the raw top-1/top-2 logit margin, and the top-1 softmax probability.
+///
+/// The probability costs one extra pass over a logits vector that has already
+/// been materialised, which is nothing beside the LM-head pass that produced
+/// it. It is computed with the standard max-subtraction so the exponentials
+/// cannot overflow.
+fn top1_with_scores(logits: &[f32]) -> Result<(usize, f32, f32)> {
     let top = argmax(logits)?;
+    let peak = logits[top];
     let second = logits
         .iter()
         .enumerate()
@@ -1674,7 +1718,16 @@ fn top1_with_margin(logits: &[f32]) -> Result<(usize, f32)> {
         .map(|(_, &value)| value)
         .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
         .context("MTP logits do not contain a finite runner-up")?;
-    Ok((top, logits[top] - second))
+    let denominator: f32 = logits
+        .iter()
+        .filter(|value| value.is_finite())
+        .map(|&value| (value - peak).exp())
+        .sum();
+    ensure!(
+        denominator > 0.,
+        "MTP logits produced a degenerate softmax denominator"
+    );
+    Ok((top, peak - second, 1. / denominator))
 }
 
 fn speculative_committed_outputs(
@@ -1996,6 +2049,7 @@ impl Default for GenerationOptions {
             policy: PolicyTuning::default(),
             speculative_mtp_draft_tokens: 0,
             speculative_mtp_min_margin: None,
+            mtp_min_confidence: DEFAULT_MTP_MIN_CONFIDENCE,
             speculative_ngram_draft_tokens: 0,
             ngram_min_match: DEFAULT_NGRAM_MIN_MATCH,
             thinking_budget: None,

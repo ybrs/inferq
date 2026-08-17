@@ -314,3 +314,103 @@ fn disabling_the_controllers_pins_both_arms_at_their_caps() -> Result<()> {
     }
     Ok(())
 }
+
+/// Two identical target-only generations in one process must agree.
+///
+/// This is not about speculation at all: it is the control for every other
+/// test in this file. Each of those compares a speculative run against a
+/// target-only baseline decoded by the *same* long-lived runtime, so if
+/// repeated decoding in one process is not reproducible, those comparisons
+/// cannot attribute a difference to speculation.
+#[test]
+fn repeated_target_only_decoding_is_reproducible_in_one_process() -> Result<()> {
+    let Some(test) = checkpoint() else {
+        return Ok(());
+    };
+    let mut runtime = QuantizedRuntime::load(&test.checkpoint, &test.model_dir)?;
+    let first = runtime.generate(MIXED_PROMPT, &options(SpeculativeMode::Off, 64))?;
+    for round in 0..3 {
+        runtime.reset();
+        let again = runtime.generate(MIXED_PROMPT, &options(SpeculativeMode::Off, 64))?;
+        assert_eq!(
+            again.generated_token_ids, first.generated_token_ids,
+            "target-only decoding differed between repetitions in round {round}"
+        );
+    }
+    Ok(())
+}
+
+/// Row `r` of a multi-row pass must equal the one-row pass for that position.
+///
+/// This is the assumption every speculative mode rests on: a verification pass
+/// evaluates row `r` from exactly the prefix a sequential decode would have fed
+/// it, so accepting a draft commits the token the target would have produced on
+/// its own. If widening a pass perturbs the arithmetic, that equality holds only
+/// up to floating-point noise, and a near-tie in the argmax can flip — which
+/// would make greedy equivalence probabilistic rather than guaranteed.
+#[test]
+fn batching_perturbs_logits_but_not_the_greedy_choice() -> Result<()> {
+    let Some(test) = checkpoint() else {
+        return Ok(());
+    };
+    use candle_core::IndexOp;
+    let config = qwen_engine::Qwen3NextConfig::from_path(test.model_dir.join("config.json"))?;
+    let model = qwen_engine::qwen::QuantizedModel::load(&test.checkpoint, config)?;
+    let prompt: [u32; 8] = [8160, 579, 264, 7047, 1817, 25, 271, 16];
+
+    // Decode a reference sequence one row at a time, then re-evaluate the same
+    // positions as row 0 of progressively wider passes.
+    let mut sequential = model.new_state();
+    model.forward_detailed(&prompt, &mut sequential)?;
+    let mut pending = 16u32;
+    let mut follow = vec![pending];
+    let mut singles = Vec::new();
+    for _ in 0..8 {
+        let out = model.forward_detailed(&[pending], &mut sequential)?;
+        let row = out.logits.i(0)?.to_vec1::<f32>()?;
+        pending = qwen_engine::sampling::argmax(&row)? as u32;
+        singles.push(row);
+        follow.push(pending);
+    }
+
+    let mut worst_delta = 0f32;
+    let mut tightest_margin = f32::MAX;
+    let mut flips = 0;
+    for width in [2usize, 4, 8] {
+        let mut state = model.new_state();
+        model.forward_detailed(&prompt, &mut state)?;
+        let wide = model.forward_detailed(&follow[..width], &mut state)?;
+        for (row, single) in singles.iter().enumerate().take(width) {
+            let batched = wide.logits.i(row)?.to_vec1::<f32>()?;
+            let delta = single
+                .iter()
+                .zip(&batched)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            let mut sorted = batched.clone();
+            sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+            let margin = sorted[0] - sorted[1];
+            worst_delta = worst_delta.max(delta);
+            tightest_margin = tightest_margin.min(margin);
+            if qwen_engine::sampling::argmax(single.as_slice())?
+                != qwen_engine::sampling::argmax(&batched)?
+            {
+                flips += 1;
+            }
+        }
+    }
+    eprintln!(
+        "batching vs single-row: worst |delta| {worst_delta:e}, tightest top1-top2 margin \
+         {tightest_margin:e}, argmax flips {flips}"
+    );
+    // The perturbation is real and large — the multi-row path quantises its
+    // input rows where the one-row path does not — so this asserts the property
+    // that actually matters, and records that it is a margin question rather
+    // than an exactness one.
+    assert_eq!(
+        flips, 0,
+        "batching changed a greedy choice: worst |delta| {worst_delta:e} against a \
+         tightest margin of {tightest_margin:e}"
+    );
+    Ok(())
+}

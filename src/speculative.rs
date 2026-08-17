@@ -106,6 +106,22 @@ pub const DEFAULT_MTP_DEPTH_START: usize = 4;
 /// Higher than the n-gram bar: this arm pays its draft cost unconditionally.
 pub const DEFAULT_MTP_SUSPEND_BELOW: f64 = 0.5;
 
+/// Confidence below which a chained MTP draft stops extending.
+///
+/// This is not a taste constant. A drafted token is worth submitting only if
+/// the probability the target agrees exceeds the cost of the marginal row plus
+/// the draft that produced it, divided by the plain decode step it replaces:
+///
+/// ```text
+/// p* = (draft_ms + row_ms) / plain_step_ms
+/// ```
+///
+/// Measured on this host that is 0.739 (W1), 0.696 (W2) and 0.702 (W3), and an
+/// offline sweep over recorded per-token confidences puts the empirical
+/// optimum at 0.70 on all three workloads — the derived threshold and the
+/// measured one agree. See `draft-report-702d043633e0.md`.
+pub const DEFAULT_MTP_MIN_CONFIDENCE: f32 = 0.7;
+
 /// Shared backoff constants.
 pub const DEFAULT_EWMA_ALPHA: f64 = 0.2;
 pub const DEFAULT_BACKOFF_TOKENS: usize = 64;
@@ -498,6 +514,12 @@ pub struct QuantizedPolicyMetrics {
     pub plain_wall_time: Duration,
     /// Lazy MTP catch-up, kept separate so the scheme's cost is visible.
     pub resync_wall_time: Duration,
+    /// Chained drafts the confidence gate cut short.
+    pub confidence_stops: usize,
+    /// MTP tokens actually drafted, including the one whose confidence ended
+    /// a chain. That last one is the gate's unavoidable cost: its confidence
+    /// is the reason the chain stopped.
+    pub drafted_tokens: usize,
     pub resync_passes: usize,
     pub resync_tokens: usize,
     /// Stage breakdown of the catch-up passes.

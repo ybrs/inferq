@@ -8,14 +8,14 @@ use anyhow::{Context, Result, ensure};
 use clap::Parser;
 use qwen_engine::{
     GenerationOptions, GgufCheckpoint, GgufModelIdentity, QuantizedGenerationResult,
-    QuantizedRuntime, SpeculativeMode,
+    QuantizedRuntime, QuantizedSpeculativeMetrics, SpeculativeMode,
     profile::{ProcessDelta, ProcessSnapshot},
     runtime::{DEFAULT_NGRAM_MIN_MATCH, PolicyTuning},
     speculative::{
         DEFAULT_BACKOFF_CAP, DEFAULT_BACKOFF_TOKENS, DEFAULT_EWMA_ALPHA, DEFAULT_MTP_DEPTH_CAP,
-        DEFAULT_MTP_DEPTH_FLOOR, DEFAULT_MTP_DEPTH_START, DEFAULT_MTP_SUSPEND_BELOW,
-        DEFAULT_NGRAM_DRAFT_CAP, DEFAULT_NGRAM_DRAFT_FLOOR, DEFAULT_NGRAM_SUSPEND_BELOW,
-        QuantizedPolicyMetrics,
+        DEFAULT_MTP_DEPTH_FLOOR, DEFAULT_MTP_DEPTH_START, DEFAULT_MTP_MIN_CONFIDENCE,
+        DEFAULT_MTP_SUSPEND_BELOW, DEFAULT_NGRAM_DRAFT_CAP, DEFAULT_NGRAM_DRAFT_FLOOR,
+        DEFAULT_NGRAM_SUSPEND_BELOW, QuantizedPolicyMetrics,
     },
     trace::{JsonRoutingCensus, JsonlRoutingTrace, RoutingCensusArtifact, RoutingTraceSet},
     warm_all_experts,
@@ -87,9 +87,16 @@ struct Args {
     /// Deprecated alias for `--speculative mtp --mtp-depth-cap N`.
     #[arg(long, default_value_t = 0)]
     speculative_mtp: usize,
-    /// Skip MTP proposals whose raw top-1/top-2 logit margin is below this value.
+    /// Skip MTP proposals whose raw top-1/top-2 logit margin is below this
+    /// value. Superseded by --mtp-min-confidence; kept for comparability.
     #[arg(long, value_name = "MARGIN")]
     speculative_mtp_min_margin: Option<f32>,
+    /// Stop a chained MTP draft at the first token whose own softmax
+    /// confidence is below this. Zero disables the gate. The default is the
+    /// measured break-even: a drafted token pays for itself only when the
+    /// probability the target agrees exceeds (draft + row) / plain step.
+    #[arg(long, value_name = "F", default_value_t = DEFAULT_MTP_MIN_CONFIDENCE)]
+    mtp_min_confidence: f32,
     /// Deprecated alias for `--speculative ngram --ngram-draft-cap N`.
     #[arg(long, default_value_t = 0, conflicts_with = "speculative_mtp")]
     speculative_ngram: usize,
@@ -146,6 +153,11 @@ struct Args {
     /// both controllers' state.
     #[arg(long, value_name = "PATH")]
     speculative_trace: Option<PathBuf>,
+    /// Write one JSON object per drafted MTP token with its confidence and
+    /// whether the target accepted it. This is what calibrates a confidence
+    /// gate against measured acceptance rather than against taste.
+    #[arg(long, value_name = "PATH")]
+    draft_calibration: Option<PathBuf>,
     /// How verification snapshots copy recurrent state. Both produce identical
     /// state; `plain` exists to measure what the streaming stores buy.
     #[arg(long, value_enum, default_value_t = SnapshotCopy::Streaming)]
@@ -214,6 +226,16 @@ fn report_policy(policy: &QuantizedPolicyMetrics) {
         policy.resync_tokens,
         policy.max_resync_tokens,
     );
+    if policy.drafted_tokens > 0 {
+        eprintln!(
+            "policy mtp confidence gate: {} tokens drafted, {} submitted, {} chains stopped early ({:.1}% of drafted tokens declined)",
+            policy.drafted_tokens,
+            policy.mtp_arm.proposed_tokens,
+            policy.confidence_stops,
+            100. * (policy.drafted_tokens - policy.mtp_arm.proposed_tokens) as f64
+                / policy.drafted_tokens as f64,
+        );
+    }
     for (name, arm) in [("ngram", &policy.ngram_arm), ("mtp", &policy.mtp_arm)] {
         if arm.proposals == 0 && arm.suspended_steps == 0 {
             continue;
@@ -243,6 +265,35 @@ fn report_policy(policy: &QuantizedPolicyMetrics) {
             policy.mtp_acceptance_on_ngram_miss() * 100.,
         );
     }
+}
+
+/// Optional per-run JSONL artefacts. Grouped so they travel as one argument.
+#[derive(Debug, Clone, Copy, Default)]
+struct TraceSinks<'a> {
+    speculative: Option<&'a Path>,
+    draft_calibration: Option<&'a Path>,
+}
+
+/// Append this turn's per-drafted-token confidence records to a JSONL file.
+fn write_draft_calibration(path: &Path, speculative: &QuantizedSpeculativeMetrics) -> Result<()> {
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    for observation in &speculative.draft_observations {
+        writeln!(
+            file,
+            r#"{{"depth":{},"margin":{:.5},"probability":{:.6},"accepted":{},"gated":{}}}"#,
+            observation.depth,
+            observation.logit_margin,
+            observation.probability,
+            observation.accepted,
+            observation.gated,
+        )?;
+    }
+    Ok(())
 }
 
 /// Append this turn's per-step policy records to a JSONL trace.
@@ -511,7 +562,7 @@ fn generate_and_report(
     runtime: &mut QuantizedRuntime<'_>,
     prompt: &str,
     options: &GenerationOptions,
-    speculative_trace: Option<&Path>,
+    sinks: TraceSinks<'_>,
 ) -> Result<QuantizedGenerationResult> {
     let before = ProcessSnapshot::capture()?;
     let tokenizer = runtime.tokenizer().clone();
@@ -527,8 +578,11 @@ fn generate_and_report(
     io::stdout().flush()?;
     let process = before.delta(&ProcessSnapshot::capture()?);
     report(&result, runtime.context_tokens(), &process)?;
-    if let Some(path) = speculative_trace {
+    if let Some(path) = sinks.speculative {
         write_speculative_trace(path, &result.metrics.policy)?;
+    }
+    if let Some(path) = sinks.draft_calibration {
+        write_draft_calibration(path, &result.metrics.speculative)?;
     }
     Ok(result)
 }
@@ -571,7 +625,7 @@ fn interactive(
     chat: bool,
     system_prompt: Option<&str>,
     enable_thinking: bool,
-    speculative_trace: Option<&Path>,
+    sinks: TraceSinks<'_>,
 ) -> Result<()> {
     eprintln!("interactive session ready; /reset clears sequence state, /quit exits");
     let mut first_turn = true;
@@ -586,7 +640,7 @@ fn interactive(
             system_prompt,
             enable_thinking,
         )?;
-        let result = generate_and_report(runtime, &prompt, options, speculative_trace)?;
+        let result = generate_and_report(runtime, &prompt, options, sinks)?;
         assistant_closed = emitted_im_end(runtime, &result);
         first_turn = false;
     }
@@ -618,7 +672,7 @@ fn interactive(
                     system_prompt,
                     enable_thinking,
                 )?;
-                let result = generate_and_report(runtime, &prompt, options, speculative_trace)?;
+                let result = generate_and_report(runtime, &prompt, options, sinks)?;
                 assistant_closed = emitted_im_end(runtime, &result);
                 first_turn = false;
             }
@@ -689,6 +743,10 @@ fn main() -> Result<()> {
     ensure!(
         args.speculative_trace.is_none() || mode.is_speculative(),
         "--speculative-trace requires a speculative mode"
+    );
+    ensure!(
+        args.draft_calibration.is_none() || mode.allows_mtp(),
+        "--draft-calibration requires a mode that uses the MTP arm"
     );
     ensure!(
         ngram_cap > 0 && mtp_cap > 0,
@@ -784,10 +842,15 @@ fn main() -> Result<()> {
         },
         speculative_mtp_draft_tokens: mtp_cap,
         speculative_mtp_min_margin: args.speculative_mtp_min_margin,
+        mtp_min_confidence: args.mtp_min_confidence,
         speculative_ngram_draft_tokens: ngram_cap,
         ngram_min_match: args.ngram_min_match,
         thinking_budget: args.thinking_budget,
         ..GenerationOptions::default()
+    };
+    let sinks = TraceSinks {
+        speculative: args.speculative_trace.as_deref(),
+        draft_calibration: args.draft_calibration.as_deref(),
     };
     if args.interactive {
         interactive(
@@ -797,7 +860,7 @@ fn main() -> Result<()> {
             args.chat,
             args.system_prompt.as_deref(),
             !args.no_thinking,
-            args.speculative_trace.as_deref(),
+            sinks,
         )
     } else {
         let prompt = user_turn_prompt(
@@ -809,12 +872,7 @@ fn main() -> Result<()> {
             args.system_prompt.as_deref(),
             !args.no_thinking,
         )?;
-        generate_and_report(
-            &mut runtime,
-            &prompt,
-            &options,
-            args.speculative_trace.as_deref(),
-        )?;
+        generate_and_report(&mut runtime, &prompt, &options, sinks)?;
         Ok(())
     }
 }
