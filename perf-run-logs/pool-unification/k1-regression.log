@@ -1,0 +1,5 @@
+=== pre-change rep2 (CANDLE=6/RAYON=1) ===
+input: 34 tokens evaluated in 2.450s (13.87 tok/s); decode: 127 passes in 15.414s (8.24 tok/s); context: 162 tokens
+=== post-change rep2 (default, no env vars) ===
+inferq: threading: resolved 6 threads (source: detected physical core count); global rayon pool: built
+input: 34 tokens evaluated in 2.412s (14.09 tok/s); decode: 127 passes in 15.320s (8.29 tok/s); context: 162 tokens

@@ -304,6 +304,60 @@ fn streaming_and_buffered_completions_agree() -> Result<()> {
     })
 }
 
+/// A turn has to end where the template ends it.
+///
+/// This checkpoint's `config.json` names `<|endoftext|>` as its EOS while the
+/// chat template closes every assistant turn with `<|im_end|>`, so a server
+/// that trusts the config alone never stops: it runs to the token budget,
+/// emitting the end-of-turn marker and then writing both sides of the
+/// conversation itself. The budget here is far larger than a greeting needs,
+/// so a turn that reaches it has not stopped on its own.
+#[test]
+fn a_turn_ends_at_the_templates_end_of_turn_marker() -> Result<()> {
+    let Some(server) = server() else {
+        return Ok(());
+    };
+    server.runtime.block_on(async {
+        let body = serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Say hello in three words."}],
+            "max_tokens": 400,
+            "stream": false,
+        })
+        .to_string();
+        let response = send(
+            server.address,
+            "POST",
+            "/v1/chat/completions",
+            Some(API_KEY),
+            Some(&body),
+        )
+        .await?;
+        assert_eq!(response.status, 200, "{}", response.body);
+        let json = response.json();
+        let choice = &json["choices"][0];
+        assert_eq!(
+            choice["finish_reason"], "stop",
+            "the turn hit its budget instead of ending: {}",
+            response.body
+        );
+        let completion_tokens = json["usage"]["completion_tokens"]
+            .as_u64()
+            .unwrap_or_default();
+        assert!(
+            completion_tokens < 400,
+            "the turn ran to its budget: {completion_tokens} tokens"
+        );
+        // The marker is a special token, so it is stripped from the text; what
+        // must not appear is the conversation continuing past it.
+        let content = choice["message"]["content"].as_str().unwrap_or_default();
+        for marker in ["<|im_end|>", "<|im_start|>"] {
+            assert!(!content.contains(marker), "leaked {marker}: {content:?}");
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+}
+
 #[test]
 fn stop_strings_truncate_the_response() -> Result<()> {
     let Some(server) = server() else {
