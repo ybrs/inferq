@@ -578,6 +578,50 @@ fn prepare<'a>(
     Ok((runtime, info, prompt_cache, stop_tokens))
 }
 
+/// Where a pass actually spent its time, summed over every layer.
+///
+/// Decode cost is not one number: the full-attention layers scan a KV cache
+/// that grows with the conversation, while the MoE and linear layers cost the
+/// same at any depth. A request that is slow at 3000 context tokens and fast
+/// at 30 is not slow for the same reason, and only the split says which.
+fn log_stage_profile(stage: &str, timings: &crate::qwen::QuantizedForwardTimings) {
+    if !tracing::enabled!(tracing::Level::DEBUG) {
+        return;
+    }
+    let mut attention_scan = Duration::ZERO;
+    let mut attention_other = Duration::ZERO;
+    let mut delta = Duration::ZERO;
+    let mut moe_experts = Duration::ZERO;
+    let mut moe_other = Duration::ZERO;
+    for layer in &timings.layer_details {
+        attention_scan += layer.attention.attention;
+        attention_other += layer
+            .attention
+            .wall
+            .saturating_sub(layer.attention.attention);
+        delta += layer.delta.wall;
+        moe_experts += layer.moe.expert_compute + layer.moe.expert_load;
+        moe_other += layer
+            .moe
+            .wall
+            .saturating_sub(layer.moe.expert_compute + layer.moe.expert_load);
+    }
+    let seconds = |d: Duration| d.as_secs_f64();
+    tracing::debug!(
+        stage,
+        wall_seconds = seconds(timings.wall),
+        // The KV scan: the only term here that grows with the conversation.
+        attention_scan_seconds = seconds(attention_scan),
+        attention_other_seconds = seconds(attention_other),
+        linear_attention_seconds = seconds(delta),
+        moe_expert_seconds = seconds(moe_experts),
+        moe_other_seconds = seconds(moe_other),
+        lm_head_seconds = seconds(timings.lm_head),
+        embedding_seconds = seconds(timings.embedding),
+        "stage profile"
+    );
+}
+
 /// The tokens that end an assistant turn.
 ///
 /// A generation loop stops on `config.json`'s `eos_token_id`, but that field is
@@ -977,6 +1021,8 @@ fn generate(
             } else {
                 FinishReason::Stop
             };
+            log_stage_profile("prefill", &result.metrics.prefill_profile);
+            log_stage_profile("decode", &result.metrics.decode_profile);
             Ok(Some(completion(finish_reason, timing(&result.metrics))))
         }
         Err(error) => match halted {
