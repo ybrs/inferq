@@ -50,27 +50,37 @@ is not the same operation at agent depths. The full-attention layers scan a KV
 cache that grows with the conversation; the linear and MoE layers cost the same
 at any depth. Measured with `gguf_decode_depth` on an i7-8700, six threads,
 Qwen3.6-35B-A3B Q4_K_M, native build, speculation off, sixteen decode passes
-per depth (seconds are totals across those passes):
+per depth:
 
-| context | decode tok/s | attention scan | linear | MoE | lm_head |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 64 | 6.72 | 0.06 s | 0.81 s | 1.04 s | 0.29 s |
-| 512 | 6.56 | 0.43 s | 0.80 s | 0.73 s | 0.30 s |
-| 1024 | 5.53 | 0.89 s | 0.79 s | 0.73 s | 0.30 s |
-| 2048 | 3.92 | 2.08 s | 0.79 s | 0.72 s | 0.30 s |
-| 3072 | 2.97 | 3.38 s | 0.79 s | 0.72 s | 0.31 s |
+| context | decode tok/s | scan | prefill tok/s |
+| ---: | ---: | ---: | ---: |
+| 64 | 7.95 | 0.02 s | 13.1 |
+| 512 | 7.44 | 0.11 s | 12.4 |
+| 1024 | 7.40 | 0.19 s | 13.4 |
+| 2048 | 6.72 | 0.39 s | 12.4 |
+| 3072 | 6.14 | 0.61 s | 11.7 |
 
-Every column except the attention scan is flat. The scan grows in proportion to
-the depth — 48 times longer over a 48-fold context — and goes from 2.6% of a
-decode pass at 64 tokens to 63% at 3072. So a request that decodes at 3 tok/s
-against a long conversation is not decoding slowly for the same reason a short
-one would; it is spending most of its time in one operation, and that operation
-is the one to optimise for agent workloads. Nothing in the decode path is
-suspect until that column is accounted for.
+The scan was until recently the whole story at depth: it ran on one core, and
+at 3072 context it was 3.38 s of a 5.36 s pass — 63% of decode, against 2.6%
+at 64 tokens. Every other stage was flat across the range, so a long request
+was not slow in general, it was slow in one loop. Splitting that loop across
+the heads, which are independent, took it to 0.61 s and decode at 3072 from
+2.97 to 6.14 tok/s. The full comparison, same host and same tokens:
 
-The practical consequence for a client is that the reasoning budget is worth
-more at depth: `--max-thinking-budget`, or `reasoning_effort`, bounds the part
-of a turn that is paid for at the current context depth.
+| context | before | after | decode | scan |
+| ---: | ---: | ---: | ---: | ---: |
+| 64 | 6.72 | 7.95 | 1.18x | 2.5x |
+| 512 | 6.56 | 7.44 | 1.13x | 3.8x |
+| 1024 | 5.53 | 7.40 | 1.34x | 4.7x |
+| 2048 | 3.92 | 6.72 | 1.71x | 5.4x |
+| 3072 | 2.97 | 6.14 | **2.07x** | **5.5x** |
+
+Prefill gains the same way — 6.02 to 11.67 tok/s at 3072, since a prefill pass
+is the same scan over more rows.
+
+The scan is still the one term that grows with the conversation, now 24% of a
+pass at 3072 rather than 63%, so it remains the thing to watch as context
+grows further. What it is not any more is the reason a long request is slow.
 
 ## Ending a turn
 
