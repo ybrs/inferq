@@ -42,6 +42,36 @@ timings prefill_tokens=11 prefill_seconds=0.661 prefill_tokens_per_second=16.6
 `draft_acceptance` is the share of speculative draft tokens the target kept; a
 run that reports `drafted_tokens=0` is decoding without either arm.
 
+## Decode against context depth
+
+Every throughput figure elsewhere in this repository is measured on a short
+prompt — the qualified sustained case reaches 151 context tokens — and decode
+is not the same operation at agent depths. The full-attention layers scan a KV
+cache that grows with the conversation; the linear and MoE layers cost the same
+at any depth. Measured with `gguf_decode_depth` on an i7-8700, six threads,
+Qwen3.6-35B-A3B Q4_K_M, native build, speculation off, sixteen decode passes
+per depth (seconds are totals across those passes):
+
+| context | decode tok/s | attention scan | linear | MoE | lm_head |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 64 | 6.72 | 0.06 s | 0.81 s | 1.04 s | 0.29 s |
+| 512 | 6.56 | 0.43 s | 0.80 s | 0.73 s | 0.30 s |
+| 1024 | 5.53 | 0.89 s | 0.79 s | 0.73 s | 0.30 s |
+| 2048 | 3.92 | 2.08 s | 0.79 s | 0.72 s | 0.30 s |
+| 3072 | 2.97 | 3.38 s | 0.79 s | 0.72 s | 0.31 s |
+
+Every column except the attention scan is flat. The scan grows in proportion to
+the depth — 48 times longer over a 48-fold context — and goes from 2.6% of a
+decode pass at 64 tokens to 63% at 3072. So a request that decodes at 3 tok/s
+against a long conversation is not decoding slowly for the same reason a short
+one would; it is spending most of its time in one operation, and that operation
+is the one to optimise for agent workloads. Nothing in the decode path is
+suspect until that column is accounted for.
+
+The practical consequence for a client is that the reasoning budget is worth
+more at depth: `--max-thinking-budget`, or `reasoning_effort`, bounds the part
+of a turn that is paid for at the current context depth.
+
 ## Ending a turn
 
 A turn ends on the tokens the checkpoint calls end-of-sequence. Which those are
