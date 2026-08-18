@@ -11,9 +11,9 @@ use crate::{
 };
 
 use super::{
-    QuantizedAttentionState, QuantizedDeltaCheckpoint, QuantizedDeltaSnapshots,
-    QuantizedDeltaState, QuantizedFullLayer, QuantizedLayerTimings, QuantizedLinearLayer,
-    QuantizedMtpHead, quantized_layer::gguf_rms_norm,
+    QuantizedAttentionImage, QuantizedAttentionState, QuantizedDeltaCheckpoint,
+    QuantizedDeltaSnapshots, QuantizedDeltaState, QuantizedFullLayer, QuantizedLayerTimings,
+    QuantizedLinearLayer, QuantizedMtpHead, quantized_layer::gguf_rms_norm,
 };
 
 enum DecoderLayer<'a> {
@@ -37,6 +37,57 @@ enum DecoderCheckpoint {
 pub struct QuantizedModelCheckpoint {
     layers: Vec<DecoderCheckpoint>,
     position: usize,
+}
+
+/// One layer's complete state, KV rows included.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LayerStateImage {
+    Full(QuantizedAttentionImage),
+    Linear(QuantizedDeltaCheckpoint),
+}
+
+impl LayerStateImage {
+    pub fn bytes(&self) -> usize {
+        match self {
+            Self::Full(image) => image.bytes(),
+            Self::Linear(image) => image.bytes(),
+        }
+    }
+}
+
+/// A self-contained copy of a sequence's model state.
+///
+/// [`QuantizedModelCheckpoint`] exists to roll a live state back and therefore
+/// stores only what truncation cannot recover. An image is the whole thing, so
+/// it can be written to disk and restored into a state that never saw the
+/// tokens that produced it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuantizedStateImage {
+    pub layers: Vec<LayerStateImage>,
+    pub position: usize,
+}
+
+impl QuantizedStateImage {
+    pub fn bytes(&self) -> usize {
+        self.layers.iter().map(LayerStateImage::bytes).sum()
+    }
+
+    /// Check the image against itself: every full-attention layer must hold
+    /// exactly the sequence position the image claims.
+    pub fn validate(&self) -> Result<()> {
+        for (index, layer) in self.layers.iter().enumerate() {
+            if let LayerStateImage::Full(image) = layer {
+                image.validate()?;
+                ensure!(
+                    image.positions == self.position,
+                    "layer {index} holds {} positions but the image is at position {}",
+                    image.positions,
+                    self.position
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Reusable per-row rollback snapshots for one multi-row verification pass.
@@ -149,6 +200,47 @@ impl QuantizedModelState {
             }
         }
         self.position = position;
+        Ok(())
+    }
+
+    /// Copy the whole state, KV rows included, so it can outlive the session.
+    pub fn image(&self) -> QuantizedStateImage {
+        QuantizedStateImage {
+            layers: self
+                .layers
+                .iter()
+                .map(|layer| match layer {
+                    DecoderState::Full(state) => LayerStateImage::Full(state.image()),
+                    DecoderState::Linear(state) => LayerStateImage::Linear(state.image()),
+                })
+                .collect(),
+            position: self.position,
+        }
+    }
+
+    /// Replace this state with an image, which may have been produced by an
+    /// earlier process. The layer sequence and every tensor length must match
+    /// the loaded model exactly; nothing here is coerced.
+    pub fn restore_image(&mut self, image: &QuantizedStateImage) -> Result<()> {
+        ensure!(
+            self.layers.len() == image.layers.len(),
+            "state image has {} layers but the model has {}",
+            image.layers.len(),
+            self.layers.len()
+        );
+        image.validate()?;
+        for (index, (state, saved)) in self.layers.iter_mut().zip(&image.layers).enumerate() {
+            match (state, saved) {
+                (DecoderState::Full(state), LayerStateImage::Full(image)) => {
+                    state.restore_image(image)?
+                }
+                (DecoderState::Linear(state), LayerStateImage::Linear(image)) => {
+                    state.restore(image)?
+                }
+                _ => anyhow::bail!("state image layer {index} is the wrong layer type"),
+            }
+        }
+        self.position = image.position;
         Ok(())
     }
 

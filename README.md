@@ -26,6 +26,8 @@ Performance is not the primary objective in Phase 1. Correctness and observabili
 * `docs/usable-performance-roadmap.md` – measured baseline and the critical path from the reference engine to usable CPU performance.
 * `docs/qwen36-35b-a3b.md` – Qwen3.6-35B-A3B compatibility, Q4/Q8 reproduction commands, and measured architecture/performance comparison.
 * `docs/speculative-decoding.md` – Qwen3.6 auxiliary MTP execution, correctness gates, benchmark results, and the optimization path required for a speedup.
+* `docs/openai-server.md` – the OpenAI-compatible HTTP server: supported request surface, the single inference slot behind it, and authentication.
+* `docs/prompt-cache.md` – persistent prefix caching: what a cached state contains, how boundaries are chosen, and what makes a restored prefix exact.
 * `qwen-cpu-inference-target-architecture.md` – Long-term target architecture, design principles, language split Rust/Python/C++, and the 14-phase roadmap toward workload-aware specialization.
 
 ## Development focus
@@ -236,6 +238,56 @@ instead of pairing `CANDLE_NUM_THREADS`/`RAYON_NUM_THREADS` by hand. The old
 pair still works if both are set to the same value, and still takes effect
 when `INFERQ_NUM_THREADS` is unset. See [Reproducible profiling](docs/profiling.md)
 for the full benchmark command and JSONL output contract.
+
+### 6. Serve the OpenAI-compatible API
+
+Anything that speaks the OpenAI chat-completions API can drive the same
+runtime through `serve`, with the same warmup and thread settings:
+
+```bash
+INFERQ_NUM_THREADS=4 \
+./target-native/release/serve \
+  --model "${INFERQ_GGUF}" \
+  --tokenizer-model "${INFERQ_TOKENIZER_DIR}" \
+  --host 127.0.0.1 \
+  --port 8080 \
+  --api-key "$(openssl rand -hex 24)" \
+  --max-new-tokens 512 \
+  --expert-cache-mib 46000 \
+  --warmup-all-experts
+```
+
+```bash
+curl -s http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer ${INFERQ_API_KEY}" \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"Name three primary colors."}],
+       "max_tokens":64}'
+```
+
+The model loads before the port is bound, so a bad checkpoint fails at startup.
+Requests are stateless and served one at a time, first in, first out; the model
+runs on its own thread and the engine never decodes two requests at once. See
+[the OpenAI server guide](docs/openai-server.md) for the supported request
+fields, streaming, authentication, and what is deliberately not implemented.
+
+Add `--prompt-cache-dir` when an agent will open every task with the same long
+preamble. Prefill cost grows with the square of the prompt, so the preamble that
+takes minutes on the first task is restored from disk on every later one,
+including after a restart:
+
+```bash
+  --prompt-cache-dir ~/.cache/inferq/prompts \
+  --prompt-cache-mib 20480
+```
+
+Entries hold the token ids of cached prompts, so nothing is written without that
+flag. See [the prompt cache guide](docs/prompt-cache.md).
+
+The server also implements function calling in this checkpoint's own
+`<tool_call><function=…>` format, so coding agents that speak the OpenAI API
+can drive it. Its prompt rendering is checked byte for byte against the
+checkpoint's `chat_template`.
 
 ### Troubleshooting
 

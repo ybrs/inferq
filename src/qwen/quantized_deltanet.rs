@@ -14,10 +14,28 @@ pub struct QuantizedDeltaState {
     scratch: Box<QuantizedDeltaScratch>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct QuantizedDeltaCheckpoint {
     conv: Vec<f32>,
     recurrent: Vec<f32>,
+}
+
+impl QuantizedDeltaCheckpoint {
+    pub fn from_parts(conv: Vec<f32>, recurrent: Vec<f32>) -> Self {
+        Self { conv, recurrent }
+    }
+
+    pub fn conv(&self) -> &[f32] {
+        &self.conv
+    }
+
+    pub fn recurrent(&self) -> &[f32] {
+        &self.recurrent
+    }
+
+    pub fn bytes(&self) -> usize {
+        (self.conv.len() + self.recurrent.len()) * std::mem::size_of::<f32>()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -254,6 +272,13 @@ impl QuantizedDeltaState {
 
     pub fn recurrent_len(&self) -> usize {
         self.recurrent.len()
+    }
+
+    /// The whole linear-layer state, which for a recurrent layer is the same
+    /// thing a rollback checkpoint holds: there is no append-only cache to
+    /// truncate, so a checkpoint is already a complete image.
+    pub fn image(&self) -> QuantizedDeltaCheckpoint {
+        self.checkpoint()
     }
 
     pub fn restore(&mut self, checkpoint: &QuantizedDeltaCheckpoint) -> Result<()> {

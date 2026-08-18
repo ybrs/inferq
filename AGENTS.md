@@ -50,6 +50,13 @@ performance decisions.
 - `src/config.rs`: checkpoint configuration and invariant validation.
 - `src/loader.rs`: checkpoint discovery, tensor enumeration, and shape checks.
 - `src/runtime.rs`: prefill/decode session state, generation, timings, and traces.
+- `src/server/`: the OpenAI-compatible HTTP surface and the single-slot engine
+  thread that owns the runtime. Model execution stays out of it.
+- `src/prompt_cache/`: persistent prefix state, its on-disk format, and the
+  boundary policy. Reuse must never change what a request decodes.
+- `src/tool_calls.rs`: the checkpoint's tool-call syntax, parsed and rendered.
+  Prompt rendering lives in `src/tokenizer.rs` and is tested against the
+  checkpoint's own `chat_template`, not against what looks reasonable.
 - `src/bin/`: thin command-line adapters; business logic stays in the library.
 - `tests/`: integration and regression tests.
 - `python/`: reference comparison and trace-analysis utilities only.
@@ -76,8 +83,15 @@ must remain small and offline.
 
 - Do not commit model weights, generated logits, routing traces, benchmark
   output, or other large artifacts.
-- Do not add GPU, server, batching, custom SIMD, or broad architecture support
-  during Phase 1 unless the task explicitly changes scope.
+- Do not add GPU, batching, custom SIMD, or broad architecture support during
+  Phase 1 unless the task explicitly changes scope. An OpenAI-compatible server
+  is now in scope (`src/server/`, `docs/openai-server.md`), but it stays a
+  queue in front of one sequence: no batching, no concurrent decoding, and no
+  model execution inside the server module.
+- Reusing cached state is an optimization, never a semantic change. A restored
+  prefix must decode exactly like the same prefix prefilled in place, and an
+  entry that cannot be proven to belong to the loaded checkpoint and the exact
+  token prefix must be rejected rather than adapted.
 - Benchmark results are meaningful only when the command, model revision,
   quantization/dtype, thread count, and host are recorded.
 - Update the execution-path documentation when model semantics, tensor names,
