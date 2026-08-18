@@ -21,7 +21,8 @@ pub use model::{
 pub use moe::{Route, reference_routes, reference_sparse_moe, top_k_routes};
 pub use norm::{l2_normalize, rms_norm, rms_norm_gated};
 pub use quantized_attention::{
-    QuantizedAttentionLayer, QuantizedAttentionState, QuantizedAttentionTimings,
+    QuantizedAttentionImage, QuantizedAttentionLayer, QuantizedAttentionState,
+    QuantizedAttentionTimings,
 };
 pub use quantized_deltanet::{
     QuantizedDeltaCheckpoint, QuantizedDeltaLayer, QuantizedDeltaSnapshots, QuantizedDeltaState,
@@ -31,9 +32,10 @@ pub use quantized_layer::{
     QuantizedFullLayer, QuantizedLayerOutput, QuantizedLayerTimings, QuantizedLinearLayer,
 };
 pub use quantized_model::{
-    QuantizedForwardOutput, QuantizedForwardTimingReport, QuantizedForwardTimings,
+    LayerStateImage, QuantizedForwardOutput, QuantizedForwardTimingReport, QuantizedForwardTimings,
     QuantizedLayerTimingReport, QuantizedModel, QuantizedModelCheckpoint, QuantizedModelState,
-    QuantizedOperationTimingReport, QuantizedStageTimingReport, QuantizedStateSnapshots,
+    QuantizedOperationTimingReport, QuantizedStageTimingReport, QuantizedStateImage,
+    QuantizedStateSnapshots,
 };
 pub use quantized_moe::{
     QuantizedMoeLayer, QuantizedMoeOutput, QuantizedMoeRoutingStats, QuantizedMoeTimings,

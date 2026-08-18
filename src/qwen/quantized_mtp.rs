@@ -6,7 +6,7 @@ use candle_core::{DType, Device, Tensor};
 use crate::{GgufCheckpoint, QuantizedEmbedding, QuantizedMatrix, Qwen3NextConfig};
 
 use super::{
-    QuantizedAttentionState, QuantizedFullLayer, QuantizedLayerTimings,
+    QuantizedAttentionImage, QuantizedAttentionState, QuantizedFullLayer, QuantizedLayerTimings,
     quantized_layer::gguf_rms_norm,
 };
 
@@ -22,6 +22,16 @@ impl QuantizedMtpState {
 
     pub fn truncate(&mut self, position: usize) -> Result<()> {
         self.attention.truncate(position)
+    }
+
+    /// The block's whole KV cache, so a restored session can draft
+    /// immediately instead of sitting the MTP arm out.
+    pub fn image(&self) -> QuantizedAttentionImage {
+        self.attention.image()
+    }
+
+    pub fn restore_image(&mut self, image: &QuantizedAttentionImage) -> Result<()> {
+        self.attention.restore_image(image)
     }
 }
 

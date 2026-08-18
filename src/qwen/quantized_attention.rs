@@ -12,7 +12,74 @@ pub struct QuantizedAttentionState {
     pub positions: usize,
 }
 
+/// Every byte of one attention layer's KV cache.
+///
+/// This is what distinguishes an image from a rollback checkpoint: a
+/// checkpoint records only a position, because rolling back can truncate rows
+/// that are still in memory. Restoring state that was produced by an earlier
+/// process has no such rows to truncate, so the image carries them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct QuantizedAttentionImage {
+    pub keys: Vec<f32>,
+    pub values: Vec<f32>,
+    pub positions: usize,
+}
+
+impl QuantizedAttentionImage {
+    pub fn bytes(&self) -> usize {
+        (self.keys.len() + self.values.len()) * std::mem::size_of::<f32>()
+    }
+
+    /// Reject a stored image whose row stride does not divide its position, so
+    /// a truncated or hand-edited file fails here rather than in a kernel.
+    pub fn validate(&self) -> Result<()> {
+        if self.positions == 0 {
+            ensure!(
+                self.keys.is_empty() && self.values.is_empty(),
+                "attention image holds rows for zero positions"
+            );
+            return Ok(());
+        }
+        ensure!(
+            self.keys.len().is_multiple_of(self.positions)
+                && self.values.len().is_multiple_of(self.positions),
+            "attention image storage is inconsistent with its {} positions",
+            self.positions
+        );
+        Ok(())
+    }
+}
+
 impl QuantizedAttentionState {
+    pub fn image(&self) -> QuantizedAttentionImage {
+        QuantizedAttentionImage {
+            keys: self.keys.clone(),
+            values: self.values.clone(),
+            positions: self.positions,
+        }
+    }
+
+    /// Replace this cache with an image, which may hold more rows than the
+    /// live state does. The caller owns the check that the image belongs to
+    /// this model; only self-consistency is checked here.
+    pub fn restore_image(&mut self, image: &QuantizedAttentionImage) -> Result<()> {
+        image.validate()?;
+        if self.positions > 0 && image.positions > 0 {
+            let live_stride = self.keys.len() / self.positions;
+            let image_stride = image.keys.len() / image.positions;
+            ensure!(
+                live_stride == image_stride,
+                "attention image row stride {image_stride} does not match the live stride {live_stride}"
+            );
+        }
+        self.keys.clear();
+        self.keys.extend_from_slice(&image.keys);
+        self.values.clear();
+        self.values.extend_from_slice(&image.values);
+        self.positions = image.positions;
+        Ok(())
+    }
+
     pub fn truncate(&mut self, positions: usize) -> Result<()> {
         ensure!(
             positions <= self.positions,
@@ -320,5 +387,52 @@ mod tests {
         state.truncate(0).unwrap();
         assert!(state.keys.is_empty());
         assert!(state.values.is_empty());
+    }
+
+    #[test]
+    fn an_image_restores_every_row_into_a_fresh_state() {
+        let state = QuantizedAttentionState {
+            keys: (0..12).map(|value| value as f32).collect(),
+            values: (0..18).map(|value| value as f32).collect(),
+            positions: 3,
+        };
+        let image = state.image();
+        // A checkpoint of the same state could only ever shorten it; the image
+        // rebuilds it from nothing, which is what a restart needs.
+        let mut restored = QuantizedAttentionState::default();
+        restored.restore_image(&image).unwrap();
+        assert_eq!(restored.image(), image);
+        assert_eq!(restored.positions, 3);
+
+        // Restoring over a longer state replaces it rather than appending.
+        let mut longer = QuantizedAttentionState {
+            keys: vec![9.; 40],
+            values: vec![9.; 60],
+            positions: 10,
+        };
+        longer.restore_image(&image).unwrap();
+        assert_eq!(longer.image(), image);
+    }
+
+    #[test]
+    fn an_image_from_another_shape_is_rejected() {
+        let mut state = QuantizedAttentionState {
+            keys: vec![1.; 12],
+            values: vec![1.; 18],
+            positions: 3,
+        };
+        let wider = QuantizedAttentionImage {
+            keys: vec![1.; 24],
+            values: vec![1.; 18],
+            positions: 3,
+        };
+        assert!(state.restore_image(&wider).is_err());
+        let ragged = QuantizedAttentionImage {
+            keys: vec![1.; 13],
+            values: vec![1.; 18],
+            positions: 3,
+        };
+        assert!(ragged.validate().is_err());
+        assert!(state.restore_image(&ragged).is_err());
     }
 }

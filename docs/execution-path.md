@@ -95,7 +95,17 @@ cargo run --release --bin routing_trace -- --model /models/Qwen3-Coder-Next \
   --prompt "Fix this test" --output routing.jsonl
 
 cargo run --release --bin bench -- --model /models/Qwen3-Coder-Next
+
+cargo run --release --bin serve -- \
+  --model /models/qwen3.6/Qwen_Qwen3.6-35B-A3B-Q4_K_M.gguf \
+  --tokenizer-model /models/qwen3.6 --port 8080 --api-key "$INFERQ_API_KEY"
 ```
+
+`serve` exposes the quantized runtime over the OpenAI chat-completions API. It
+queues requests in front of the same single sequence rather than batching them;
+see [openai-server.md](openai-server.md). With `--prompt-cache-dir` it also
+persists sequence state at token boundaries, so a prompt an earlier run already
+prefilled is restored from disk; see [prompt-cache.md](prompt-cache.md).
 
 The profiling artifact schema, stable micro-cases, cache-state contract, and
 `perf stat` wrapper are documented in [profiling.md](profiling.md).

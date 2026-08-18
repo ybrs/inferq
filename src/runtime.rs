@@ -10,8 +10,9 @@ use crate::{
     Checkpoint, ExpertCacheStats, GgufCheckpoint, QuantizedMatrix, Qwen3NextConfig,
     ngram::{NgramDraft, NgramIndex},
     qwen::{
-        ForwardTimings, Model, ModelState, QuantizedForwardTimings, QuantizedModel,
-        QuantizedModelState, QuantizedMtpState, QuantizedMtpTimings, QuantizedStateSnapshots,
+        ForwardTimings, Model, ModelState, QuantizedAttentionImage, QuantizedForwardTimings,
+        QuantizedModel, QuantizedModelState, QuantizedMtpState, QuantizedMtpTimings,
+        QuantizedStateImage, QuantizedStateSnapshots,
     },
     sampling::{Sampler, SamplingConfig, argmax},
     speculative::{
@@ -475,6 +476,37 @@ impl QuantizedGenerationMetrics {
     }
 }
 
+/// Everything needed to resume a sequence in a different session or process.
+///
+/// The model state is the bulk of it; the MTP cache and the hidden-state carry
+/// are what let a restored session keep speculating instead of decoding the
+/// rest of the turn unspeculated.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionImage {
+    /// The exact token prefix this state represents.
+    pub tokens: Vec<u32>,
+    pub model: QuantizedStateImage,
+    pub mtp: Option<QuantizedAttentionImage>,
+    pub last_target_hidden: Option<Vec<f32>>,
+}
+
+impl SessionImage {
+    pub fn position(&self) -> usize {
+        self.model.position
+    }
+
+    /// Bytes of state, which is what the cache budgets against.
+    pub fn bytes(&self) -> usize {
+        self.model.bytes()
+            + self.mtp.as_ref().map_or(0, QuantizedAttentionImage::bytes)
+            + self
+                .last_target_hidden
+                .as_ref()
+                .map_or(0, |row| row.len() * std::mem::size_of::<f32>())
+            + self.tokens.len() * std::mem::size_of::<u32>()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct QuantizedGenerationResult {
     pub prompt_token_ids: Vec<u32>,
@@ -590,6 +622,151 @@ impl<'a> QuantizedRuntime<'a> {
         self.ngram.clear();
     }
 
+    /// Evaluate `tokens` through the target without sampling, leaving the
+    /// session at the boundary immediately after them.
+    ///
+    /// This is how a caller reaches a chosen prefix boundary: everything the
+    /// generation loop does to keep the n-gram index, the hidden-state carry
+    /// and the retained MTP gap aligned happens here too, so a turn continued
+    /// afterwards is indistinguishable from one that prefilled in a single
+    /// pass. `track_mtp` retains the hidden rows the MTP arm would need; it
+    /// costs `hidden_size` floats per token and is pointless when that arm
+    /// will not run.
+    pub fn prefill_tokens(&mut self, tokens: &[u32], track_mtp: bool) -> Result<()> {
+        ensure!(!tokens.is_empty(), "prefill requires at least one token");
+        ensure!(
+            self.trace.is_none(),
+            "prefill_tokens does not emit routing traces"
+        );
+        let carried_token = self.pending_token.take();
+        let context_before = self.state.position + usize::from(carried_token.is_some());
+        let evaluated = continuation_input(tokens, carried_token);
+        if self.ngram.len() == context_before {
+            self.ngram.extend(tokens);
+        } else {
+            self.ngram.clear();
+            self.ngram.extend(&evaluated);
+        }
+        let output = self
+            .model
+            .forward_detailed(&evaluated, &mut self.state)
+            .context("prefill pass failed")?;
+        self.mtp_gap_valid = track_mtp && self.mtp_gap_valid;
+        if self.mtp_gap_valid {
+            let prior = self.last_target_hidden.clone();
+            self.retain_mtp_gap(&evaluated, &output.normalized_hidden, prior.as_deref())?;
+        } else {
+            self.mtp_gap_tokens.clear();
+            self.mtp_gap_hidden.clear();
+            self.mtp_gap_prior_hidden = None;
+        }
+        self.last_target_hidden = Some(last_hidden_row(&output.normalized_hidden)?);
+        // Bring the predictor up to the same position rather than leaving the
+        // gap for a later draft to close. The lazy scheme is right during
+        // generation, where the arm may never draft; here it would mean the
+        // session cannot be imaged with its predictor state, and every
+        // restored request would decode with the MTP arm sitting out.
+        if self.mtp_gap_valid && self.mtp_state.is_some() {
+            let mut discarded = QuantizedPolicyMetrics::default();
+            self.catch_up_mtp(&mut discarded)
+                .context("failed to synchronise the MTP predictor after prefill")?;
+        }
+        Ok(())
+    }
+
+    /// Whether the MTP arm can draft from the state this session now holds.
+    ///
+    /// The arm needs the retained gap to still describe the whole distance
+    /// between the predictor's synced position and the target's: without the
+    /// committing passes' hidden rows there is nothing to catch up from. A
+    /// turn decoded with the arm off stops retaining them, so the arm sits out
+    /// until the session is reset or replaced by an image that carried the
+    /// predictor's own cache.
+    pub fn mtp_arm_ready(&self) -> bool {
+        self.mtp_gap_valid
+            && self.mtp_synced_position + self.mtp_gap_tokens.len() == self.state.position
+            && (self.state.position == 0 || self.last_target_hidden.is_some())
+    }
+
+    /// Copy everything a later session needs to continue this sequence.
+    ///
+    /// `tokens` is the exact token prefix the state represents; passing a
+    /// different length is rejected rather than stored, because a restored
+    /// image whose tokens do not describe its state would silently decode
+    /// against the wrong context. There must be no unevaluated pending token,
+    /// which is why images are taken after [`Self::prefill_tokens`] rather
+    /// than after generation.
+    pub fn session_image(&self, tokens: Vec<u32>) -> Result<SessionImage> {
+        ensure!(
+            self.pending_token.is_none(),
+            "cannot image a session with an unevaluated pending token"
+        );
+        ensure!(
+            tokens.len() == self.state.position,
+            "session holds {} tokens but {} were supplied",
+            self.state.position,
+            tokens.len()
+        );
+        let mtp = self
+            .mtp_state
+            .as_ref()
+            .filter(|_| self.mtp_synced_position == self.state.position)
+            .map(QuantizedMtpState::image);
+        Ok(SessionImage {
+            tokens,
+            model: self.state.image(),
+            mtp,
+            last_target_hidden: self.last_target_hidden.clone(),
+        })
+    }
+
+    /// Adopt a previously captured session, discarding whatever this one held.
+    ///
+    /// The MTP arm resumes only when the image carried the predictor's own
+    /// cache at the same position; otherwise the arm sits out this session, as
+    /// it does after any pass that stopped retaining its gap.
+    pub fn restore_session(&mut self, image: &SessionImage) -> Result<()> {
+        ensure!(
+            image.tokens.len() == image.model.position,
+            "session image holds {} tokens for position {}",
+            image.tokens.len(),
+            image.model.position
+        );
+        self.state.restore_image(&image.model)?;
+        self.pending_token = None;
+        self.mtp_gap_tokens.clear();
+        self.mtp_gap_hidden.clear();
+        self.mtp_gap_prior_hidden = None;
+        self.last_target_hidden = image.last_target_hidden.clone();
+        let mtp_restored = match (self.model.mtp(), &image.mtp, self.mtp_state.as_mut()) {
+            (Some(_), Some(saved), Some(state)) => {
+                state.restore_image(saved)?;
+                ensure!(
+                    state.position() == image.model.position,
+                    "MTP image is at position {} but the target image is at {}",
+                    state.position(),
+                    image.model.position
+                );
+                true
+            }
+            _ => {
+                self.mtp_state = self.model.mtp().map(|mtp| mtp.new_state());
+                false
+            }
+        };
+        self.mtp_synced_position = if mtp_restored {
+            image.model.position
+        } else {
+            0
+        };
+        self.mtp_gap_valid = mtp_restored && self.last_target_hidden.is_some();
+        // Seeding the index costs one hash per token and keeps the n-gram arm
+        // as strong on a restored prefix as it is on a prefilled one.
+        self.ngram.clear();
+        self.ngram.extend(&image.tokens);
+        Ok(())
+    }
+
     /// Copy recurrent state into rollback snapshots with streaming stores
     /// where the CPU supports them. Disabling this falls back to
     /// `copy_from_slice`; both produce identical state.
@@ -645,6 +822,21 @@ impl<'a> QuantizedRuntime<'a> {
         &mut self,
         prompt: &str,
         options: &GenerationOptions,
+        on_token: impl FnMut(u32) -> Result<()>,
+    ) -> Result<QuantizedGenerationResult> {
+        let prompt_token_ids = self.tokenizer.encode(prompt, options.add_special_tokens)?;
+        self.generate_tokens_with_callback(&prompt_token_ids, options, on_token)
+    }
+
+    /// Continue the session from already-encoded tokens.
+    ///
+    /// This is the entry point a caller uses when it decides where the prompt
+    /// begins, which is what prefix reuse needs: the tokens passed here are the
+    /// ones the state has not seen yet, not the whole conversation.
+    pub fn generate_tokens_with_callback(
+        &mut self,
+        prompt_token_ids: &[u32],
+        options: &GenerationOptions,
         mut on_token: impl FnMut(u32) -> Result<()>,
     ) -> Result<QuantizedGenerationResult> {
         ensure!(
@@ -656,13 +848,13 @@ impl<'a> QuantizedRuntime<'a> {
         );
         let mode = effective_speculative_mode(options);
         if mode.is_speculative() {
-            return self.generate_speculative_policy(prompt, options, mode, on_token);
+            return self.generate_speculative_policy(prompt_token_ids, options, mode, on_token);
         }
         ensure!(
             options.max_new_tokens > 0,
             "max_new_tokens must be at least one"
         );
-        let prompt_token_ids = self.tokenizer.encode(prompt, options.add_special_tokens)?;
+        let prompt_token_ids = prompt_token_ids.to_vec();
         ensure!(
             !prompt_token_ids.is_empty(),
             "tokenizer produced an empty prompt"
@@ -943,7 +1135,7 @@ impl<'a> QuantizedRuntime<'a> {
     /// target-only decoding; speculation changes speed, never output.
     fn generate_speculative_policy(
         &mut self,
-        prompt: &str,
+        prompt_token_ids: &[u32],
         options: &GenerationOptions,
         mode: SpeculativeMode,
         mut on_token: impl FnMut(u32) -> Result<()>,
@@ -973,27 +1165,22 @@ impl<'a> QuantizedRuntime<'a> {
             "the loaded model does not contain a supported MTP predictor"
         );
 
-        let prompt_token_ids = self.tokenizer.encode(prompt, options.add_special_tokens)?;
+        let prompt_token_ids = prompt_token_ids.to_vec();
         ensure!(
             !prompt_token_ids.is_empty(),
             "tokenizer produced an empty prompt"
         );
-        let carried_token = self.pending_token.take();
-        let context_before = self.state.position + usize::from(carried_token.is_some());
-        let evaluated_input_token_ids = continuation_input(&prompt_token_ids, carried_token);
-
-        // The MTP arm can only be used when the retained gap still describes
-        // the whole distance between the block's synced position and the
-        // target: without the committing passes' hidden rows there is nothing
-        // to catch up from. A turn decoded with the arm off stops retaining
-        // them, so the arm sits out until the session is reset.
-        let mtp_aligned = self.mtp_gap_valid
-            && self.mtp_synced_position + self.mtp_gap_tokens.len() == self.state.position
-            && (self.state.position == 0 || self.last_target_hidden.is_some());
+        // Checked before anything is consumed, so a rejected turn leaves the
+        // session exactly as it was rather than losing its pending token.
+        let mtp_aligned = self.mtp_arm_ready();
         ensure!(
             mtp_aligned || mode != SpeculativeMode::Mtp,
             "MTP state is not aligned with the target; reset before enabling speculation"
         );
+
+        let carried_token = self.pending_token.take();
+        let context_before = self.state.position + usize::from(carried_token.is_some());
+        let evaluated_input_token_ids = continuation_input(&prompt_token_ids, carried_token);
 
         let (ngram_config, mtp_config) = arm_configs(options, mode, has_mtp_block && mtp_aligned);
         let track_mtp = mtp_config.enabled;
@@ -1793,7 +1980,11 @@ fn speculative_committed_outputs(
 
 /// Which arms a run may use, reading the deprecated single-arm flags as their
 /// modes when no mode was given explicitly.
-fn effective_speculative_mode(options: &GenerationOptions) -> SpeculativeMode {
+///
+/// Callers that need to know what a run will actually do — whether it will
+/// speculate at all, or whether it needs the MTP arm — must ask this rather
+/// than reading `options.speculative_mode`, which can understate both.
+pub fn effective_speculative_mode(options: &GenerationOptions) -> SpeculativeMode {
     match options.speculative_mode {
         SpeculativeMode::Off if options.speculative_mtp_draft_tokens > 0 => SpeculativeMode::Mtp,
         SpeculativeMode::Off if options.speculative_ngram_draft_tokens > 0 => {
