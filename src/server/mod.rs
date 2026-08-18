@@ -10,6 +10,8 @@ pub mod engine;
 pub mod http;
 pub mod request;
 mod stop;
+pub mod thinking;
 
 pub use engine::{EngineConfig, EngineHandle, ModelInfo, Warmup};
 pub use http::{ServerState, serve};
+pub use thinking::{ThinkingPlan, ThinkingPolicy};

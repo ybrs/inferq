@@ -70,8 +70,9 @@ Honoured request fields:
 | `temperature`, `top_p`, `top_k`, `min_p`, `seed` | `top_k`/`min_p` are extensions; `top_p: 1` means unrestricted |
 | `stop` | A string or an array. Matched on decoded text across token boundaries |
 | `stream`, `stream_options.include_usage` | |
+| `reasoning_effort` | `none`/`minimal`/`low`/`medium`/`high`/`xhigh`, mapped to a token budget |
 | `chat_template_kwargs.enable_thinking`, `enable_thinking` | Qwen's thinking prefix, overriding `--no-thinking` |
-| `thinking_budget` | Extension: force-close `<think>` after N committed tokens |
+| `thinking_budget` | Extension: force-close `<think>` after exactly N committed tokens |
 
 Anything the request omits inherits the server's own flags, so
 `--temperature`, `--max-new-tokens` and the speculative settings are the
@@ -168,7 +169,9 @@ Verified end to end with the pi coding agent (`@earendil-works/pi-coding-agent`
 }
 ```
 
-The model `id` must match what the server serves — `--served-model-name`, or
+`supportsReasoningEffort` can be `true` against this server: it honours
+`reasoning_effort` and maps it to a token budget. The model `id` must match
+what the server serves — `--served-model-name`, or
 the GGUF file stem by default. `GET /v1/models/{id}` answers 404 for any other
 name, which is the first thing a misconfigured client trips on.
 
@@ -195,11 +198,61 @@ contents. The same first turn against an empty cache took 19 minutes.
 
 ## Thinking
 
-`--no-thinking` renders assistant turns with the thinking block already closed;
-without it the model thinks first, exactly as `gguf_infer --chat` does. Either
-way, an assistant message in the request's history has its reasoning section
-stripped before the prompt is rendered, matching the official Qwen template's
-handling of history.
+OpenAI's API has no thinking budget. It has `reasoning_effort` — a categorical
+knob, `none` | `minimal` | `low` | `medium` | `high` (and `xhigh` on newer
+models) — with `max_completion_tokens` bounding reasoning and answer together,
+and `usage.completion_tokens_details.reasoning_tokens` reporting what the
+reasoning cost. Anthropic and Google are the ones that take a token count
+(`thinking.budget_tokens`, `thinkingConfig.thinkingBudget`).
+
+This runtime bounds thinking by token count, so the two are bridged: the
+operator decides what each effort level can afford, because on a CPU host that
+is a property of the machine rather than of the request.
+
+```bash
+serve ... \
+  --thinking-budget 512 \          # for requests that ask for neither
+  --max-thinking-budget 4096 \     # ceiling on anything a request asks for
+  --reasoning-budget high=8192      # repeatable; overrides one level
+```
+
+Level defaults: `minimal` 64, `low` 256, `medium` 1024, `high` 4096, `xhigh`
+16384. `none` is not a budget — it renders the thinking block already closed,
+the same thing `chat_template_kwargs.enable_thinking: false` and the server's
+`--no-thinking` do.
+
+What a request may send, most specific first:
+
+| Field | Meaning |
+| --- | --- |
+| `thinking_budget: N` | Extension: exactly N tokens, the way Anthropic and Google express it |
+| `reasoning_effort` | The level's configured budget |
+| `chat_template_kwargs.enable_thinking`, `enable_thinking` | Whether to think at all |
+
+Anything a request asks for is clamped by `--max-thinking-budget`, so a client
+cannot pin the single inference slot in a thinking loop. An unrecognised effort
+level falls back to the server's default rather than failing the request.
+
+The budget is a *forced closure*: at the limit the runtime evaluates the
+tokenizer's own `</think>\n\n` through both target and MTP state and the
+answer continues from there. It is not a truncation of the response.
+
+```bash
+curl ... -d '{"messages":[...],"reasoning_effort":"minimal","max_tokens":120}'
+# usage: {"prompt_tokens":19,"completion_tokens":49,"total_tokens":68,
+#         "completion_tokens_details":{"reasoning_tokens":17}}
+
+curl ... -d '{"messages":[...],"reasoning_effort":"none","max_tokens":120}'
+# usage: {"prompt_tokens":21,"completion_tokens":35,"total_tokens":56}
+```
+
+`completion_tokens_details` is absent when the turn had no thinking section at
+all, which is not the same as having spent nothing on one.
+
+When the prompt leaves a block open, an assistant message in the request's
+history has its reasoning section stripped before rendering — except inside the
+current query, where the template keeps it, which is what a multi-step tool
+exchange needs.
 
 ## Sampling and speculation
 

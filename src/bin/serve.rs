@@ -13,6 +13,7 @@ use qwen_engine::{
     runtime::{DEFAULT_NGRAM_MIN_MATCH, PolicyTuning},
     sampling::SamplingConfig,
     server::{EngineConfig, ServerState, Warmup, engine, serve},
+    server::{ThinkingPolicy, api::ReasoningEffort},
     speculative::{
         DEFAULT_BACKOFF_CAP, DEFAULT_BACKOFF_TOKENS, DEFAULT_EWMA_ALPHA, DEFAULT_MTP_DEPTH_CAP,
         DEFAULT_MTP_DEPTH_FLOOR, DEFAULT_MTP_DEPTH_START, DEFAULT_MTP_SUSPEND_BELOW,
@@ -88,12 +89,26 @@ struct Args {
     #[arg(long, value_name = "N", default_value_t = 0)]
     seed: u64,
     /// Render assistant turns with the thinking block already closed, unless a
-    /// request asks otherwise through `chat_template_kwargs.enable_thinking`.
+    /// request asks otherwise through `reasoning_effort` or
+    /// `chat_template_kwargs.enable_thinking`.
     #[arg(long)]
     no_thinking: bool,
-    /// Force-close Qwen's thinking block after N committed generated tokens.
+    /// Close the thinking block after N committed tokens for requests that ask
+    /// for neither `reasoning_effort` nor `thinking_budget`. Unset leaves
+    /// thinking unbounded, which is the model's own behaviour.
     #[arg(long, value_name = "N")]
     thinking_budget: Option<usize>,
+    /// Ceiling on the thinking budget a request may ask for, by any spelling.
+    /// This is what keeps a client from pinning the one inference slot in a
+    /// thinking loop.
+    #[arg(long, value_name = "N")]
+    max_thinking_budget: Option<usize>,
+    /// What one `reasoning_effort` level is worth on this host, as
+    /// `level=tokens`. Repeatable. Defaults: minimal=64, low=256, medium=1024,
+    /// high=4096, xhigh=16384. OpenAI's API has no token budget — effort is
+    /// categorical — so the mapping is the operator's to make.
+    #[arg(long, value_name = "LEVEL=TOKENS", value_parser = parse_effort_budget)]
+    reasoning_budget: Vec<(ReasoningEffort, usize)>,
     /// Retain recently used expert matrices in-process, bounded in MiB.
     #[arg(long, default_value_t = 0)]
     expert_cache_mib: usize,
@@ -267,10 +282,30 @@ impl Args {
             speculative_mtp_min_margin: self.speculative_mtp_min_margin,
             speculative_ngram_draft_tokens: ngram_cap,
             ngram_min_match: self.ngram_min_match,
-            thinking_budget: self.thinking_budget,
+            // Per-request policy decides the thinking budget; the generation
+            // defaults carry everything else.
+            thinking_budget: None,
             ..GenerationOptions::default()
         }
     }
+
+    fn thinking_policy(&self) -> ThinkingPolicy {
+        let mut policy = ThinkingPolicy {
+            default_budget: self.thinking_budget,
+            max_budget: self.max_thinking_budget,
+            enabled_by_default: !self.no_thinking,
+            ..ThinkingPolicy::default()
+        };
+        policy
+            .effort_budgets
+            .extend(self.reasoning_budget.iter().copied());
+        policy
+    }
+}
+
+/// `level=tokens`, for `--reasoning-budget`.
+fn parse_effort_budget(value: &str) -> Result<(ReasoningEffort, usize), String> {
+    ThinkingPolicy::parse_effort_budget(value).map_err(|error| format!("{error:#}"))
 }
 
 fn main() -> Result<()> {
@@ -295,6 +330,7 @@ fn main() -> Result<()> {
         "--max-new-tokens must be at least one"
     );
     ensure!(args.max_queue > 0, "--max-queue must be at least one");
+    args.thinking_policy().validate()?;
     ensure!(
         args.prompt_cache_dir.is_none() || !args.no_prefix_reuse,
         "--prompt-cache-dir and --no-prefix-reuse contradict each other"
@@ -333,7 +369,7 @@ fn main() -> Result<()> {
     let state = Arc::new(ServerState {
         engine: handle,
         api_key,
-        default_enable_thinking: !args.no_thinking,
+        thinking: args.thinking_policy(),
     });
     let address = (args.host, args.port).into();
     tokio::runtime::Builder::new_multi_thread()

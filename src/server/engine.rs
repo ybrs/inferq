@@ -38,6 +38,51 @@ use crate::{
 
 use super::{api::FinishReason, stop::StopBuffer};
 
+/// Marker the model writes to end its thinking section.
+const THINK_CLOSE: &str = "</think>";
+
+/// Counts what a turn spent inside its thinking block.
+///
+/// The block is opened by the prompt, so counting starts immediately and ends
+/// at the first `</think>` the model writes — including the one a forced
+/// closure inserts, which is part of the reasoning section either way.
+#[derive(Debug, Default)]
+struct ThinkingCounter {
+    open: bool,
+    tokens: usize,
+    /// Where to resume searching for the marker. Kept on a character
+    /// boundary: the model writes plenty of text that is not ASCII.
+    scanned: usize,
+}
+
+impl ThinkingCounter {
+    fn new(open: bool) -> Self {
+        Self {
+            open,
+            tokens: 0,
+            scanned: 0,
+        }
+    }
+
+    /// Record one emitted token, given everything decoded so far.
+    fn observe(&mut self, raw: &str) {
+        if !self.open {
+            return;
+        }
+        self.tokens += 1;
+        if raw[self.scanned..].contains(THINK_CLOSE) {
+            self.open = false;
+            return;
+        }
+        // Only a tail shorter than the marker can still complete it.
+        let mut resume = raw.len().saturating_sub(THINK_CLOSE.len() - 1);
+        while resume > 0 && !raw.is_char_boundary(resume) {
+            resume -= 1;
+        }
+        self.scanned = resume;
+    }
+}
+
 /// Which experts to pull into memory before the first request.
 #[derive(Debug, Clone, Default)]
 pub enum Warmup {
@@ -107,6 +152,9 @@ pub struct Completion {
     /// Calls the turn made, with their parameters still as the model wrote
     /// them. Typing them needs the request's tool schemas.
     pub tool_calls: Vec<ParsedToolCall>,
+    /// Tokens spent inside the thinking block, or `None` when the turn had no
+    /// thinking section at all.
+    pub reasoning_tokens: Option<usize>,
 }
 
 /// Where a request's starting state came from.
@@ -506,6 +554,7 @@ fn run_job(
                 reused_tokens = completion.reused_tokens,
                 reuse = completion.reuse.as_str(),
                 tool_calls = completion.tool_calls.len(),
+                reasoning_tokens = completion.reasoning_tokens.unwrap_or_default(),
                 finish = ?completion.finish_reason,
                 tokens_per_second = completion.completion_tokens as f64 / seconds.max(f64::EPSILON),
                 seconds,
@@ -706,6 +755,7 @@ fn generate(
     let mut completion_tokens = 0usize;
     let mut generated = Vec::new();
     let mut halted = None;
+    let mut reasoning = ThinkingCounter::new(*thinking_open);
     let result = runtime.generate_tokens_with_callback(&tokens[prefilled_to..], options, |token| {
         completion_tokens += 1;
         generated.push(token);
@@ -713,6 +763,7 @@ fn generate(
             return Ok(());
         };
         raw.push_str(&chunk);
+        reasoning.observe(&raw);
         let visible = match (&mut tools, calling) {
             (Some(_), true) => String::new(),
             (Some(guard), false) => {
@@ -763,6 +814,7 @@ fn generate(
         reused_tokens: reused,
         reuse: start.reuse,
         tool_calls: parsed.clone(),
+        reasoning_tokens: thinking_open.then_some(reasoning.tokens),
     };
     match result {
         Ok(result) => {
@@ -841,5 +893,46 @@ pub fn disable_speculation_for_sampling(options: &mut GenerationOptions) {
         options.speculative_mode = SpeculativeMode::Off;
         options.speculative_mtp_draft_tokens = 0;
         options.speculative_ngram_draft_tokens = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Feed decoded chunks the way the token callback does.
+    fn count(open: bool, chunks: &[&str]) -> usize {
+        let mut counter = ThinkingCounter::new(open);
+        let mut raw = String::new();
+        for chunk in chunks {
+            raw.push_str(chunk);
+            counter.observe(&raw);
+        }
+        counter.tokens
+    }
+
+    #[test]
+    fn counts_tokens_until_the_block_closes() {
+        assert_eq!(count(true, &["think", "ing", "</think>", "answer", "!"]), 3);
+        // Never opened: nothing is reasoning.
+        assert_eq!(count(false, &["answer", "!"]), 0);
+        // Never closed: the whole turn was thinking.
+        assert_eq!(count(true, &["still", " going"]), 2);
+    }
+
+    #[test]
+    fn finds_a_marker_split_across_chunks() {
+        assert_eq!(count(true, &["a", "</thi", "nk>", "b"]), 3);
+    }
+
+    #[test]
+    fn does_not_split_a_multi_byte_character() {
+        // The scan window lands inside these characters unless it is moved to
+        // a boundary, which would panic rather than miscount.
+        assert_eq!(
+            count(true, &["日本語です", "がんばって", "</think>", "答え"]),
+            3
+        );
+        assert_eq!(count(true, &["🙂🙂🙂", "🙂", "</think>"]), 3);
     }
 }

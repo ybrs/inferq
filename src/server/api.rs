@@ -31,12 +31,16 @@ pub struct ChatCompletionRequest {
     pub stream: bool,
     pub stream_options: Option<StreamOptions>,
     pub n: Option<usize>,
+    /// OpenAI's reasoning knob. It is categorical rather than a token count,
+    /// so the server maps each level to a budget; see [`ReasoningEffort`].
+    pub reasoning_effort: Option<String>,
     /// Qwen's convention for selecting the thinking generation prefix.
     pub chat_template_kwargs: Option<ChatTemplateKwargs>,
     /// Flat spelling of `chat_template_kwargs.enable_thinking`.
     pub enable_thinking: Option<bool>,
-    /// Not in the OpenAI schema: force-close `<think>` after N committed
-    /// tokens, as `gguf_infer --thinking-budget` does.
+    /// Not in the OpenAI schema: force-close `<think>` after exactly N
+    /// committed tokens, which is what Anthropic and Google expose and OpenAI
+    /// does not. Takes precedence over `reasoning_effort`.
     pub thinking_budget: Option<usize>,
     /// Function definitions the model may call, in OpenAI's shape:
     /// `{"type": "function", "function": {"name", "description", "parameters"}}`.
@@ -197,11 +201,25 @@ impl ChatCompletionRequest {
     }
 
     /// Whether the assistant turn should open an unclosed `<think>` block.
+    ///
+    /// `reasoning_effort: "none"` says the same thing in OpenAI's vocabulary.
     pub fn enable_thinking(&self) -> Option<bool> {
+        if self.reasoning_effort() == Some(ReasoningEffort::None) {
+            return Some(false);
+        }
         self.enable_thinking.or(self
             .chat_template_kwargs
             .as_ref()
             .and_then(|kwargs| kwargs.enable_thinking))
+    }
+
+    /// The requested effort level, ignoring anything unrecognised: a client
+    /// that sends a level this build does not know still gets an answer, at
+    /// the server's default effort.
+    pub fn reasoning_effort(&self) -> Option<ReasoningEffort> {
+        self.reasoning_effort
+            .as_deref()
+            .and_then(ReasoningEffort::parse)
     }
 
     /// The tools the model may call, or nothing when the request disabled them.
@@ -279,6 +297,58 @@ impl ChatCompletionRequest {
     }
 }
 
+/// OpenAI's `reasoning_effort` levels.
+///
+/// OpenAI has no token budget in its API — effort is categorical, and
+/// `max_completion_tokens` bounds reasoning and answer together. This server
+/// therefore maps each level to a budget the operator chooses, because what
+/// "high" can afford depends entirely on the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    /// Not an OpenAI level on every model, but clients send it.
+    XHigh,
+}
+
+impl ReasoningEffort {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "none" => Some(Self::None),
+            "minimal" => Some(Self::Minimal),
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" | "max" => Some(Self::XHigh),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+        }
+    }
+
+    /// Every level a budget can be configured for. `None` is not one: it turns
+    /// the thinking section off rather than bounding it.
+    pub const BUDGETED: [Self; 5] = [
+        Self::Minimal,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+    ];
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FinishReason {
@@ -290,11 +360,20 @@ pub enum FinishReason {
     ToolCalls,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct Usage {
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
     pub total_tokens: usize,
+    /// Present when the turn had a thinking section, as OpenAI reports it for
+    /// its reasoning models.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_tokens_details: Option<CompletionTokensDetails>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct CompletionTokensDetails {
+    pub reasoning_tokens: usize,
 }
 
 impl Usage {
@@ -303,7 +382,16 @@ impl Usage {
             prompt_tokens,
             completion_tokens,
             total_tokens: prompt_tokens + completion_tokens,
+            completion_tokens_details: None,
         }
+    }
+
+    /// Report how much of the output was thinking. `None` means the turn had
+    /// no thinking section at all, which is different from having spent none.
+    pub fn with_reasoning(mut self, reasoning_tokens: Option<usize>) -> Self {
+        self.completion_tokens_details =
+            reasoning_tokens.map(|reasoning_tokens| CompletionTokensDetails { reasoning_tokens });
+        self
     }
 }
 

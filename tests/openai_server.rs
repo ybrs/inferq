@@ -68,7 +68,10 @@ fn server_with(prompt_cache: Option<PromptCacheConfig>) -> Option<Server> {
     let state = Arc::new(ServerState {
         engine: handle,
         api_key: Some(API_KEY.to_owned()),
-        default_enable_thinking: false,
+        thinking: qwen_engine::server::ThinkingPolicy {
+            enabled_by_default: false,
+            ..Default::default()
+        },
     });
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)

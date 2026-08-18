@@ -4,6 +4,8 @@ use anyhow::{Result, ensure};
 
 use crate::{GenerationOptions, tokenizer::ModelTokenizer};
 
+use super::thinking::ThinkingPlan;
+
 use super::{api::ChatCompletionRequest, engine::disable_speculation_for_sampling};
 
 /// Upper bound on a single request's output, whatever it asks for. Without one
@@ -18,6 +20,7 @@ pub const MAX_OUTPUT_TOKENS: usize = 32_768;
 pub fn resolve_options(
     defaults: &GenerationOptions,
     request: &ChatCompletionRequest,
+    thinking: ThinkingPlan,
 ) -> Result<GenerationOptions> {
     let mut options = defaults.clone();
     if let Some(max_new_tokens) = request.max_new_tokens() {
@@ -55,9 +58,9 @@ pub fn resolve_options(
     if let Some(seed) = request.seed {
         options.sampling.seed = seed;
     }
-    if let Some(budget) = request.thinking_budget {
-        options.thinking_budget = Some(budget);
-    }
+    // The runtime's budget assumes the turn begins inside an open block, so a
+    // closed one must carry no budget at all: it would force a second closure.
+    options.thinking_budget = thinking.budget.filter(|_| thinking.open);
     disable_speculation_for_sampling(&mut options);
     Ok(options)
 }
@@ -66,31 +69,10 @@ pub fn resolve_options(
 pub fn render_prompt(
     tokenizer: &ModelTokenizer,
     request: &ChatCompletionRequest,
-    default_enable_thinking: bool,
+    thinking: ThinkingPlan,
 ) -> Result<String> {
     let messages = request.chat_messages()?;
-    let enable_thinking = request.enable_thinking().unwrap_or(default_enable_thinking);
-    ensure!(
-        enable_thinking
-            || request.thinking_budget.is_none()
-            || tokenizer.supports_thinking_generation(),
-        "this model's chat template has no thinking section to disable or bound"
-    );
-    tokenizer.render_chat_prompt(&messages, request.tool_definitions(), enable_thinking)
-}
-
-/// Whether the rendered prompt leaves an unclosed `<think>` block open.
-///
-/// The template opens the block in the *prompt*, so the model's output starts
-/// mid-thought and ends with a bare `</think>`. A client that parses Qwen's
-/// thinking tags needs the opening one to see a well-formed block.
-pub fn opens_thinking(
-    tokenizer: &ModelTokenizer,
-    request: &ChatCompletionRequest,
-    default_enable_thinking: bool,
-) -> bool {
-    tokenizer.supports_thinking_generation()
-        && request.enable_thinking().unwrap_or(default_enable_thinking)
+    tokenizer.render_chat_prompt(&messages, request.tool_definitions(), thinking.open)
 }
 
 /// Render the conversation minus its final message, which is the part a later
@@ -112,6 +94,13 @@ mod tests {
         serde_json::from_str(body).expect("request parses")
     }
 
+    fn thinking() -> ThinkingPlan {
+        ThinkingPlan {
+            open: true,
+            budget: None,
+        }
+    }
+
     fn defaults() -> GenerationOptions {
         GenerationOptions {
             max_new_tokens: 256,
@@ -124,7 +113,8 @@ mod tests {
 
     #[test]
     fn keeps_server_defaults_when_the_request_is_silent() {
-        let options = resolve_options(&defaults(), &request(r#"{"messages":[]}"#)).expect("valid");
+        let options = resolve_options(&defaults(), &request(r#"{"messages":[]}"#), thinking())
+            .expect("valid");
         assert_eq!(options.max_new_tokens, 256);
         assert_eq!(options.sampling.temperature, 0.);
         assert_eq!(options.speculative_mode, SpeculativeMode::Auto);
@@ -135,6 +125,7 @@ mod tests {
         let options = resolve_options(
             &defaults(),
             &request(r#"{"messages":[],"max_tokens":16,"top_p":0.9,"top_k":40,"seed":7}"#),
+            thinking(),
         )
         .expect("valid");
         assert_eq!(options.max_new_tokens, 16);
@@ -148,6 +139,7 @@ mod tests {
         let options = resolve_options(
             &defaults(),
             &request(r#"{"messages":[],"max_tokens":1000000}"#),
+            thinking(),
         )
         .expect("valid");
         assert_eq!(options.max_new_tokens, MAX_OUTPUT_TOKENS);
@@ -158,6 +150,7 @@ mod tests {
         let options = resolve_options(
             &defaults(),
             &request(r#"{"messages":[],"top_p":1.0,"min_p":0.0}"#),
+            thinking(),
         )
         .expect("valid");
         assert_eq!(options.sampling.top_p, None);
@@ -169,6 +162,7 @@ mod tests {
         let options = resolve_options(
             &defaults(),
             &request(r#"{"messages":[],"temperature":0.7}"#),
+            thinking(),
         )
         .expect("valid");
         assert_eq!(options.sampling.temperature, 0.7);
@@ -177,8 +171,12 @@ mod tests {
         assert_eq!(options.speculative_ngram_draft_tokens, 0);
 
         // Greedy requests keep it.
-        let options = resolve_options(&defaults(), &request(r#"{"messages":[],"temperature":0}"#))
-            .expect("valid");
+        let options = resolve_options(
+            &defaults(),
+            &request(r#"{"messages":[],"temperature":0}"#),
+            thinking(),
+        )
+        .expect("valid");
         assert_eq!(options.speculative_mode, SpeculativeMode::Auto);
     }
 
@@ -193,7 +191,7 @@ mod tests {
             r#"{"messages":[],"min_p":2}"#,
         ] {
             assert!(
-                resolve_options(&defaults(), &request(body)).is_err(),
+                resolve_options(&defaults(), &request(body), thinking()).is_err(),
                 "{body} should be rejected"
             );
         }

@@ -289,6 +289,12 @@ The server also implements function calling in this checkpoint's own
 can drive it. Its prompt rendering is checked byte for byte against the
 checkpoint's `chat_template`.
 
+Thinking is bounded per request. OpenAI's API expresses this as
+`reasoning_effort` rather than a token count, so the server maps each level to
+a budget the operator sets (`--thinking-budget`, `--max-thinking-budget`,
+`--reasoning-budget high=8192`) and reports what it cost in
+`usage.completion_tokens_details.reasoning_tokens`.
+
 ### Troubleshooting
 
 - `Illegal instruction`: delete `target-native` and rebuild it on that server.

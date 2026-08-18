@@ -31,7 +31,8 @@ use super::{
         ResponseToolCall, Usage,
     },
     engine::{EngineHandle, Event, JobRequest, SubmitError},
-    request::{opens_thinking, render_history_prefix, render_prompt, resolve_options},
+    request::{render_history_prefix, render_prompt, resolve_options},
+    thinking::{self, ThinkingPolicy},
 };
 use crate::tool_calls::ParsedToolCall;
 
@@ -48,9 +49,9 @@ pub struct ServerState {
     pub engine: EngineHandle,
     /// When set, every `/v1` request must present this key.
     pub api_key: Option<String>,
-    /// Whether an assistant turn opens a `<think>` block unless the request
-    /// says otherwise.
-    pub default_enable_thinking: bool,
+    /// What a turn may spend on thinking, and what each `reasoning_effort`
+    /// level is worth on this host.
+    pub thinking: ThinkingPolicy,
 }
 
 /// An error in the OpenAI envelope, so clients surface it rather than a bare
@@ -293,17 +294,18 @@ async fn chat_completions(
     request
         .validate()
         .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
-    let prompt = render_prompt(
-        state.engine.tokenizer(),
+    let thinking = thinking::plan(
         &request,
-        state.default_enable_thinking,
-    )
-    .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
+        &state.thinking,
+        state.engine.tokenizer().supports_thinking_generation(),
+    );
+    let prompt = render_prompt(state.engine.tokenizer(), &request, thinking)
+        .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
     // Everything before the final message is what the next request in an agent
     // session repeats; the engine caches at a boundary inside it.
     let stable_prefix = render_history_prefix(state.engine.tokenizer(), &request)
         .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
-    let options = resolve_options(state.engine.defaults(), &request)
+    let options = resolve_options(state.engine.defaults(), &request, thinking)
         .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
     // Enough to see what a client is actually asking for when it reports
     // nothing more useful than "request failed".
@@ -314,6 +316,8 @@ async fn chat_completions(
         stream = request.stream,
         max_tokens = options.max_new_tokens,
         temperature = options.sampling.temperature,
+        thinking = thinking.open,
+        thinking_budget = thinking.budget.unwrap_or_default(),
         "accepted a chat completion"
     );
     let events = state
@@ -324,11 +328,7 @@ async fn chat_completions(
             options,
             stop_strings: request.stop_strings(),
             tools_enabled: !request.tool_definitions().is_empty(),
-            thinking_open: opens_thinking(
-                state.engine.tokenizer(),
-                &request,
-                state.default_enable_thinking,
-            ),
+            thinking_open: thinking.open,
         })
         .map_err(|error| match error {
             SubmitError::Busy => ApiError::overloaded(
@@ -415,7 +415,8 @@ async fn collect_response(
                         },
                         finish_reason: completion.finish_reason,
                     }],
-                    usage: Usage::new(completion.prompt_tokens, completion.completion_tokens),
+                    usage: Usage::new(completion.prompt_tokens, completion.completion_tokens)
+                        .with_reasoning(completion.reasoning_tokens),
                 })
                 .into_response());
             }
@@ -510,7 +511,8 @@ fn stream_response(
                     {
                         return;
                     }
-                    let usage = Usage::new(completion.prompt_tokens, completion.completion_tokens);
+                    let usage = Usage::new(completion.prompt_tokens, completion.completion_tokens)
+                        .with_reasoning(completion.reasoning_tokens);
                     let finished = send(&chunk(
                         vec![ChunkChoice {
                             index: 0,
