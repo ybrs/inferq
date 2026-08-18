@@ -1,0 +1,10 @@
+inferq: threading: resolved 6 threads (source: INFERQ_NUM_THREADS); global rayon pool: built
+model loaded in 1.843s (fnv1a64:c9cb348f1d86017c, BF16+F32+Q4K+Q5K+Q6K+Q8_0)
+Here's a thinking process:
+
+1
+prompt token ids: [248045, 846, 198, 7734, 264, 11346, 32671, 7873, 314, 264, 4368, 53269, 436, 34810, 6297, 440, 6813, 13, 248046, 198, 248045, 74455, 198, 248068, 198]
+generated token ids: [8160, 579, 264, 7047, 1817, 25, 271, 16]
+input: 25 tokens evaluated in 2.615s (9.56 tok/s); decode: 7 passes in 1.469s (4.76 tok/s); context: 33 tokens
+expert cache: 0/9952 hits (0.0%); loaded 9054.2 MiB of GGUF ranges; resident 0.0/0.0 MiB in 0 entries (fully resident: false); 0 evictions
+process: physical reads 0.0 MiB; faults 47373 minor / 0 major; RSS 2099.0 MiB, peak 2347.1 MiB

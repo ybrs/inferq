@@ -155,6 +155,53 @@ pub struct Completion {
     /// Tokens spent inside the thinking block, or `None` when the turn had no
     /// thinking section at all.
     pub reasoning_tokens: Option<usize>,
+    pub timing: Timing,
+}
+
+/// What a request spent, split the way the two halves are paid for.
+///
+/// Prefill scores every prompt token against every earlier one and runs as one
+/// batched pass; decode runs one token at a time. Reporting a single figure
+/// over both hides which half a slow request actually spent its time in, which
+/// is the first thing worth knowing.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Timing {
+    /// Prompt tokens actually evaluated — the prompt minus anything reused.
+    pub prefill_tokens: usize,
+    /// Evaluating the prompt, including any pass taken to reach a cache
+    /// boundary.
+    pub prefill: Duration,
+    pub decode: Duration,
+    /// Prompt end to first token, which is what a streaming client waits out.
+    pub time_to_first_token: Duration,
+    /// Draft tokens the target accepted, and how many were offered.
+    pub accepted_draft_tokens: usize,
+    pub drafted_tokens: usize,
+}
+
+impl Timing {
+    fn rate(tokens: usize, elapsed: Duration) -> f64 {
+        let seconds = elapsed.as_secs_f64();
+        if seconds <= 0. {
+            return 0.;
+        }
+        tokens as f64 / seconds
+    }
+
+    pub fn prefill_tokens_per_second(&self) -> f64 {
+        Self::rate(self.prefill_tokens, self.prefill)
+    }
+
+    pub fn decode_tokens_per_second(&self, completion_tokens: usize) -> f64 {
+        Self::rate(completion_tokens, self.decode)
+    }
+
+    /// Share of drafted tokens the target kept. `None` when nothing drafted,
+    /// which is not the same as a run that drafted and had everything rejected.
+    pub fn acceptance(&self) -> Option<f64> {
+        (self.drafted_tokens > 0)
+            .then(|| self.accepted_draft_tokens as f64 / self.drafted_tokens as f64)
+    }
 }
 
 /// Where a request's starting state came from.
@@ -365,13 +412,21 @@ pub fn start(config: EngineConfig) -> Result<EngineHandle> {
     let ready = ready_receiver
         .recv()
         .context("the inference worker exited before reporting readiness")??;
+    // Every request inherits the end-of-turn tokens, so a turn ends where the
+    // template says it does rather than at the token budget.
+    let mut defaults = config.defaults;
+    for token in ready.stop_tokens {
+        if !defaults.stop_tokens.contains(&token) {
+            defaults.stop_tokens.push(token);
+        }
+    }
     Ok(EngineHandle {
         jobs,
         pending: Arc::new(AtomicUsize::new(0)),
         max_queue: config.max_queue.max(1),
         info: ready.info,
         tokenizer: ready.tokenizer,
-        defaults: config.defaults,
+        defaults,
         prompt_cache: ready.prompt_cache,
     })
 }
@@ -381,6 +436,8 @@ struct Ready {
     info: ModelInfo,
     tokenizer: ModelTokenizer,
     prompt_cache: Option<Arc<PromptCache>>,
+    /// Resolved once the checkpoint is open, then inherited by every request.
+    stop_tokens: Vec<u32>,
 }
 
 fn worker(config: EngineConfig, jobs: Receiver<Job>, ready: SyncSender<Result<Ready>>) {
@@ -394,12 +451,13 @@ fn worker(config: EngineConfig, jobs: Receiver<Job>, ready: SyncSender<Result<Re
         }
     };
     let (mut runtime, prompt_cache) = match prepare(&checkpoint, &config) {
-        Ok((runtime, info, prompt_cache)) => {
+        Ok((runtime, info, prompt_cache, stop_tokens)) => {
             let tokenizer = runtime.tokenizer().clone();
             let sent = ready.send(Ok(Ready {
                 info,
                 tokenizer,
                 prompt_cache: prompt_cache.clone(),
+                stop_tokens,
             }));
             if sent.is_err() {
                 return;
@@ -430,7 +488,12 @@ fn worker(config: EngineConfig, jobs: Receiver<Job>, ready: SyncSender<Result<Re
 fn prepare<'a>(
     checkpoint: &'a GgufCheckpoint,
     config: &EngineConfig,
-) -> Result<(QuantizedRuntime<'a>, ModelInfo, Option<Arc<PromptCache>>)> {
+) -> Result<(
+    QuantizedRuntime<'a>,
+    ModelInfo,
+    Option<Arc<PromptCache>>,
+    Vec<u32>,
+)> {
     checkpoint.configure_expert_cache(config.expert_cache_bytes)?;
     let identity = checkpoint.identity()?;
     let started = Instant::now();
@@ -507,7 +570,39 @@ fn prepare<'a>(
             .map(Arc::new)
         })
         .transpose()?;
-    Ok((runtime, info, prompt_cache))
+    let stop_tokens = end_of_turn_tokens(&runtime)?;
+    tracing::info!(
+        ?stop_tokens,
+        "resolved the tokens that end an assistant turn"
+    );
+    Ok((runtime, info, prompt_cache, stop_tokens))
+}
+
+/// The tokens that end an assistant turn.
+///
+/// A generation loop stops on `config.json`'s `eos_token_id`, but that field is
+/// optional and this checkpoint omits it: left at that, every request runs to
+/// its whole token budget, emitting `<|im_end|>` and then carrying on writing
+/// both sides of the conversation. So the tokenizer's own end-of-turn token is
+/// folded in, and a checkpoint that yields neither is refused at startup rather
+/// than serving turns that cannot end.
+fn end_of_turn_tokens(runtime: &QuantizedRuntime<'_>) -> Result<Vec<u32>> {
+    let mut tokens = Vec::new();
+    if let Some(eos) = runtime.model().config().eos_token_id.as_ref() {
+        tokens.extend(eos.ids());
+    }
+    if let Some(eos) = runtime.tokenizer().eos_token()
+        && !tokens.contains(&eos)
+    {
+        tokens.push(eos);
+    }
+    anyhow::ensure!(
+        !tokens.is_empty(),
+        "neither config.json's `eos_token_id` nor tokenizer_config.json's \
+         `eos_token` names a token this tokenizer knows, so an assistant turn \
+         would never end"
+    );
+    Ok(tokens)
 }
 
 /// What a cached state must have been produced by.
@@ -548,6 +643,7 @@ fn run_job(
     match generate(runtime, &request, &events, live, cache, prefix_reuse) {
         Ok(Some(completion)) => {
             let seconds = started.elapsed().as_secs_f64();
+            let timing = &completion.timing;
             tracing::info!(
                 prompt_tokens = completion.prompt_tokens,
                 completion_tokens = completion.completion_tokens,
@@ -556,9 +652,25 @@ fn run_job(
                 tool_calls = completion.tool_calls.len(),
                 reasoning_tokens = completion.reasoning_tokens.unwrap_or_default(),
                 finish = ?completion.finish_reason,
-                tokens_per_second = completion.completion_tokens as f64 / seconds.max(f64::EPSILON),
                 seconds,
                 "request complete"
+            );
+            // The two halves are paid for differently, so they are reported
+            // separately: a request can be slow because its prompt was long or
+            // because decoding is, and one figure over both cannot say which.
+            tracing::info!(
+                prefill_tokens = timing.prefill_tokens,
+                prefill_seconds = timing.prefill.as_secs_f64(),
+                prefill_tokens_per_second = timing.prefill_tokens_per_second(),
+                decode_tokens = completion.completion_tokens,
+                decode_seconds = timing.decode.as_secs_f64(),
+                decode_tokens_per_second =
+                    timing.decode_tokens_per_second(completion.completion_tokens),
+                time_to_first_token_seconds = timing.time_to_first_token.as_secs_f64(),
+                drafted_tokens = timing.drafted_tokens,
+                accepted_draft_tokens = timing.accepted_draft_tokens,
+                draft_acceptance = timing.acceptance().unwrap_or_default(),
+                "timings"
             );
             let _ = events.send(Event::Done(completion));
         }
@@ -721,8 +833,14 @@ fn generate(
         .inspect_err(|_| *live = None)?;
     let reused = start.tokens;
     let mut prefilled_to = reused;
+    // The pass taken to reach a cache boundary is prefill this request paid
+    // for, so it belongs in the prefill figure rather than going unreported.
+    let mut boundary_prefill = Duration::ZERO;
     if let Some(cache) = cache {
-        match store_boundary_entry(runtime, &tokens, reused, stable, cache, options) {
+        let started = Instant::now();
+        let stored = store_boundary_entry(runtime, &tokens, reused, stable, cache, options);
+        boundary_prefill = started.elapsed();
+        match stored {
             Ok(boundary) => {
                 if boundary > reused {
                     *live = Some(tokens[..boundary].to_vec());
@@ -756,8 +874,12 @@ fn generate(
     let mut generated = Vec::new();
     let mut halted = None;
     let mut reasoning = ThinkingCounter::new(*thinking_open);
+    // A halted turn never returns metrics, so the wall clock is kept here too.
+    let generation_started = Instant::now();
+    let mut first_token_at = None;
     let result = runtime.generate_tokens_with_callback(&tokens[prefilled_to..], options, |token| {
         completion_tokens += 1;
+        first_token_at.get_or_insert_with(Instant::now);
         generated.push(token);
         let Some(chunk) = decode(token)? else {
             return Ok(());
@@ -807,7 +929,16 @@ fn generate(
     let parsed = tools_enabled
         .then(|| tool_calls::parse(&raw).1)
         .unwrap_or_default();
-    let completion = |finish_reason| Completion {
+    let timing = |metrics: &crate::QuantizedGenerationMetrics| Timing {
+        prefill_tokens: prompt_tokens - reused,
+        prefill: metrics.prefill_wall_time + boundary_prefill,
+        decode: metrics.decode_wall_time,
+        time_to_first_token: metrics.time_to_first_token + boundary_prefill,
+        accepted_draft_tokens: metrics.speculative.accepted_tokens
+            + metrics.ngram.draft_tokens_accepted,
+        drafted_tokens: metrics.speculative.drafted_tokens + metrics.ngram.draft_tokens_proposed,
+    };
+    let completion = |finish_reason, timing| Completion {
         finish_reason,
         prompt_tokens,
         completion_tokens,
@@ -815,6 +946,7 @@ fn generate(
         reuse: start.reuse,
         tool_calls: parsed.clone(),
         reasoning_tokens: thinking_open.then_some(reasoning.tokens),
+        timing,
     };
     match result {
         Ok(result) => {
@@ -845,17 +977,33 @@ fn generate(
             } else {
                 FinishReason::Stop
             };
-            Ok(Some(completion(finish_reason)))
+            Ok(Some(completion(finish_reason, timing(&result.metrics))))
         }
         Err(error) => match halted {
             Some(Halt::Disconnected) => Ok(None),
             // A closed tool call halts the turn the same way a stop string
             // does, but the client needs to be told which of the two it was.
-            Some(Halt::StopString) => Ok(Some(completion(if parsed.is_empty() {
-                FinishReason::Stop
-            } else {
-                FinishReason::ToolCalls
-            }))),
+            // A halted turn has no result to read metrics from, so what the
+            // callback counted is all there is; the decode figure covers the
+            // whole turn rather than being split out.
+            Some(Halt::StopString) => Ok(Some(completion(
+                if parsed.is_empty() {
+                    FinishReason::Stop
+                } else {
+                    FinishReason::ToolCalls
+                },
+                Timing {
+                    prefill_tokens: prompt_tokens - reused,
+                    prefill: boundary_prefill,
+                    decode: generation_started
+                        .elapsed()
+                        .saturating_sub(boundary_prefill),
+                    time_to_first_token: first_token_at
+                        .map(|at| at.duration_since(generation_started) + boundary_prefill)
+                        .unwrap_or_default(),
+                    ..Timing::default()
+                },
+            ))),
             None => {
                 // A failure inside a pass can leave the session anywhere; the
                 // next request rebuilds from a boundary rather than trusting it.

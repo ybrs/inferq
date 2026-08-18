@@ -5,8 +5,18 @@ that speaks the OpenAI chat-completions API — the `openai` SDK, Aider,
 Continue, Open WebUI, `curl` — can drive this engine the way it would drive
 `llama-server`.
 
+Build it the way every other benchmark in this repository is built — for the
+host's own instruction set. A stock `cargo build --release` targets baseline
+x86-64, which on an AVX2 host halves decode and costs more than that on
+prefill; measured on an i7-8700 at six threads, the same 218-token turn ran at
+4.00 tok/s from `target/` and 8.25 tok/s from `target-native/`, token for
+token identical.
+
 ```bash
-./target/release/serve \
+CARGO_TARGET_DIR=target-native RUSTFLAGS='-C target-cpu=native' \
+  cargo build --release --bin serve
+
+./target-native/release/serve \
   --model /models/qwen3.6/Qwen_Qwen3.6-35B-A3B-Q4_K_M.gguf \
   --tokenizer-model /models/qwen3.6 \
   --host 127.0.0.1 --port 8080 \
@@ -17,6 +27,31 @@ Continue, Open WebUI, `curl` — can drive this engine the way it would drive
 The process loads the model before it binds the port, so a bad checkpoint
 fails at startup rather than on the first request. `Ctrl-C` shuts down
 gracefully, letting in-flight responses finish.
+
+Every request logs a `timings` line beside its `request complete` line, with
+prefill and decode reported separately — they are paid for differently, and one
+figure over both cannot say which half a slow request spent its time in:
+
+```
+timings prefill_tokens=11 prefill_seconds=0.661 prefill_tokens_per_second=16.6
+        decode_tokens=218 decode_seconds=26.4 decode_tokens_per_second=8.25
+        time_to_first_token_seconds=0.661 drafted_tokens=209
+        accepted_draft_tokens=142 draft_acceptance=0.679
+```
+
+`draft_acceptance` is the share of speculative draft tokens the target kept; a
+run that reports `drafted_tokens=0` is decoding without either arm.
+
+## Ending a turn
+
+A turn ends on the tokens the checkpoint calls end-of-sequence. Which those are
+is not a settled question: this checkpoint's `config.json` names
+`<|endoftext|>` while its chat template closes every assistant turn with
+`<|im_end|>`, so a server that reads only the config never stops — it runs to
+the token budget, emits the marker, and then writes both sides of the
+conversation itself. The server therefore stops on the union of
+`config.json`'s `eos_token_id` and `tokenizer_config.json`'s `eos_token`, and
+refuses to start if neither names a token the tokenizer knows.
 
 ## One sequence at a time
 

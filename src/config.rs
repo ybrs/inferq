@@ -106,6 +106,14 @@ impl EosTokenId {
             Self::Many(ids) => ids.contains(&token),
         }
     }
+
+    /// Every token this checkpoint calls an end of sequence.
+    pub fn ids(&self) -> Vec<u32> {
+        match self {
+            Self::One(id) => vec![*id],
+            Self::Many(ids) => ids.clone(),
+        }
+    }
 }
 
 impl Qwen3NextConfig {

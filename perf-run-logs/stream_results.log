@@ -1,0 +1,21 @@
+=== OMP_NUM_THREADS=1 ===
+Threads: 1, Array size: 80000000 elements (610.4 MB each)
+Function    Best Rate MB/s   Avg time     Min time     Max time
+Copy             25748.8     0.050746     0.049711     0.052748
+Scale            14347.2     0.090642     0.089216     0.093365
+Add              15599.2     0.125319     0.123083     0.129006
+Triad            15445.9     0.126421     0.124305     0.130553
+=== OMP_NUM_THREADS=3 ===
+Threads: 3, Array size: 80000000 elements (610.4 MB each)
+Function    Best Rate MB/s   Avg time     Min time     Max time
+Copy             25101.5     0.051381     0.050993     0.052334
+Scale            16515.9     0.078289     0.077501     0.079231
+Add              18061.4     0.107163     0.106304     0.111357
+Triad            18041.4     0.106992     0.106422     0.107809
+=== OMP_NUM_THREADS=6 ===
+Threads: 6, Array size: 80000000 elements (610.4 MB each)
+Function    Best Rate MB/s   Avg time     Min time     Max time
+Copy             24363.8     0.053327     0.052537     0.054505
+Scale            16531.3     0.078716     0.077429     0.080898
+Add              18367.4     0.106122     0.104533     0.108857
+Triad            18280.0     0.105748     0.105033     0.106958

@@ -1,0 +1,303 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.11s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.09s
+     Running unittests src/lib.rs (target/debug/deps/qwen_engine-8e4fc8666455f905)
+
+running 48 tests
+test config::tests::derives_three_to_one_layer_pattern ... ok
+test gguf::tests::direct_matrix_rejects_wrong_input_width ... ok
+test gguf::tests::direct_embedding_matches_dequantized_rows ... ok
+test profile::tests::parses_linux_process_fault_fields ... ok
+test profile::tests::process_delta_saturates_counters ... ok
+test profile::tests::parses_status_values_with_kib_suffix ... ok
+test qwen::attention::tests::partial_rope_preserves_unrotated_suffix ... ok
+test qwen::deltanet::tests::delta_rule_updates_and_reuses_state ... ok
+test qwen::deltanet::tests::contiguous_recurrence_matches_strided_reference ... ok
+test qwen::model::tests::accumulate_merges_matching_layers ... ok
+test qwen::model::tests::report_separates_top_level_and_nested_timings ... ok
+test qwen::moe::tests::router_selects_and_normalizes_top_k ... ok
+test qwen::quantized_attention::tests::attention_state_truncation_preserves_position_stride ... ok
+test qwen::quantized_attention::tests::converted_qk_norm_uses_weight_without_second_offset ... ok
+test qwen::quantized_deltanet::tests::flat_causal_convolution_matches_row_reference ... ok
+test config::tests::loads_nested_qwen35_moe_text_config ... ok
+test qwen::quantized_deltanet::tests::gguf_state_scale_is_already_negative_exp_a_log ... ok
+test qwen::norm::tests::qwen_rms_norm_is_one_centered ... ok
+test qwen::quantized_deltanet::tests::scratch_output_reuses_capacity_and_clears_values ... ok
+test qwen::quantized_deltanet::tests::value_head_layout_matches_grouped_and_tiled_gguf_orders ... ok
+test qwen::quantized_model::tests::accumulate_merges_layer_details ... ok
+test qwen::quantized_model::tests::report_preserves_nested_quantized_stage_timings ... ok
+test qwen::quantized_layer::tests::converted_gguf_norm_matches_one_centered_hf_norm ... ok
+test runtime::quantized_runtime_tests::mtp_hidden_inputs_shift_target_rows_by_one_position ... ok
+test qwen::tests::linear_promotes_bf16_for_cpu_matmul ... ok
+test runtime::quantized_runtime_tests::persistent_turn_evaluates_pending_generated_token_first ... ok
+test runtime::quantized_runtime_tests::accepted_speculative_drafts_stop_at_the_budget_boundary ... ok
+test runtime::quantized_runtime_tests::rejected_speculative_drafts_do_not_consume_thinking_budget ... ok
+test runtime::quantized_runtime_tests::natural_thinking_close_spanning_tokens_wins_before_budget ... ok
+test runtime::quantized_runtime_tests::stop_token_does_not_trigger_a_forced_closure ... ok
+test gguf::tests::concatenated_quantized_rows_match_separate_matrices ... ok
+test runtime::quantized_runtime_tests::thinking_budget_forces_the_complete_tokenized_closure ... ok
+test runtime::quantized_runtime_tests::thinking_budget_state_resets_for_each_repl_turn ... ok
+test gguf::tests::direct_matrix_matches_its_dequantized_reference ... ok
+test sampling::tests::greedy_is_deterministic ... ok
+test sampling::tests::seeded_sampling_is_repeatable ... ok
+test tokenizer::tests::renders_non_thinking_generation_prefix_with_closed_block ... ok
+test runtime::quantized_runtime_tests::verifier_accepts_only_the_matching_draft_prefix ... ok
+test tokenizer::tests::renders_plain_qwen_chat_turns ... ok
+test tokenizer::tests::renders_thinking_generation_prefix ... ok
+test threading::tests::parse_env_rejects_zero_and_garbage ... ok
+test threading::tests::physical_core_count_is_at_least_one ... ok
+test gguf::tests::loads_only_one_matrix_from_a_fused_expert_tensor ... ok
+test gguf::tests::fuses_resident_expert_pairs_without_changing_bytes_or_outputs ... ok
+test profile::tests::source_detection_is_best_effort ... ok
+test trace::tests::census_counts_layer_qualified_experts ... ok
+test profile::tests::build_info_has_nonzero_thread_counts ... ok
+test qwen::quantized_moe::tests::executes_real_routing_and_selected_expert_ranges ... ok
+
+test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running unittests src/bin/bench.rs (target/debug/deps/bench-e6ebe9ca7dbcb78e)
+
+running 1 test
+test tests::correctness_checks_a_prefix ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/compare.rs (target/debug/deps/compare-b13ec21ab35b68a5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/gguf_attention.rs (target/debug/deps/gguf_attention-d7d17b318da8b1eb)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/gguf_bench.rs (target/debug/deps/gguf_bench-2dcfb0050166b8ba)
+
+running 1 test
+test tests::correctness_checks_a_prefix ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/gguf_deltanet.rs (target/debug/deps/gguf_deltanet-868b208ae0a750f5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/gguf_full_layer.rs (target/debug/deps/gguf_full_layer-fb509ab8a7592d04)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/gguf_infer.rs (target/debug/deps/gguf_infer-1cebcf6d3321f706)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/gguf_layer.rs (target/debug/deps/gguf_layer-58a30f7c4fe4492d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/gguf_moe.rs (target/debug/deps/gguf_moe-e4be3cd32a79ce42)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/gguf_projection.rs (target/debug/deps/gguf_projection-b552e6b8a3215e3a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/gguf_verify_bench.rs (target/debug/deps/gguf_verify_bench-083fb729c2197e69)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/infer.rs (target/debug/deps/infer-58a360076ffa3e29)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/inspect.rs (target/debug/deps/inspect-89865df4304d03c6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/routing_trace.rs (target/debug/deps/routing_trace-e6ea20d83e825ec5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/synthetic_forward.rs (target/debug/deps/synthetic_forward-a0b20b4b3c84500d)
+
+running 1 test
+test complete_hybrid_model_prefills_and_decodes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.12s
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling libc v0.2.189
+   Compiling getrandom v0.3.4
+   Compiling zerocopy v0.8.56
+   Compiling once_cell v1.21.4
+   Compiling autocfg v1.5.1
+   Compiling libm v0.2.16
+   Compiling crossbeam-utils v0.8.22
+   Compiling bitflags v2.13.1
+   Compiling version_check v0.9.5
+   Compiling crossbeam-epoch v0.9.20
+   Compiling crossbeam-deque v0.8.7
+   Compiling serde_core v1.0.229
+   Compiling rayon-core v1.13.0
+   Compiling paste v1.0.15
+   Compiling either v1.17.0
+   Compiling memchr v2.8.3
+   Compiling pulp v0.22.3
+   Compiling raw-cpuid v11.6.0
+   Compiling serde v1.0.229
+   Compiling num-traits v0.2.19
+   Compiling reborrow v0.5.5
+   Compiling dyn-stack-macros v0.1.3
+   Compiling pulp-wasm-simd-flag v0.1.1
+   Compiling ident_case v1.0.1
+   Compiling seq-macro v0.3.6
+   Compiling strsim v0.11.1
+   Compiling fnv v1.0.7
+   Compiling find-msvc-tools v0.1.10
+   Compiling shlex v2.0.1
+   Compiling aho-corasick v1.1.5
+   Compiling cc v1.4.2
+   Compiling pkg-config v0.3.34
+   Compiling regex-syntax v0.8.11
+   Compiling zmij v1.0.23
+   Compiling syn v2.0.119
+   Compiling syn v3.0.3
+   Compiling rustversion v1.0.23
+   Compiling rand_core v0.9.5
+   Compiling serde_json v1.0.151
+   Compiling itoa v1.0.18
+   Compiling equivalent v1.0.2
+   Compiling rustix v1.1.4
+   Compiling getrandom v0.4.3
+   Compiling rayon v1.12.0
+   Compiling ahash v0.8.12
+   Compiling minimal-lexical v0.2.1
+   Compiling smallvec v1.15.2
+   Compiling onig_sys v69.9.3
+   Compiling thiserror v2.0.20
+   Compiling linux-raw-sys v0.12.1
+   Compiling log v0.4.33
+   Compiling crc32fast v1.5.0
+   Compiling esaxx-rs v0.1.10
+   Compiling nom v7.1.3
+   Compiling castaway v0.2.4
+   Compiling itertools v0.14.0
+   Compiling utf8parse v0.2.2
+   Compiling fastrand v2.5.0
+   Compiling regex-automata v0.4.18
+   Compiling stable_deref_trait v1.2.1
+   Compiling macro_rules_attribute-proc_macro v0.2.3
+   Compiling pastey v0.2.3
+   Compiling allocator-api2 v0.2.21
+   Compiling static_assertions v1.1.0
+   Compiling unicode-segmentation v1.13.3
+   Compiling base64 v0.13.1
+   Compiling hashbrown v0.17.1
+   Compiling foldhash v0.2.0
+   Compiling ryu v1.0.23
+   Compiling hashbrown v0.16.1
+   Compiling darling_core v0.20.11
+   Compiling synstructure v0.13.2
+   Compiling tempfile v3.27.0
+   Compiling rayon-cond v0.4.0
+   Compiling macro_rules_attribute v0.2.3
+   Compiling anstyle-parse v1.0.0
+   Compiling indexmap v2.14.0
+   Compiling bytemuck_derive v1.12.0
+   Compiling serde_derive v1.0.229
+   Compiling thiserror-impl v2.0.20
+   Compiling unicode-normalization-alignments v0.1.12
+   Compiling tracing-core v0.1.36
+   Compiling anstyle v1.0.14
+   Compiling unicode_categories v0.1.1
+   Compiling typed-path v0.12.3
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling colorchoice v1.0.5
+   Compiling anstyle-query v1.1.5
+   Compiling memmap2 v0.9.11
+   Compiling anstream v1.0.0
+   Compiling num_cpus v1.17.0
+   Compiling clap_lex v1.1.0
+   Compiling zerocopy-derive v0.8.56
+   Compiling zerofrom-derive v0.1.7
+   Compiling bytemuck v1.25.2
+   Compiling monostate-impl v0.1.18
+   Compiling yoke-derive v0.8.2
+   Compiling num-complex v0.4.6
+   Compiling dyn-stack v0.13.2
+   Compiling monostate v0.1.18
+   Compiling tracing-attributes v0.1.31
+   Compiling regex v1.13.1
+   Compiling heck v0.5.0
+   Compiling zip v8.6.0
+   Compiling darling_macro v0.20.11
+   Compiling byteorder v1.5.0
+   Compiling zerofrom v0.1.8
+   Compiling yoke v0.8.3
+   Compiling lazy_static v1.5.0
+   Compiling darling v0.20.11
+   Compiling derive_builder_core v0.20.2
+   Compiling pin-project-lite v0.2.17
+   Compiling anyhow v1.0.104
+   Compiling sharded-slab v0.1.7
+   Compiling tracing v0.1.44
+   Compiling clap_builder v4.6.6
+   Compiling clap_derive v4.6.4
+   Compiling matchers v0.2.0
+   Compiling tracing-log v0.2.0
+   Compiling thread_local v1.1.10
+   Compiling nu-ansi-term v0.50.3
+   Compiling derive_builder_macro v0.20.2
+   Compiling tracing-subscriber v0.3.23
+   Compiling derive_builder v0.20.2
+   Compiling spm_precompiled v0.1.4
+   Compiling compact_str v0.9.1
+   Compiling dary_heap v0.3.9
+   Compiling safetensors v0.8.0
+   Compiling clap v4.6.6
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.9.5
+   Compiling rand_distr v0.5.1
+   Compiling half v2.7.1
+   Compiling onig v6.5.3
+   Compiling gemm-common v0.19.0
+   Compiling float8 v0.7.0
+   Compiling tokenizers v0.22.2
+   Compiling gemm-f32 v0.19.0
+   Compiling gemm-c32 v0.19.0
+   Compiling gemm-f64 v0.19.0
+   Compiling gemm-c64 v0.19.0
+   Compiling gemm-f16 v0.19.0
+   Compiling gemm v0.19.0
+   Compiling candle-core v0.11.0
+   Compiling candle-nn v0.11.0
+   Compiling qwen-engine v0.1.0 (/workspace)
+    Finished `release` profile [optimized] target(s) in 3m 10s
+EXIT: 0

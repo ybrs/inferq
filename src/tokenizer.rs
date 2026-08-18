@@ -9,6 +9,13 @@ pub struct ModelTokenizer {
     tokenizer: Tokenizer,
     chat_template: Option<String>,
     thinking_generation_prompt: bool,
+    /// The token the tokenizer's own config calls the end of a turn.
+    ///
+    /// `config.json` is where a generation loop normally reads this, but not
+    /// every published checkpoint fills in `eos_token_id` — Qwen3.6-35B-A3B
+    /// does not — and a turn that never ends is not a turn. The tokenizer's
+    /// config names it in either release, so it is read here too.
+    eos_token: Option<u32>,
 }
 
 impl ModelTokenizer {
@@ -18,19 +25,32 @@ impl ModelTokenizer {
             .map_err(|e| anyhow::anyhow!(e.to_string()))
             .with_context(|| format!("failed to load tokenizer {}", path.display()))?;
         let config_path = model_dir.as_ref().join("tokenizer_config.json");
-        let chat_template = if config_path.exists() {
-            let bytes = fs::read(&config_path).with_context(|| {
-                format!("failed to read tokenizer config {}", config_path.display())
-            })?;
-            let config: Value = serde_json::from_slice(&bytes)
-                .with_context(|| format!("invalid tokenizer config {}", config_path.display()))?;
-            config
-                .get("chat_template")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-        } else {
-            None
-        };
+        let config: Option<Value> =
+            if config_path.exists() {
+                let bytes = fs::read(&config_path).with_context(|| {
+                    format!("failed to read tokenizer config {}", config_path.display())
+                })?;
+                Some(serde_json::from_slice(&bytes).with_context(|| {
+                    format!("invalid tokenizer config {}", config_path.display())
+                })?)
+            } else {
+                None
+            };
+        let chat_template = config
+            .as_ref()
+            .and_then(|config| config.get("chat_template"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        // `eos_token` is a string in every Qwen release; a checkpoint that
+        // spells it as an object carries the text under `content`.
+        let eos_token = config
+            .as_ref()
+            .and_then(|config| config.get("eos_token"))
+            .and_then(|eos| {
+                eos.as_str()
+                    .or_else(|| eos.get("content").and_then(Value::as_str))
+            })
+            .and_then(|eos| tokenizer.token_to_id(eos));
         let thinking_generation_prompt = chat_template.as_deref().is_some_and(|template| {
             template.contains("enable_thinking") && template.contains("<think>")
         });
@@ -38,7 +58,14 @@ impl ModelTokenizer {
             tokenizer,
             chat_template,
             thinking_generation_prompt,
+            eos_token,
         })
+    }
+
+    /// The end-of-turn token named by `tokenizer_config.json`, if it names one
+    /// this tokenizer knows.
+    pub fn eos_token(&self) -> Option<u32> {
+        self.eos_token
     }
 
     pub fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>> {

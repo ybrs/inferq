@@ -1,0 +1,20 @@
+model loaded in 1.774s (fnv1a64:c9cb348f1d86017c, BF16+F32+Q4K+Q5K+Q6K+Q8_0)
+starting full expert warmup in GGUF file order; Ctrl-C cancels
+full expert warmup complete (PinnedExpertCache): 19.0 GiB in 12.589s (1542.3 MiB/s), 0.0 GiB physical reads; 19.0 GiB resident in 20992 cache entries
+```rust
+/// Parses a semver string into (major, minor, patch) tuple.
+/// 
+/// # Examples
+/// 
+/// ```
+/// let (major, minor, patch) = parse_semver("1.2.3").unwrap();
+/// assert_eq!((major, minor, patch), (1, 2, 3));
+/// ```
+pub fn parse_semver(s: &str) -> Result<(u32, u32, u32), String> {
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len()
+prompt token ids: [248045, 846, 198, 7734, 264, 32671, 709, 421, 68434, 264, 5067, 415, 886, 1083, 318, 35299, 11, 8652, 11, 10582, 8, 440, 4821, 6813, 13, 248046, 198, 248045, 74455, 198, 248068, 271, 248069, 271]
+generated token ids: [71093, 34602, 198, 2490, 70932, 264, 5067, 415, 886, 1083, 318, 35299, 11, 8652, 11, 10582, 8, 13992, 13, 198, 2490, 695, 2490, 653, 24508, 198, 2490, 695, 2490, 52451, 198, 2490, 1042, 318, 35299, 11, 8652, 11, 10582, 8, 283, 4563, 29450, 415, 437, 16, 13, 17, 13, 18, 1764, 15000, 2061, 198, 2490, 1992, 10398, 0, 1148, 35299, 11, 8652, 11, 10582, 681, 318, 16, 11, 220, 17, 11, 220, 18, 5722, 198, 2490, 52451, 198, 9299, 5003, 4563, 29450, 415, 1104, 25, 594, 485, 8, 1411, 5536, 27767, 84, 18, 17, 11, 560, 18, 17, 11, 560, 18, 17, 681, 894, 29, 313, 198, 262, 1042, 5306, 25, 10985, 50490, 485, 29, 283, 274, 5121, 4151, 1760, 16873, 2061, 198, 262, 413, 5306, 18817, 363]
+input: 34 tokens evaluated in 2.520s (13.49 tok/s); decode: 127 passes in 16.047s (7.91 tok/s); context: 162 tokens
+expert cache: 88038/88038 hits (100.0%); loaded 0.0 MiB of GGUF ranges; resident 19416.0/24000.0 MiB in 20992 entries (fully resident: true); 0 evictions
+process: physical reads 0.0 MiB; faults 48994 minor / 0 major; RSS 21545.6 MiB, peak 21574.7 MiB
