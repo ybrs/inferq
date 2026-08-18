@@ -242,6 +242,38 @@ The fix is to make M=1 take the same path as M>=2 so equivalence becomes exact.
 It changes target-only numerics too, so it needs its own re-baseline, and it is
 tracked separately rather than smuggled in here.
 
+## The verification row is at the memory floor
+
+Measured with `gguf_verify_bench` while closing the expert-batching task, and
+it settles the question of where the remaining headroom is.
+
+Expert weights are 498.0 MiB per layer across 256 experts. Per verification
+pass, counting only the experts actually selected:
+
+| K | routed gate/up + down | ms/row | unique experts | bytes | GB/s | duplicate rate | rows/expert |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 36.2 ms | 36.2 | 320 | 622 MiB | **18.03** | 0.0% | 1.00 |
+| 2 | 59.6 ms | 29.8 | 504 | 980 MiB | 17.24 | 21.2% | 1.28 |
+| 4 | 107.5 ms | 26.9 | 862 | 1,677 MiB | 16.36 | 32.7% | 1.52 |
+| 8 | 183.1 ms | 22.9 | 1,277 | 2,484 MiB | 14.23 | 50.1% | 2.08 |
+| 16 | 335.3 ms | 21.0 | 2,225 | 4,328 MiB | 13.54 | 56.5% | 2.38 |
+
+Against a host that measures 15.599 GB/s on STREAM Triad. Triad is two reads
+and a write, so it understates a pure read stream — which is why the ratio
+exceeds 100% and why the practical read ceiling is at least the 18.03 GB/s
+observed at K=1. **The stage is sitting on the memory floor.**
+
+The duplicate expert loads that an expert-side batching pass would have removed
+are already gone: 16x the rows touch only 7x the bytes, because the expert-major
+path serves all 56.5% of duplicate assignments from a single load.
+
+So the ~0.55 verification-row-to-decode-step ratio is a property of this MoE on
+this machine, not an implementation gap, and the "biggest remaining lever"
+estimate in `policy-report-702d043633e0.md` — a 30% row-cost cut worth more than
+the other two levers combined — is retired. **Further speculative gains have to
+come from fewer rows, not cheaper ones**: better drafting, higher acceptance,
+cheaper drafts. Which is what the two changes in this report did.
+
 ## Deviations and notes
 
 1. **The gate is on by default** at 0.70, including in single-arm `mtp` mode.

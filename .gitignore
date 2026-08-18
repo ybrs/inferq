@@ -15,3 +15,5 @@ draft-run-logs/*.log
 draft-run-logs/*.summary
 kernel-run-logs/*.json
 kernel-run-logs/*.log
+expert-run-logs/*.json
+expert-run-logs/*.log
