@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, ensure};
 use candle_core::{DType, Tensor};
+use rayon::prelude::*;
 
 use crate::{GgufCheckpoint, QuantizedMatrix, Qwen3NextConfig};
 
@@ -292,39 +293,61 @@ impl QuantizedAttentionLayer {
         let attention_started = Instant::now();
         let groups = self.query_heads / self.kv_heads;
         let scale = (self.head_dim as f32).sqrt().recip();
-        let mut result = vec![0.; seq * self.query_heads * self.head_dim];
-        for token in 0..seq {
-            let attend_to = existing + token + 1;
-            for head in 0..self.query_heads {
+        let (head_dim, query_heads, kv_heads) = (self.head_dim, self.query_heads, self.kv_heads);
+        let mut result = vec![0.; seq * query_heads * head_dim];
+        // One `(token, head)` output row is an independent piece of work: it
+        // reads the shared cache and writes only its own `head_dim` floats.
+        // Splitting there rather than inside a row is what keeps this exact:
+        // every reduction still runs in the order it ran in serially, so the
+        // heads occupy separate cores without moving a single last bit.
+        //
+        // The scan is the one part of a decode pass that grows with the
+        // conversation — at three thousand context tokens it is most of the
+        // pass — so it is also the one part worth the threads.
+        let (keys, values) = (&state.keys, &state.values);
+        result
+            .par_chunks_mut(head_dim)
+            .enumerate()
+            .for_each(|(row, out)| {
+                let (token, head) = (row / query_heads, row % query_heads);
                 let kv_head = head / groups;
+                let attend_to = existing + token + 1;
+                let query = &queries[token][head];
                 let mut scores = Vec::with_capacity(attend_to);
                 for past in 0..attend_to {
-                    let base = (past * self.kv_heads + kv_head) * self.head_dim;
+                    let base = (past * kv_heads + kv_head) * head_dim;
                     scores.push(
-                        queries[token][head]
+                        query
                             .iter()
-                            .zip(&state.keys[base..base + self.head_dim])
+                            .zip(&keys[base..base + head_dim])
                             .map(|(query, key)| query * key)
                             .sum::<f32>()
                             * scale,
                     );
                 }
                 let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                let denominator: f32 = scores.iter().map(|score| (*score - max).exp()).sum();
-                let output_base = (token * self.query_heads + head) * self.head_dim;
-                for (past, score) in scores.into_iter().enumerate() {
-                    let probability = (score - max).exp() / denominator;
-                    let value_base = (past * self.kv_heads + kv_head) * self.head_dim;
-                    for dimension in 0..self.head_dim {
-                        result[output_base + dimension] +=
-                            probability * state.values[value_base + dimension];
+                // Every score's exponential is needed twice, once for the
+                // denominator and once for its own weight. Keeping the first
+                // one halves the transcendental calls and returns the same
+                // float, where recomputing it merely spends the call again.
+                let mut denominator = 0.;
+                for score in scores.iter_mut() {
+                    *score = (*score - max).exp();
+                    denominator += *score;
+                }
+                for (past, weight) in scores.iter().enumerate() {
+                    // A division, not a multiply by the reciprocal: those two
+                    // do not round alike, and this path is the exact one.
+                    let probability = *weight / denominator;
+                    let base = (past * kv_heads + kv_head) * head_dim;
+                    for (out, value) in out.iter_mut().zip(&values[base..base + head_dim]) {
+                        *out += probability * value;
                     }
                 }
-                for dimension in 0..self.head_dim {
-                    result[output_base + dimension] *= sigmoid(gates[token][head][dimension]);
+                for (out, gate) in out.iter_mut().zip(&gates[token][head]) {
+                    *out *= sigmoid(*gate);
                 }
-            }
-        }
+            });
         timings.attention = attention_started.elapsed();
         let output_started = Instant::now();
         let result =
