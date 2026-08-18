@@ -116,6 +116,12 @@ pub struct QuantizedAttentionTimings {
     pub projections: Duration,
     pub norm_rope: Duration,
     pub attention: Duration,
+    /// The three parts of the scan, so the one that grows with the
+    /// conversation can be attributed to an operation rather than a stage.
+    /// Summed across threads, so they exceed `attention` by the thread count.
+    pub scores: Duration,
+    pub softmax: Duration,
+    pub weighted_sum: Duration,
     pub output_projection: Duration,
 }
 
@@ -125,6 +131,9 @@ impl QuantizedAttentionTimings {
         self.projections += other.projections;
         self.norm_rope += other.norm_rope;
         self.attention += other.attention;
+        self.scores += other.scores;
+        self.softmax += other.softmax;
+        self.weighted_sum += other.weighted_sum;
         self.output_projection += other.output_projection;
     }
 }
@@ -305,14 +314,15 @@ impl QuantizedAttentionLayer {
         // conversation — at three thousand context tokens it is most of the
         // pass — so it is also the one part worth the threads.
         let (keys, values) = (&state.keys, &state.values);
-        result
+        let (scores_time, softmax_time, weighted_time) = result
             .par_chunks_mut(head_dim)
             .enumerate()
-            .for_each(|(row, out)| {
+            .map(|(row, out)| {
                 let (token, head) = (row / query_heads, row % query_heads);
                 let kv_head = head / groups;
                 let attend_to = existing + token + 1;
                 let query = &queries[token][head];
+                let scores_started = Instant::now();
                 let mut scores = Vec::with_capacity(attend_to);
                 for past in 0..attend_to {
                     let base = (past * kv_heads + kv_head) * head_dim;
@@ -325,6 +335,8 @@ impl QuantizedAttentionLayer {
                             * scale,
                     );
                 }
+                let scores_elapsed = scores_started.elapsed();
+                let softmax_started = Instant::now();
                 let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
                 // Every score's exponential is needed twice, once for the
                 // denominator and once for its own weight. Keeping the first
@@ -335,6 +347,8 @@ impl QuantizedAttentionLayer {
                     *score = (*score - max).exp();
                     denominator += *score;
                 }
+                let softmax_elapsed = softmax_started.elapsed();
+                let weighted_started = Instant::now();
                 for (past, weight) in scores.iter().enumerate() {
                     // A division, not a multiply by the reciprocal: those two
                     // do not round alike, and this path is the exact one.
@@ -347,8 +361,16 @@ impl QuantizedAttentionLayer {
                 for (out, gate) in out.iter_mut().zip(&gates[token][head]) {
                     *out *= sigmoid(*gate);
                 }
-            });
+                (scores_elapsed, softmax_elapsed, weighted_started.elapsed())
+            })
+            .reduce(
+                || (Duration::ZERO, Duration::ZERO, Duration::ZERO),
+                |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2),
+            );
         timings.attention = attention_started.elapsed();
+        timings.scores = scores_time;
+        timings.softmax = softmax_time;
+        timings.weighted_sum = weighted_time;
         let output_started = Instant::now();
         let result =
             Tensor::from_vec(result, (seq, self.query_heads * self.head_dim), xs.device())?;

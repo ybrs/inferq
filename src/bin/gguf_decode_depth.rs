@@ -67,7 +67,10 @@ fn main() -> Result<()> {
         tokens.len()
     );
 
-    println!("depth,prefill_tok_s,decode_tok_s,attn_scan_s,attn_other_s,linear_s,moe_s,lm_head_s");
+    println!(
+        "depth,prefill_tok_s,decode_tok_s,attn_scan_s,scores_s,softmax_s,weighted_s,\
+         attn_other_s,linear_s,moe_s,lm_head_s"
+    );
     for depth in &args.depths {
         let depth = *depth;
         // Speculation off: this measures what the target itself costs, which
@@ -89,17 +92,26 @@ fn main() -> Result<()> {
         let metrics = &result.metrics;
         let profile = &metrics.decode_profile;
         let (mut scan, mut other, mut linear, mut moe) = (0., 0., 0., 0.);
+        // The three parts are summed across threads, so they are reported as a
+        // share of their own total rather than of the wall clock.
+        let (mut scores, mut softmax, mut weighted) = (0., 0., 0.);
         for layer in &profile.layer_details {
             scan += layer.attention.attention.as_secs_f64();
             other += (layer.attention.wall - layer.attention.attention).as_secs_f64();
             linear += layer.delta.wall.as_secs_f64();
             moe += layer.moe.wall.as_secs_f64();
+            scores += layer.attention.scores.as_secs_f64();
+            softmax += layer.attention.softmax.as_secs_f64();
+            weighted += layer.attention.weighted_sum.as_secs_f64();
         }
         println!(
-            "{depth},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
+            "{depth},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
             depth as f64 / prefill,
             metrics.generated_tokens as f64 / metrics.decode_wall_time.as_secs_f64(),
             scan,
+            scores,
+            softmax,
+            weighted,
             other,
             linear,
             moe,
