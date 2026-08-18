@@ -346,10 +346,30 @@ fn repeated_target_only_decoding_is_reproducible_in_one_process() -> Result<()> 
 /// evaluates row `r` from exactly the prefix a sequential decode would have fed
 /// it, so accepting a draft commits the token the target would have produced on
 /// its own. If widening a pass perturbs the arithmetic, that equality holds only
-/// up to floating-point noise, and a near-tie in the argmax can flip — which
-/// would make greedy equivalence probabilistic rather than guaranteed.
+/// What a multi-row pass does and does not guarantee against single-row decoding.
+///
+/// This is the assumption every speculative mode rests on. A verification pass
+/// evaluates row `r` from exactly the prefix a sequential decode would have fed
+/// it, so accepting a draft commits the token the target would have produced on
+/// its own. If widening a pass perturbed the arithmetic, that equality would
+/// hold only up to floating-point noise and a near-tie in the argmax could
+/// flip, making greedy equivalence probabilistic rather than guaranteed.
+///
+/// It *is* probabilistic today, and this test records the size of the gap
+/// rather than pretending otherwise. Dispatch sends M=1 to Candle's kernel and
+/// M>=2 to the fused one. On the LM head those agree to 4.77e-7 — about four
+/// ULP, a summation-order difference — but forty layers of feedback amplify it:
+/// every one of the 248,320 logits differs, by up to 1.28 against a tightest
+/// observed top1/top2 margin of 0.25.
+///
+/// Unifying the dispatch does make it exact, and was verified to; it costs
+/// ~20% of unspeculated decode because the fused kernel's advantage is reusing
+/// a decoded weight block across M input rows and at M=1 there is nothing to
+/// reuse. See the task tracking a bit-exact fused kernel, which would give
+/// exactness at no cost. Until then this asserts the property that does hold:
+/// the argmax is stable across widths on this sample.
 #[test]
-fn batching_perturbs_logits_but_not_the_greedy_choice() -> Result<()> {
+fn a_multi_row_pass_agrees_with_single_row_decoding_on_the_greedy_choice() -> Result<()> {
     let Some(test) = checkpoint() else {
         return Ok(());
     };
@@ -358,8 +378,7 @@ fn batching_perturbs_logits_but_not_the_greedy_choice() -> Result<()> {
     let model = qwen_engine::qwen::QuantizedModel::load(&test.checkpoint, config)?;
     let prompt: [u32; 8] = [8160, 579, 264, 7047, 1817, 25, 271, 16];
 
-    // Decode a reference sequence one row at a time, then re-evaluate the same
-    // positions as row 0 of progressively wider passes.
+    // Decode a reference sequence one row at a time.
     let mut sequential = model.new_state();
     model.forward_detailed(&prompt, &mut sequential)?;
     let mut pending = 16u32;
@@ -375,42 +394,40 @@ fn batching_perturbs_logits_but_not_the_greedy_choice() -> Result<()> {
 
     let mut worst_delta = 0f32;
     let mut tightest_margin = f32::MAX;
-    let mut flips = 0;
+    let mut mismatched = 0usize;
+    // Re-evaluate the same positions as rows of progressively wider passes.
     for width in [2usize, 4, 8] {
         let mut state = model.new_state();
         model.forward_detailed(&prompt, &mut state)?;
         let wide = model.forward_detailed(&follow[..width], &mut state)?;
         for (row, single) in singles.iter().enumerate().take(width) {
             let batched = wide.logits.i(row)?.to_vec1::<f32>()?;
-            let delta = single
+            let mismatches = single
+                .iter()
+                .zip(&batched)
+                .filter(|(a, b)| a.to_bits() != b.to_bits())
+                .count();
+            let worst = single
                 .iter()
                 .zip(&batched)
                 .map(|(a, b)| (a - b).abs())
                 .fold(0f32, f32::max);
+            worst_delta = worst_delta.max(worst);
+            mismatched += mismatches;
             let mut sorted = batched.clone();
             sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-            let margin = sorted[0] - sorted[1];
-            worst_delta = worst_delta.max(delta);
-            tightest_margin = tightest_margin.min(margin);
-            if qwen_engine::sampling::argmax(single.as_slice())?
-                != qwen_engine::sampling::argmax(&batched)?
-            {
-                flips += 1;
-            }
+            tightest_margin = tightest_margin.min(sorted[0] - sorted[1]);
+            assert_eq!(
+                qwen_engine::sampling::argmax(single.as_slice())?,
+                qwen_engine::sampling::argmax(&batched)?,
+                "row {row} of a {width}-row pass chose a different token than the \
+                 one-row pass; |delta| up to {worst:e}"
+            );
         }
     }
     eprintln!(
-        "batching vs single-row: worst |delta| {worst_delta:e}, tightest top1-top2 margin \
-         {tightest_margin:e}, argmax flips {flips}"
-    );
-    // The perturbation is real and large — the multi-row path quantises its
-    // input rows where the one-row path does not — so this asserts the property
-    // that actually matters, and records that it is a margin question rather
-    // than an exactness one.
-    assert_eq!(
-        flips, 0,
-        "batching changed a greedy choice: worst |delta| {worst_delta:e} against a \
-         tightest margin of {tightest_margin:e}"
+        "batching vs single-row: {mismatched} logits differ, worst |delta| \
+         {worst_delta:e}, tightest top1/top2 margin {tightest_margin:e}"
     );
     Ok(())
 }
