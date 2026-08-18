@@ -83,11 +83,23 @@ must remain small and offline.
 
 - Do not commit model weights, generated logits, routing traces, benchmark
   output, or other large artifacts.
-- Do not add GPU, batching, custom SIMD, or broad architecture support during
-  Phase 1 unless the task explicitly changes scope. An OpenAI-compatible server
-  is now in scope (`src/server/`, `docs/openai-server.md`), but it stays a
-  queue in front of one sequence: no batching, no concurrent decoding, and no
-  model execution inside the server module.
+- Do not add GPU, batching, or broad architecture support unless the task
+  explicitly changes scope. An OpenAI-compatible server is in scope
+  (`src/server/`, `docs/openai-server.md`), but it stays a queue in front of
+  one sequence: no batching, no concurrent decoding, and no model execution
+  inside the server module.
+- Hand-written SIMD is in scope now that Phase 1 is behind us. Prefer the
+  shape that lets the compiler vectorize — independent lane accumulators over
+  `chunks_exact`, contiguous slices rather than indexed access — and reach for
+  `core::arch` intrinsics only when a measurement says the safe form left
+  something on the table. Either way the claim is the measurement, not the
+  instruction count: record the before and after on the same host.
+- Vectorizing a reduction reorders its summation, so it moves the last bits
+  and can move a token. That is allowed, but it is a numerical change and not
+  a free one: say so in the commit, and show that the paths which must agree
+  with each other still do — speculative decoding against plain decode above
+  all, since it is defined as producing the same tokens. What must never
+  change silently is the agreement between paths; the absolute output may.
 - Reusing cached state is an optimization, never a semantic change. A restored
   prefix must decode exactly like the same prefix prefilled in place, and an
   entry that cannot be proven to belong to the loaded checkpoint and the exact

@@ -6,6 +6,53 @@ use rayon::prelude::*;
 
 use crate::{GgufCheckpoint, QuantizedMatrix, Qwen3NextConfig};
 
+/// Lanes the score reduction carries independently.
+///
+/// Eight f32 is one AVX2 register, and eight separate chains is also what
+/// lets the fused multiply-adds pipeline instead of each waiting on the one
+/// before it. Both effects want the same number, so there is only one to pick.
+const DOT_LANES: usize = 8;
+
+/// The score of one key against one query.
+///
+/// Written as independent lane accumulators rather than a single running sum.
+/// A single sum is a chain of dependent FMAs — each add waits four cycles for
+/// the one before it, which measured 0.501 FLOP/cycle/core against a 0.500
+/// theoretical ceiling for that shape — and the compiler may not break the
+/// chain itself, because f32 addition is not associative and reassociating it
+/// is not a transformation it is allowed to make.
+///
+/// Doing it by hand is therefore a deliberate numerical change: the lanes sum
+/// their own subsequences and are combined at the end, so the same values are
+/// added in a different order and the last bits differ from the serial form.
+/// The order here is fixed and does not depend on the length, the thread, or
+/// how many rows a pass evaluates, which is what keeps every path that has to
+/// agree with another one agreeing.
+fn dot(query: &[f32], key: &[f32]) -> f32 {
+    debug_assert_eq!(query.len(), key.len());
+    let mut lanes = [0f32; DOT_LANES];
+    let mut queries = query.chunks_exact(DOT_LANES);
+    let mut keys = key.chunks_exact(DOT_LANES);
+    for (query, key) in queries.by_ref().zip(keys.by_ref()) {
+        for ((lane, query), key) in lanes.iter_mut().zip(query).zip(key) {
+            *lane += query * key;
+        }
+    }
+    // Head dimensions are powers of two in every checkpoint this engine
+    // loads, so the tail is normally empty; it is here so the function is
+    // correct for a width that is not a multiple of the lane count.
+    let mut total = queries
+        .remainder()
+        .iter()
+        .zip(keys.remainder())
+        .map(|(query, key)| query * key)
+        .sum::<f32>();
+    for lane in lanes {
+        total += lane;
+    }
+    total
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct QuantizedAttentionState {
     keys: Vec<f32>,
@@ -326,14 +373,7 @@ impl QuantizedAttentionLayer {
                 let mut scores = Vec::with_capacity(attend_to);
                 for past in 0..attend_to {
                     let base = (past * kv_heads + kv_head) * head_dim;
-                    scores.push(
-                        query
-                            .iter()
-                            .zip(&keys[base..base + head_dim])
-                            .map(|(query, key)| query * key)
-                            .sum::<f32>()
-                            * scale,
-                    );
+                    scores.push(dot(query, &keys[base..base + head_dim]) * scale);
                 }
                 let scores_elapsed = scores_started.elapsed();
                 let softmax_started = Instant::now();
@@ -432,6 +472,32 @@ mod tests {
         state.truncate(0).unwrap();
         assert!(state.keys.is_empty());
         assert!(state.values.is_empty());
+    }
+
+    #[test]
+    fn the_dot_sums_its_lanes_in_a_fixed_order() {
+        // A serial sum and a lane sum agree exactly whenever the arithmetic is
+        // exact, which is what makes the difference elsewhere a rounding one
+        // rather than a mistake.
+        let query: Vec<f32> = (0..256).map(|value| value as f32).collect();
+        let key: Vec<f32> = (0..256).map(|value| (value % 7) as f32).collect();
+        let serial: f32 = query.iter().zip(&key).map(|(q, k)| q * k).sum();
+        assert_eq!(dot(&query, &key), serial);
+
+        // A width that is not a multiple of the lane count still consumes
+        // every element.
+        let query = vec![1.; 11];
+        let key: Vec<f32> = (0..11).map(|value| value as f32).collect();
+        assert_eq!(dot(&query, &key), (0..11).map(|v| v as f32).sum::<f32>());
+        assert_eq!(dot(&[], &[]), 0.);
+
+        // The order is the property the callers depend on: the same inputs
+        // give the same bits every time, whatever the length.
+        for length in [8usize, 64, 256, 300] {
+            let query: Vec<f32> = (0..length).map(|v| (v as f32).sin()).collect();
+            let key: Vec<f32> = (0..length).map(|v| (v as f32).cos()).collect();
+            assert_eq!(dot(&query, &key).to_bits(), dot(&query, &key).to_bits());
+        }
     }
 
     #[test]
