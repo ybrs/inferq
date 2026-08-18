@@ -69,6 +69,45 @@ fn decode_in_two_passes(
         .generated_token_ids)
 }
 
+/// The other half of the chain the two tests below rely on.
+///
+/// They compare a restored session against a *chunked* prefill, so both sides
+/// share the boundary and neither would notice if chunking itself moved the
+/// output. Splitting a prefill is not bit-for-bit the same computation as
+/// running it in one pass — the batched reductions differ in their last bits,
+/// as they do for any chunked prefill — so this asserts the property that
+/// actually matters to a client: that the difference stays below the token
+/// the model commits to.
+///
+/// A failure here is not automatically a defect. It means the documented
+/// last-bits caveat reached an argmax on this host, prompt and thread count;
+/// `docs/prompt-cache.md` explains why that is possible. It is worth
+/// investigating before it is dismissed.
+#[test]
+fn a_chunked_prefill_decodes_like_a_single_pass() -> Result<()> {
+    let Some(fixture) = fixture() else {
+        return Ok(());
+    };
+    let mut runtime = QuantizedRuntime::load(&fixture.checkpoint, &fixture.model_dir)?;
+    let tokens = runtime.tokenizer().encode(PROMPT, false)?;
+    assert!(tokens.len() > BOUNDARY, "the test prompt is too short");
+
+    for mode in [SpeculativeMode::Off, SpeculativeMode::Auto] {
+        let options = options(mode);
+        runtime.reset();
+        let single = runtime
+            .generate_tokens_with_callback(&tokens, &options, |_| Ok(()))?
+            .generated_token_ids;
+        let chunked = decode_in_two_passes(&mut runtime, &tokens, &options)?;
+        assert_eq!(
+            chunked, single,
+            "mode {mode:?}: splitting the prefill at {BOUNDARY} changed the output"
+        );
+        assert_eq!(single.len(), NEW_TOKENS);
+    }
+    Ok(())
+}
+
 #[test]
 fn a_restored_prefix_decodes_exactly_like_an_uninterrupted_one() -> Result<()> {
     let Some(fixture) = fixture() else {

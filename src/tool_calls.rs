@@ -78,16 +78,23 @@ pub fn parse(text: &str) -> (String, Vec<ParsedToolCall>) {
     let mut rest = &text[first..];
     while let Some(start) = rest.find(CALL_OPEN) {
         let body = &rest[start + CALL_OPEN.len()..];
-        let Some(call) = parse_call(body) else {
+        // A block ends at its own close tag. Parsing past it would let a block
+        // that carries no function of its own adopt the next one's, and then
+        // the scan would read that same function again from its real block.
+        // A truncated final block has no close tag and simply runs to the end.
+        let (block, after) = match body.find(CALL_CLOSE) {
+            Some(end) => (&body[..end], Some(&body[end + CALL_CLOSE.len()..])),
+            None => (body, None),
+        };
+        // A block that parses to nothing is skipped rather than ending the
+        // scan: the blocks after it are still the model's own calls.
+        if let Some(call) = parse_call(block) {
+            calls.push(call);
+        }
+        let Some(remainder) = after else {
             break;
         };
-        calls.push(call);
-        // Continue after this block's close tag when it has one; a truncated
-        // final block simply ends the scan.
-        match body.find(CALL_CLOSE) {
-            Some(end) => rest = &body[end + CALL_CLOSE.len()..],
-            None => break,
-        }
+        rest = remainder;
     }
     if calls.is_empty() {
         return (text.to_owned(), calls);
@@ -230,6 +237,35 @@ mod tests {
             content.contains("<tool_call>"),
             "the text is returned as-is"
         );
+    }
+
+    #[test]
+    fn a_block_never_adopts_the_next_blocks_function() {
+        // Regression: the scan used to look for `<function=` past the first
+        // block's own `</tool_call>`, so the empty block took the second
+        // block's call and the second block then reported it again.
+        let text = "<tool_call>\n</tool_call>\n\
+                    <tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n\
+                    </function>\n</tool_call>";
+        let (_, calls) = parse(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "a");
+        assert_eq!(calls[0].parameters, vec![("x".to_owned(), "1".to_owned())]);
+
+        // The same block with text in it, and with a well-formed call ahead of
+        // the malformed one rather than behind it.
+        let (_, calls) = parse(
+            "<tool_call>\nnot a call\n</tool_call>\n\
+             <tool_call>\n<function=b>\n</function>\n</tool_call>",
+        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "b");
+        let (_, calls) = parse(
+            "<tool_call>\n<function=a>\n</function>\n</tool_call>\n\
+             <tool_call>\nnothing here\n</tool_call>",
+        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "a");
     }
 
     #[test]
