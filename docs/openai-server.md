@@ -63,24 +63,43 @@ per depth:
 The scan was until recently the whole story at depth: it ran on one core, and
 at 3072 context it was 3.38 s of a 5.36 s pass — 63% of decode, against 2.6%
 at 64 tokens. Every other stage was flat across the range, so a long request
-was not slow in general, it was slow in one loop. Splitting that loop across
-the heads, which are independent, took it to 0.61 s and decode at 3072 from
-2.97 to 6.14 tok/s. The full comparison, same host and same tokens:
+was not slow in general, it was slow in one loop. Two changes fixed that, in
+the order the measurements asked for.
 
-| context | before | after | decode | scan |
+First the loop was split across the heads, which are independent. That is an
+arithmetic identity — every reduction still runs in its original order — so it
+cost nothing in output and took decode at 3072 from 2.97 to 6.14 tok/s.
+
+Splitting the scan into its three operations then said where the rest was: the
+QK dot was 73% of the scan's CPU time, the weighted sum 26%, the softmax 1%.
+The dot was a chain of dependent FMAs, since `f32` addition is not associative
+and a compiler may not reassociate the reduction; measured 0.501 FLOP/cycle
+per core against 0.500 for exactly that shape. Giving it eight independent
+lane accumulators broke the chain and let it vectorise, for 2.5x on the dot
+and decode at 3072 from 6.14 to 7.06 tok/s.
+
+| context | original | +threads | +lanes | overall |
 | ---: | ---: | ---: | ---: | ---: |
-| 64 | 6.72 | 7.95 | 1.18x | 2.5x |
-| 512 | 6.56 | 7.44 | 1.13x | 3.8x |
-| 1024 | 5.53 | 7.40 | 1.34x | 4.7x |
-| 2048 | 3.92 | 6.72 | 1.71x | 5.4x |
-| 3072 | 2.97 | 6.14 | **2.07x** | **5.5x** |
+| 1024 | 5.53 | 7.40 | 7.80 | 1.41x |
+| 3072 | 2.97 | 6.14 | 7.06 | **2.38x** |
 
-Prefill gains the same way — 6.02 to 11.67 tok/s at 3072, since a prefill pass
+Prefill gains the same way — 6.02 to 13.13 tok/s at 3072, since a prefill pass
 is the same scan over more rows.
 
-The scan is still the one term that grows with the conversation, now 24% of a
-pass at 3072 rather than 63%, so it remains the thing to watch as context
-grows further. What it is not any more is the reason a long request is slow.
+The lane accumulators reorder the summation, so this one is a numerical change
+rather than an identity: the last bits move and a token could follow. On this
+host it did not. Plain decode and the speculative policy agree token for token,
+a two-thread run agrees with a six-thread one, and 128 tokens at 3072 context
+are identical to what the serial reduction produced. The property that must
+hold is the agreement between paths, and it does.
+
+The scan is now 15% of a pass at 3072 rather than 63%, and the dot has stopped
+being latency-bound: at 1.13 FLOP/cycle per core it is close to the weighted
+sum's 1.30, which suggests both are now waiting on cache bandwidth for the KV
+rows. The next lever is therefore the one this section previously dismissed —
+each of the 8 query heads sharing a kv head re-reads that head's whole cache,
+so blocking them together would read it once. That was not worth doing while
+the dot was latency-bound; now it is the largest term left.
 
 ## Ending a turn
 
