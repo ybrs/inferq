@@ -11,8 +11,8 @@ use crate::{
     ngram::{NgramDraft, NgramIndex},
     qwen::{
         ForwardTimings, LogitRows, Model, ModelState, QuantizedAttentionImage,
-        QuantizedForwardTimings, QuantizedModel, QuantizedModelState, QuantizedMtpState,
-        QuantizedMtpTimings, QuantizedStateImage, QuantizedStateSnapshots,
+        QuantizedForwardOutput, QuantizedForwardTimings, QuantizedModel, QuantizedModelState,
+        QuantizedMtpState, QuantizedMtpTimings, QuantizedStateImage, QuantizedStateSnapshots,
     },
     sampling::{Sampler, SamplingConfig, argmax},
     speculative::{
@@ -25,6 +25,23 @@ use crate::{
     tokenizer::ModelTokenizer,
     trace::RoutingTrace,
 };
+
+/// Rows evaluated in one prefill pass.
+///
+/// A pass costs more per token the wider it gets past a few hundred rows: the
+/// full-attention layers are quadratic in the rows they score against each
+/// other, and the MoE has already taken all the weight reuse a wide pass has to
+/// give by about sixty-four rows. Prefilling 3072 tokens on an i7-8700 at six
+/// threads, Qwen3.6-35B-A3B Q4_K_M, native:
+///
+/// ```text
+/// pass width     256     512    1024    3072
+/// prefill tok/s 28.07   28.60   28.56   26.41
+/// ```
+///
+/// Five hundred and twelve is the top of that curve, and a whole-prompt pass —
+/// which is what a prompt longer than this used to get — is the bottom of it.
+const PREFILL_PASS_ROWS: usize = 512;
 
 /// Tuning for the unified speculative policy's two controllers.
 ///
@@ -713,6 +730,46 @@ impl<'a> QuantizedRuntime<'a> {
         self.ngram.clear();
     }
 
+    /// Evaluate `tokens` through the target in passes of at most
+    /// [`PREFILL_PASS_ROWS`] rows, retaining the MTP gap as it goes.
+    ///
+    /// Returns the last pass's output: its logits are the row a caller samples
+    /// from, its hidden rows carry the boundary, and its timings are the sum
+    /// over the passes, so the profile still attributes the whole prefill.
+    ///
+    /// Splitting the prompt is a numerical change, not an identity. Each pass
+    /// reduces over its own rows, so the DeltaNet recurrence and the attention
+    /// softmax reach a boundary by a different route than one wide pass would
+    /// and the last bits move. What must not move is the decoded token, and
+    /// `a_chunked_prefill_decodes_like_a_single_pass` has asserted exactly
+    /// that across a boundary since the prompt cache began doing it: reusing a
+    /// cached prefix already prefills `[0..b]` and `[b..n]` separately, so
+    /// this makes uniform what was previously true only of cache hits.
+    fn prefill_in_passes(
+        &mut self,
+        tokens: &[u32],
+        track_mtp: bool,
+    ) -> Result<QuantizedForwardOutput> {
+        let prior = self.last_target_hidden.clone();
+        let mut timings = QuantizedForwardTimings::default();
+        let mut last = None;
+        for pass in tokens.chunks(PREFILL_PASS_ROWS) {
+            let output =
+                self.model
+                    .forward_detailed_logits(pass, &mut self.state, None, LogitRows::Last)?;
+            timings.accumulate(&output.timings);
+            if track_mtp {
+                // `prior` is only read when the gap is empty, which is at most
+                // the first pass; later passes append to what this one left.
+                self.retain_mtp_gap(pass, &output.normalized_hidden, prior.as_deref())?;
+            }
+            last = Some(output);
+        }
+        let mut last = last.context("prefill requires at least one token")?;
+        last.timings = timings;
+        Ok(last)
+    }
+
     /// Evaluate `tokens` through the target without sampling, leaving the
     /// session at the boundary immediately after them.
     ///
@@ -738,19 +795,15 @@ impl<'a> QuantizedRuntime<'a> {
             self.ngram.clear();
             self.ngram.extend(&evaluated);
         }
-        let output = self
-            .model
-            .forward_detailed_logits(&evaluated, &mut self.state, None, LogitRows::Last)
-            .context("prefill pass failed")?;
         self.mtp_gap_valid = track_mtp && self.mtp_gap_valid;
-        if self.mtp_gap_valid {
-            let prior = self.last_target_hidden.clone();
-            self.retain_mtp_gap(&evaluated, &output.normalized_hidden, prior.as_deref())?;
-        } else {
+        if !self.mtp_gap_valid {
             self.mtp_gap_tokens.clear();
             self.mtp_gap_hidden.clear();
             self.mtp_gap_prior_hidden = None;
         }
+        let output = self
+            .prefill_in_passes(&evaluated, self.mtp_gap_valid)
+            .context("prefill pass failed")?;
         self.last_target_hidden = Some(last_hidden_row(&output.normalized_hidden)?);
         // Bring the predictor up to the same position rather than leaving the
         // gap for a later draft to close. The lazy scheme is right during
@@ -1418,20 +1471,7 @@ impl<'a> QuantizedRuntime<'a> {
         let cache_before = self.model.expert_cache_stats()?;
         self.run.begin();
         let prefill_started = Instant::now();
-        let prefill = self.model.forward_detailed_logits(
-            &evaluated_input_token_ids,
-            &mut self.state,
-            None,
-            LogitRows::Last,
-        )?;
-        if track_mtp {
-            let prior = self.last_target_hidden.clone();
-            self.retain_mtp_gap(
-                &evaluated_input_token_ids,
-                &prefill.normalized_hidden,
-                prior.as_deref(),
-            )?;
-        }
+        let prefill = self.prefill_in_passes(&evaluated_input_token_ids, track_mtp)?;
         self.last_target_hidden = Some(last_hidden_row(&prefill.normalized_hidden)?);
         let prefill_wall_time = prefill_started.elapsed();
         let prefill_profile = prefill.timings;
