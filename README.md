@@ -287,10 +287,11 @@ flag. See [the prompt cache guide](docs/prompt-cache.md).
 The server also implements function calling in this checkpoint's own
 `<tool_call><function=…>` format, so coding agents that speak the OpenAI API
 can drive it. Its prompt rendering is checked byte for byte against the
-checkpoint's `chat_template`, and a tool call survives the API round trip
-byte for byte as well — a client that echoes an assistant turn back gets the
-model's own bytes written into the next prompt, which is what keeps a
-multi-turn agent on the live session instead of re-prefilling it.
+checkpoint's `chat_template`, and a tool call survives the API round trip byte
+for byte as well — an assistant turn sent back is written into the next prompt
+as the bytes the model generated, even by a client that re-serialised the call's
+arguments on the way, which is what keeps a multi-turn agent on the live session
+instead of re-prefilling it.
 
 Thinking is bounded per request. OpenAI's API expresses this as
 `reasoning_effort` rather than a token count, so the server maps each level to
