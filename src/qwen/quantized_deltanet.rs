@@ -5,7 +5,10 @@ use candle_core::{DType, Tensor};
 
 use crate::{GgufCheckpoint, QuantizedMatrix, Qwen3NextConfig};
 
-use super::{deltanet::recurrent_delta_step, norm::rms_norm_gated};
+use super::{
+    deltanet::{HeadSpread, recurrent_delta_step},
+    norm::rms_norm_gated,
+};
 
 #[derive(Debug, Clone)]
 pub struct QuantizedDeltaState {
@@ -662,6 +665,7 @@ impl QuantizedDeltaLayer {
                 self.value_heads,
                 self.key_head_dim,
                 self.value_head_dim,
+                HeadSpread::for_rows(seq),
                 recurrent,
                 &mut scratch.recurrent_output[token * value_dim..(token + 1) * value_dim],
             );
