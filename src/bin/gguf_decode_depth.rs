@@ -71,6 +71,7 @@ fn main() -> Result<()> {
         "depth,prefill_tok_s,decode_tok_s,attn_scan_s,scores_s,softmax_s,weighted_s,\
          attn_other_s,linear_s,moe_s,lm_head_s"
     );
+    println!("# linear split: proj,conv,recurrence,gated_norm,out_proj,snapshot");
     for depth in &args.depths {
         let depth = *depth;
         // Speculation off: this measures what the target itself costs, which
@@ -95,6 +96,7 @@ fn main() -> Result<()> {
         // The three parts are summed across threads, so they are reported as a
         // share of their own total rather than of the wall clock.
         let (mut scores, mut softmax, mut weighted) = (0., 0., 0.);
+        let mut delta = (0., 0., 0., 0., 0., 0.);
         for layer in &profile.layer_details {
             scan += layer.attention.attention.as_secs_f64();
             other += (layer.attention.wall - layer.attention.attention).as_secs_f64();
@@ -103,6 +105,12 @@ fn main() -> Result<()> {
             scores += layer.attention.scores.as_secs_f64();
             softmax += layer.attention.softmax.as_secs_f64();
             weighted += layer.attention.weighted_sum.as_secs_f64();
+            delta.0 += layer.delta.projections.as_secs_f64();
+            delta.1 += layer.delta.convolution.as_secs_f64();
+            delta.2 += layer.delta.recurrence.as_secs_f64();
+            delta.3 += layer.delta.gated_norm.as_secs_f64();
+            delta.4 += layer.delta.output_projection.as_secs_f64();
+            delta.5 += layer.delta.snapshot.as_secs_f64();
         }
         println!(
             "{depth},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
@@ -116,6 +124,10 @@ fn main() -> Result<()> {
             linear,
             moe,
             profile.lm_head.as_secs_f64(),
+        );
+        println!(
+            "# {depth}: {:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
+            delta.0, delta.1, delta.2, delta.3, delta.4, delta.5
         );
     }
     Ok(())
