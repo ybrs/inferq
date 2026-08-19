@@ -56,9 +56,12 @@ fn main() -> Result<()> {
     }
 
     // One long stream of ordinary prose to slice prefixes out of, so each
-    // depth measures the same text and only the length differs.
-    let filler =
-        "The engine evaluates each token against every earlier token in the sequence. ".repeat(600);
+    // depth measures the same text and only the length differs, and long
+    // enough for the depths an agent request actually reaches. It is one
+    // repeated sentence, so a prefix of this filler is the token sequence a
+    // shorter repetition would have produced at the same depth.
+    let filler = "The engine evaluates each token against every earlier token in the sequence. "
+        .repeat(1600);
     let tokens = runtime.tokenizer().encode(&filler, false)?;
     let deepest = args.depths.iter().copied().max().unwrap_or_default();
     anyhow::ensure!(
@@ -93,8 +96,8 @@ fn main() -> Result<()> {
         let metrics = &result.metrics;
         let profile = &metrics.decode_profile;
         let (mut scan, mut other, mut linear, mut moe) = (0., 0., 0., 0.);
-        // The three parts are summed across threads, so they are reported as a
-        // share of their own total rather than of the wall clock.
+        // The three parts are the wall time of their own parallel regions, so
+        // they are disjoint and sum to the scan less the chunking between them.
         let (mut scores, mut softmax, mut weighted) = (0., 0., 0.);
         let mut delta = (0., 0., 0., 0., 0., 0.);
         for layer in &profile.layer_details {

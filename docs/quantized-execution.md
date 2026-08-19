@@ -378,6 +378,28 @@ products while sharing one quantized kernel launch. Combined with the flat
 convolution, sustained decode measured `5.87 token/s` with the same 128 IDs,
 zero inference reads, and `47,260 MiB` RSS.
 
+## Where a DeltaNet recurrence step runs
+
+The gated delta rule is serial over tokens and independent over heads: value
+head `h` reads its own slice of the query, key, value, decay and beta, and
+reads and writes only its own `linear_key_head_dim x linear_value_head_dim`
+block of the recurrent state and its own row of the output. Nothing crosses a
+head, so which core computes a head cannot move a bit, and
+`spreading_the_heads_over_cores_does_not_move_a_bit` asserts the two spreads
+equal rather than close.
+
+`HeadSpread` names the choice at the call site rather than in a build flag.
+`HeadSpread::Pool` splits the heads across the global rayon pool and is what a
+pass of more than one row uses; `HeadSpread::Caller` runs every head on the
+calling thread and is what a one-row decode pass uses. The step runs once per
+row, so the trade is one fork/join against a fixed amount of work: a wide pass
+calls it back to back and the pool stays awake between calls, while a one-row
+pass calls it once per layer with candle's matvec pool holding the cores in
+between. Measured on the qualified host, DeltaNet recurrence over sixteen
+decode passes at 64 context was `0.126 s` on the calling thread and `0.161 s`
+through the pool; over a 256-row prefill pass it was `5.16 ms` per token on the
+calling thread and `2.80 ms` through it.
+
 The same exact row fusion now applies to routed and shared MoE gate/up
 projections. Full pinning preserves sequential GGUF reads, then converts the
 resident gate/up cache entries in memory. The cache still owns `43.5 GiB`, but

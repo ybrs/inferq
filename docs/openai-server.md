@@ -130,10 +130,42 @@ token-major reference exactly rather than to a tolerance. Decode is untouched �
 one row is still token-major and still on Candle's matvec.
 
 So the MoE has stopped being the larger half. At width 256 the linear layers
-are now 55.8% of a pass against the MoE's 32.3%, and the next lever is the one
-the DeltaNet work already named: the 8 query heads sharing a kv head each
-re-read that head's whole cache. Prefill spends itself on weights; decode
-increasingly on the cache. The two halves want different work.
+are now 55.8% of a pass against the MoE's 32.3%. Prefill spends itself on
+weights; decode increasingly on the cache. The two halves want different work.
+
+Attributing those linear layers found a third of them in one loop: the gated
+delta rule, 5.16 ms of a 27.54 ms token at width 256. It is serial over tokens
+by definition, so a wide pass ran it on one core with the other five idle — but
+it is not serial over *heads*. Each of the 32 value heads owns its own
+`128 x 128` block of the recurrent state and its own slice of every input, so
+spreading the heads is an arithmetic identity, asserted rather than argued by
+`spreading_the_heads_over_cores_does_not_move_a_bit`. One pass, milliseconds
+per token:
+
+| width | prefill tok/s | one pass | recurrence | linear |
+| ---: | ---: | ---: | ---: | ---: |
+| 16 | 24.80 → 25.46 | 39.89 → 37.15 | 5.51 → 3.91 | 17.14 → 15.09 |
+| 64 | 31.91 → 35.05 | 29.55 → 27.33 | 5.27 → 2.86 | 15.59 → 13.25 |
+| 256 | 33.49 → **36.18** | 27.54 → 26.19 | 5.16 → 2.80 | 15.52 → 13.50 |
+| 512 | 35.30 → 36.61 | 28.40 → 26.52 | 5.14 → 2.72 | 16.18 → 13.96 |
+
+1.85x rather than six: the loop is bound by the state it walks, not by the
+arithmetic over it, so five more cores buy less than five times the throughput.
+
+The step runs once per row, so a one-row decode pass pays one fork/join per
+layer — thirty a token, with candle's own matvec pool holding the cores in
+between — and waking six sleeping workers costs more than they give back.
+Spreading it unconditionally made decode worse at every depth: recurrence over
+sixteen passes went 0.126 → 0.161 s at 64 context, 0.128 → 0.191 at 1024,
+0.136 → 0.197 at 3072. So the spread is a property of the pass, not of the
+build: passes of more than one row go through the pool, a one-row decode stays
+on the calling thread, and which one runs cannot change a value. With that
+gate, recurrence at decode measured 0.132 / 0.127 / 0.127 s against a
+0.126 / 0.128 / 0.136 baseline — the same loop it always was.
+
+That leaves the KV scan as the largest term at depth, and the lever the
+DeltaNet work already named: the 8 query heads sharing a kv head each re-read
+that head's whole cache.
 
 The other thing that changed is how wide a pass gets to be. Prefill ran one
 pass over the whole prompt, and a pass costs more per token the wider it goes
