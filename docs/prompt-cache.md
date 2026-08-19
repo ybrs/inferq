@@ -153,6 +153,13 @@ batched reductions differ in their last bits, as they do for any chunked
 prefill. Reuse reproduces the chunked result exactly. Both are the model; the
 difference is the same one a multi-turn conversation already has.
 
+That caveat is now uniform rather than a property of cache hits. Prefill
+evaluates 512 rows per pass regardless of how the prompt arrived, because a
+pass costs more per token the wider it gets past a few hundred rows (see
+`PREFILL_PASS_ROWS`), so `[0..n]` in "one pass" is not something any prompt
+longer than 512 tokens gets any more. What the caveat described as a difference
+between a cached prefix and a fresh one is therefore no longer one.
+
 ## Privacy
 
 An entry contains the token ids of the prefix it describes, which is

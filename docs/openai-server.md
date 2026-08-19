@@ -135,6 +135,23 @@ the DeltaNet work already named: the 8 query heads sharing a kv head each
 re-read that head's whole cache. Prefill spends itself on weights; decode
 increasingly on the cache. The two halves want different work.
 
+The other thing that changed is how wide a pass gets to be. Prefill ran one
+pass over the whole prompt, and a pass costs more per token the wider it goes
+past a few hundred rows — the full-attention layers score quadratically many
+row pairs, and the MoE has taken all the weight reuse a wide pass has to give
+by about sixty-four. Prefilling 3072 tokens:
+
+| pass width | 256 | 512 | 1024 | 3072 |
+| --- | ---: | ---: | ---: | ---: |
+| prefill tok/s | 28.07 | **28.60** | 28.56 | 26.41 |
+| one pass, ms/token | 29.39 | 29.74 | 31.44 | 39.14 |
+
+so passes are now capped at 512 rows, worth 1.08x on a 3k-token tool result.
+That one is a numerical change and not an identity — each pass reduces over its
+own rows — but it is the change the prompt cache has always made on a hit, and
+`a_chunked_prefill_decodes_like_a_single_pass` asserts the decoded tokens
+across a boundary either way. See [prompt-cache.md](prompt-cache.md).
+
 The lane accumulators reorder the summation, so this one is a numerical change
 rather than an identity: the last bits move and a token could follow. On this
 host it did not. Plain decode and the speculative policy agree token for token,
