@@ -156,16 +156,30 @@ per token:
 1.85x rather than six: the loop is bound by the state it walks, not by the
 arithmetic over it, so five more cores buy less than five times the throughput.
 
-The step runs once per row, so a one-row decode pass pays one fork/join per
-layer — thirty a token, with candle's own matvec pool holding the cores in
-between — and waking six sleeping workers costs more than they give back.
-Spreading it unconditionally made decode worse at every depth: recurrence over
-sixteen passes went 0.126 → 0.161 s at 64 context, 0.128 → 0.191 at 1024,
-0.136 → 0.197 at 3072. So the spread is a property of the pass, not of the
-build: passes of more than one row go through the pool, a one-row decode stays
-on the calling thread, and which one runs cannot change a value. With that
-gate, recurrence at decode measured 0.132 / 0.127 / 0.127 s against a
-0.126 / 0.128 / 0.136 baseline — the same loop it always was.
+The step runs once per row, so a pass of `n` rows wakes the pool `n` times per
+layer: the waking is paid per row, not per pass, with candle's own matvec pool
+holding the cores in between. Spreading it unconditionally made decode worse at
+every depth — recurrence over sixteen passes went 0.126 → 0.161 s at 64
+context, 0.128 → 0.191 at 1024, 0.136 → 0.197 at 3072 — so the spread is a
+property of the pass, not of the build, and which one runs cannot change a
+value.
+
+Where it turns is a measurement and not a guess, and the first guess was wrong.
+Recurrence, milliseconds per token, over 96 tokens prefilled at each width:
+
+| rows | 1 | 2 | 3 | 4 | 6 | 8 | 12 | 16 | 32 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| calling thread | 19.93 | 8.15 | 6.95 | 6.65 | 6.13 | 5.99 | 5.71 | 5.67 | 5.37 |
+| thread pool | — | 11.77 | 8.01 | 6.15 | 5.53 | 4.97 | 4.13 | 3.96 | 3.36 |
+
+Four rows. What made that worth chasing is that four is also the width of a
+speculative verification pass: an MTP draft accepted about four times in five
+leaves most verifications two or three rows wide, so a threshold of two put the
+whole decode path on the wrong side of the crossover. The end-to-end agent turn
+said so before the microbenchmark did — the same 1807-token first turn decoded
+its same 128 tokens 4% slower, in two runs — which is the case for running it.
+With the threshold at four, recurrence at decode measures 0.132 / 0.127 /
+0.127 s against a 0.126 / 0.128 / 0.136 baseline: the same loop it always was.
 
 That leaves the KV scan as the largest term at depth, and the lever the
 DeltaNet work already named: the 8 query heads sharing a kv head each re-read

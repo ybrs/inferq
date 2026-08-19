@@ -419,13 +419,15 @@ head, so which core computes a head cannot move a bit, and
 equal rather than close.
 
 `HeadSpread` names the choice at the call site rather than in a build flag.
-`HeadSpread::Pool` splits the heads across the global rayon pool and is what a
-pass of more than one row uses; `HeadSpread::Caller` runs every head on the
-calling thread and is what a one-row decode pass uses. The step runs once per
-row, so the trade is one fork/join against a fixed amount of work: a wide pass
-calls it back to back and the pool stays awake between calls, while a one-row
-pass calls it once per layer with candle's matvec pool holding the cores in
-between. Measured on the qualified host, DeltaNet recurrence over sixteen
+`HeadSpread::Pool` splits the heads across the global rayon pool;
+`HeadSpread::Caller` runs every head on the calling thread. The step runs once
+per row, so a pass of `n` rows wakes the pool `n` times per layer and the
+waking is paid per row; what falls with the row count is the cost of each
+waking, because consecutive rows call back in before the workers sleep.
+`HEAD_SPREAD_MIN_ROWS` is where the two measured equal, which is four rows —
+so a one-row decode pass and the two- or three-row verification pass behind a
+speculative decode both stay on the calling thread, and prefill goes through
+the pool. Measured on the qualified host, DeltaNet recurrence over sixteen
 decode passes at 64 context was `0.126 s` on the calling thread and `0.161 s`
 through the pool; over a 256-row prefill pass it was `5.16 ms` per token on the
 calling thread and `2.80 ms` through it.
