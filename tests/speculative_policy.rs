@@ -9,6 +9,8 @@
 //! emit, and the lazy MTP catch-up has to leave the predictor in exactly the
 //! state an eager resynchronisation would have left it in.
 
+use std::time::Duration;
+
 use anyhow::Result;
 use qwen_engine::{
     GenerationOptions, GgufCheckpoint, QuantizedRuntime, SpeculativeMode,
@@ -489,5 +491,94 @@ fn a_shortlisted_draft_head_changes_speed_but_not_output() -> Result<()> {
             assert_eq!(policy.draft_vocab, vocab.min(policy.full_vocab));
         }
     }
+    Ok(())
+}
+/// What a client that ends its turns early leaves behind.
+///
+/// An agentic client halts every assistant turn at the first closed tool
+/// call, and a halt inside an accepted draft has to give back the rows the
+/// client never saw. The rollback that does so used to declare the retained
+/// MTP gap unusable, and because that flag gates the arm for the whole
+/// session, the first tool call took MTP speculation away from every turn
+/// after it. Truncating the gap to the rolled-back boundary keeps the arm's
+/// invariant instead — and must not move a single token: continuing a halted
+/// session has to decode exactly what an uninterrupted session holding the
+/// same tokens decodes.
+#[test]
+fn a_halted_turn_keeps_the_mtp_arm_and_resumes_exactly() -> Result<()> {
+    let Some(test) = checkpoint() else {
+        return Ok(());
+    };
+    let mut runtime = QuantizedRuntime::load(&test.checkpoint, &test.model_dir)?;
+    let prompt = runtime.tokenizer().encode(MIXED_PROMPT, false)?;
+    let follow_up = runtime
+        .tokenizer()
+        .encode("\nNow list the same names in reverse order.\n", false)?;
+    // Single-arm MTP mode, so every halt lands in a pass this arm drafted and
+    // a session that lost the arm cannot even start the next turn.
+    let mode = SpeculativeMode::Mtp;
+
+    // Halt at several points: a halt on a pass's authoritative token unwinds
+    // nothing, so only some of these reach the rollback at all.
+    for halt_after in [3usize, 6, 9, 12] {
+        runtime.reset();
+        let mut emitted = Vec::new();
+        let halted = runtime.generate_tokens_with_callback(&prompt, &options(mode, 64), |token| {
+            emitted.push(token);
+            if emitted.len() == halt_after {
+                anyhow::bail!("the output sink ended this turn");
+            }
+            Ok(())
+        });
+        assert!(halted.is_err(), "the callback did not end the turn");
+        assert_eq!(emitted.len(), halt_after);
+        assert!(
+            runtime.mtp_arm_ready(),
+            "a halt after {halt_after} tokens left the MTP arm unable to draft"
+        );
+        assert_eq!(runtime.context_tokens(), prompt.len() + halt_after);
+        // The turn ended without metrics, but not without measurements.
+        let partial = runtime.last_run_metrics();
+        assert!(
+            partial.prefill_wall_time > Duration::ZERO,
+            "a halted turn reported no prefill time"
+        );
+        assert!(partial.decode_wall_time > Duration::ZERO);
+        assert!(
+            partial.drafted_tokens > 0,
+            "a halted turn reported drafting nothing"
+        );
+    }
+
+    // The session halted above continues here. Anything it decodes must match
+    // what a session that reached the same tokens without interruption
+    // decodes.
+    let halt_after = 9;
+    runtime.reset();
+    let mut emitted = Vec::new();
+    let _ = runtime.generate_tokens_with_callback(&prompt, &options(mode, 64), |token| {
+        emitted.push(token);
+        if emitted.len() == halt_after {
+            anyhow::bail!("the output sink ended this turn");
+        }
+        Ok(())
+    });
+    let continued =
+        runtime.generate_tokens_with_callback(&follow_up, &options(mode, 24), |_| Ok(()))?;
+    assert!(
+        continued.metrics.speculative.drafted_tokens > 0,
+        "the turn after a halt decoded without the MTP arm"
+    );
+
+    let mut whole = prompt.clone();
+    whole.extend_from_slice(&emitted);
+    whole.extend_from_slice(&follow_up);
+    runtime.reset();
+    let reference =
+        runtime.generate_tokens_with_callback(&whole, &options(mode, 24), |_| Ok(()))?;
+    assert_eq!(
+        continued.generated_token_ids, reference.generated_token_ids,
+        "continuing a halted turn changed what it decoded"
+    );
     Ok(())
 }

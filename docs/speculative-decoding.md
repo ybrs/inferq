@@ -94,6 +94,22 @@ lags at no cost; a run that never uses the arm never touches the block at all,
 including for the prompt. A `debug_assert` and a release-mode check both
 confirm the block's position equals the target's before every draft.
 
+A pass that does not commit everything it evaluated rolls the target back to a
+row boundary — a rejected draft does this, and so does an output sink that
+ends the turn inside an accepted one, which is how every tool-calling turn
+ends. The retained gap is truncated to that boundary rather than abandoned.
+The arm's invariant is `mtp_synced_position + gap == state.position`, and
+since the gap holds one authoritative row per committed token in order, the
+rows the rollback drops are exactly its tail. Abandoning it would end the arm
+for the session rather than for the pass: an arm that may not run retains no
+rows, and without retained rows the gap it would need can never be closed.
+Two cases cannot be truncated. A predictor that synced *past* the rolled-back
+point — only `--eager-mtp-resync` arranges that, by catching up after a pass
+commits — has its own cache truncated back to the new position instead, which
+is the same operation every catch-up performs before it writes. A gap that
+never described the whole distance was already broken before the rollback, and
+that one still invalidates, with a debug line saying so.
+
 `--eager-mtp-resync` restores the previous behaviour of resynchronising after
 every committing pass. It decodes identically — the integration test asserts
 that the MTP arm proposes and accepts the same token counts under both — and
