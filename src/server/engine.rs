@@ -762,6 +762,35 @@ fn prepare_session(
         .filter(|history| !history.is_empty() && tokens.len() > history.len())
         .filter(|history| tokens.starts_with(history))
         .map_or(0, Vec::len);
+    // A miss here costs a re-prefill from a cache boundary, so say where the
+    // prompt stopped matching: the divergence names which message was
+    // re-rendered differently, which is the first thing worth knowing.
+    if live_tokens == 0
+        && let Some(history) = live.as_ref()
+        && !history.is_empty()
+        && tokens.len() > history.len()
+    {
+        let diverged_at = history
+            .iter()
+            .zip(tokens)
+            .position(|(a, b)| a != b)
+            .unwrap_or(history.len());
+        let start = diverged_at.saturating_sub(16);
+        let window = |ids: &[u32]| {
+            let end = (diverged_at + 16).min(ids.len());
+            runtime
+                .tokenizer()
+                .decode(&ids[start..end], false)
+                .unwrap_or_default()
+        };
+        tracing::info!(
+            diverged_at,
+            history_tokens = history.len(),
+            session_held = window(history),
+            prompt_sent = window(tokens),
+            "the prompt does not continue the live session"
+        );
+    }
     if let Some(image) = cache.and_then(|cache| cache.lookup(tokens, live_tokens)) {
         let restored = image.position();
         runtime
