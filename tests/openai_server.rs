@@ -2,7 +2,9 @@
 //!
 //! These need the real GGUF and its tokenizer directory, so they are opt-in:
 //! set `INFERQ_TEST_GGUF` and `INFERQ_TEST_MODEL_DIR` to run them. Without
-//! those they skip with a message rather than failing.
+//! those they skip with a message rather than failing. The tool-call round
+//! trip is checked against the real tokenizer alone and needs only
+//! `INFERQ_TEST_MODEL_DIR`.
 //!
 //! The client here is deliberately hand-rolled: one request per connection,
 //! `Connection: close`, read to end of stream. That is enough to exercise the
@@ -13,7 +15,11 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 use anyhow::{Context, Result};
 use qwen_engine::{
     GenerationOptions, PromptCacheConfig, SpeculativeMode,
-    server::{EngineConfig, ServerState, Warmup, engine, http::router},
+    server::{
+        EngineConfig, ServerState, ThinkingPlan, Warmup, api::ChatCompletionRequest, engine,
+        http::router, request::render_prompt,
+    },
+    tokenizer::ModelTokenizer,
 };
 use serde_json::Value;
 use tokio::{
@@ -460,4 +466,99 @@ fn a_repeated_prompt_is_restored_from_the_cache() -> Result<()> {
         assert_eq!(cache["entries"].as_u64().unwrap_or(0), 1, "{cache}");
         anyhow::Ok(())
     })
+}
+
+/// A tool call the client echoes back has to land on the tokens the model
+/// generated.
+///
+/// This is the live-session check from `prepare_session` written out: the next
+/// request's prompt must begin with the previous prompt plus the tokens the
+/// turn generated. It is measured on the real tokenizer rather than on text
+/// because that is the comparison the engine makes, and it needs the tokenizer
+/// directory alone — no weights — so it runs wherever the checkpoint is.
+#[test]
+fn an_echoed_tool_call_keeps_the_next_prompt_on_the_live_session() -> Result<()> {
+    let Ok(model_dir) = std::env::var("INFERQ_TEST_MODEL_DIR") else {
+        eprintln!("skipping: set INFERQ_TEST_MODEL_DIR to run the round-trip check");
+        return Ok(());
+    };
+    let tokenizer = ModelTokenizer::from_model_dir(&model_dir)?;
+    let thinking = ThinkingPlan {
+        open: false,
+        budget: None,
+    };
+    let tools = serde_json::json!([{
+        "type": "function",
+        "function": {
+            "name": "edit",
+            "description": "Edit a file",
+            "parameters": {"type": "object", "properties": {
+                "path": {"type": "string"},
+                "edits": {"type": "array"}
+            }}
+        }
+    }]);
+
+    // What the model generates, formatting its JSON the way its own template
+    // taught it: a space after every colon and comma.
+    let generated = "I will make the edit.\n\n<tool_call>\n<function=edit>\n\
+                     <parameter=path>\nCLAUDE.md\n</parameter>\n\
+                     <parameter=edits>\n\
+                     [{\"oldText\": \"Qwen3-Coder-Next\", \"newText\": \"Qwen3.6-35B-A3B\"}]\n\
+                     </parameter>\n</function>\n</tool_call>";
+
+    let first: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
+        "messages": [{"role": "user", "content": "Update the model name."}],
+        "tools": tools,
+    }))?;
+    let first_prompt = render_prompt(&tokenizer, &first, thinking)?;
+
+    // The turn as the server reports it, and as a client that echoes what it
+    // was given sends it back.
+    let (content, calls) = qwen_engine::tool_calls::parse(generated);
+    assert_eq!(calls.len(), 1, "the fixture calls one tool");
+    let arguments = calls[0].arguments_json(first.tool_schema(&calls[0].name));
+    let second: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
+        "messages": [
+            {"role": "user", "content": "Update the model name."},
+            {"role": "assistant", "content": content, "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": calls[0].name, "arguments": arguments},
+            }]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "Replaced 1 block."},
+        ],
+        "tools": tools,
+    }))?;
+    let second_prompt = render_prompt(&tokenizer, &second, thinking)?;
+
+    // Text first, because that is where a mismatch is readable. The windows are
+    // taken with `get` so a report never panics on a character boundary.
+    let held = format!("{first_prompt}{generated}");
+    let diverged = held
+        .bytes()
+        .zip(second_prompt.bytes())
+        .position(|(a, b)| a != b)
+        .unwrap_or(held.len());
+    let window = |text: &str| {
+        text.get(diverged.saturating_sub(80)..(diverged + 80).min(text.len()))
+            .map(ToOwned::to_owned)
+    };
+    assert!(
+        second_prompt.starts_with(&held),
+        "the next prompt left the live session at byte {diverged}:\n \
+         held: {:?}\n sent: {:?}",
+        window(&held),
+        window(&second_prompt),
+    );
+    // And then on tokens, which is what the engine actually compares.
+    let session = tokenizer.encode(&held, false)?;
+    let sent = tokenizer.encode(&second_prompt, false)?;
+    assert!(
+        sent.len() > session.len() && sent.starts_with(&session),
+        "the prompt is not a token prefix continuation: {} vs {} tokens",
+        session.len(),
+        sent.len(),
+    );
+    Ok(())
 }

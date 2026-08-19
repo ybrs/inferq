@@ -84,6 +84,14 @@ recurrence is destructive: state can be extended but never un-applied. That is
 the reason the cache stores *images* captured at a boundary rather than
 trimming a longer state back.
 
+Sending the history back verbatim is only half of it: the server has to render
+it back into the same bytes. A tool call is where that is easy to lose, since
+the model's arguments pass through the API as JSON and come back to be written
+into the prompt again; `docs/openai-server.md` describes the contract that
+keeps them identical. When a request does miss, the log says where the two
+token streams parted and decodes a window of each side, because the difference
+is normally a single character in one message.
+
 ## Boundaries
 
 Entries are stored at token boundaries that are multiples of

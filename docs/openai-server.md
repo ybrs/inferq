@@ -367,6 +367,41 @@ Send results back as `role: "tool"` messages — consecutive ones are folded int
 a single `<tool_response>` turn, as the template does — and echo the
 assistant's `tool_calls` back with them so the model sees its own call.
 
+### The round trip preserves bytes
+
+A client that echoes an assistant turn back verbatim gets a prompt whose tool
+markup is byte for byte what the model generated. That is a performance
+contract, not a cosmetic one: the engine continues the live session only while
+the new prompt is a token prefix continuation of the last one, so a single
+changed space re-prefills the whole conversation from a cache boundary.
+
+It costs a specific discipline on both sides of `function.arguments`:
+
+- **Out.** The `arguments` object is assembled from the parameter text, not
+  re-serialised from parsed values. A parameter whose text is already JSON of
+  some non-string type is copied in as it stands, keeping the model's own
+  spacing — `{"edits":[{"oldText": "a", "newText": "b"}]}`, spaces intact.
+  Anything else, including every parameter the schema declares a `string`,
+  becomes a JSON string of exactly that text.
+- **Back.** Rendering reads the members out of the `arguments` *text*, with
+  their own bytes, rather than through a parsed value. A JSON string means "the
+  parameter text is this string's contents" and any other JSON value means "the
+  parameter text is these bytes", so the two encodings above invert exactly.
+
+This is also what the reference template does, which is why it matters: the
+template writes a non-string parameter with Jinja's `tojson`, and transformers
+configures that with Python's default separators — `{"a": 1}`, with the spaces.
+The model learned to write its JSON that way, so keeping the model's bytes and
+matching the template are the same thing here.
+
+The residual: a client that parses `arguments` and re-serialises it before
+sending it back — compacting it, or reordering keys — has already discarded the
+model's bytes, and no amount of care on this side recovers them. Such a turn
+renders as valid, semantically identical markup and simply falls back to
+`reuse="cache"`. The same is true of a parameter whose text is JSON with
+leading or trailing whitespace: the whitespace is trimmed so the value stays
+the type the schema declared, at the cost of exactness on that one parameter.
+
 A turn ends at the closing `</tool_call>` tag, so it carries at most one call.
 That is a deliberate limit, not an oversight: the template tells the model to
 reply with a call and no suffix, and this checkpoint does not honour it — left
@@ -386,7 +421,14 @@ text that ends with an unmatched `</think>`.
 The renderer is checked against the real thing: `src/tokenizer.rs`'s tests
 compare its output byte for byte with the checkpoint's `chat_template` rendered
 through Jinja2 with the filter overrides transformers applies, for a tools
-prompt, a full tool round trip, and a plain conversation.
+prompt, a full tool round trip, and a plain conversation. `src/tool_calls.rs`
+checks the byte-preservation contract on its own — parse, hand out `arguments`,
+render back, and compare with the markup that went in — over nested JSON with
+the model's spacing, multi-line values, quotes, unicode and untyped
+parameters. `tests/openai_server.rs` closes the loop on the real tokenizer:
+the prompt built from an echoed tool call must be a token prefix continuation
+of the previous prompt plus the tokens the model generated, which is the
+comparison the engine itself makes.
 
 ## Driving it with an agent
 

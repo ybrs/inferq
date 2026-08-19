@@ -250,8 +250,11 @@ impl ChatRole {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChatToolCall {
     pub name: String,
-    /// The call's arguments as a JSON object.
-    pub arguments: Value,
+    /// The call's arguments as OpenAI encodes them: a JSON object as a string.
+    ///
+    /// Kept as text rather than parsed so that replaying a call the model made
+    /// writes the bytes it generated; see [`crate::tool_calls`].
+    pub arguments: String,
 }
 
 #[derive(Debug, Clone)]
@@ -663,7 +666,7 @@ mod tests {
         );
         called.tool_calls = vec![ChatToolCall {
             name: "read_file".into(),
-            arguments: serde_json::json!({"path": "src/lib.rs"}),
+            arguments: r#"{"path":"src/lib.rs"}"#.into(),
         }];
         let messages = [
             message(ChatRole::User, "Read src/lib.rs"),
@@ -702,7 +705,7 @@ mod tests {
         let mut called = ChatMessage::new(ChatRole::Assistant, "<think>\nlook\n</think>\n\nok");
         called.tool_calls = vec![ChatToolCall {
             name: "read_file".into(),
-            arguments: serde_json::json!({"path": "a"}),
+            arguments: r#"{"path":"a"}"#.into(),
         }];
         let messages = [
             message(ChatRole::User, "read a"),
