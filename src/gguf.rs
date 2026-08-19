@@ -55,6 +55,28 @@ pub enum MultiRowPath {
     SmallM,
     /// As `SmallM`, but decode each weight block once for all input rows.
     Fused,
+    /// `Fused`, split into the tiles `forward` would use. Above one tile this
+    /// is what dispatch actually runs, and it is not the same cost as one wide
+    /// `Fused` call, so a sweep that wants to predict prefill must time it.
+    FusedTiled,
+}
+
+/// Where a multi-row matmul finds the threads for its output rows.
+///
+/// Every output row reads the same inputs and writes its own disjoint slice of
+/// the result, so which thread computes which row is invisible in the output:
+/// the two spreads are bit-identical, and only the scheduling differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowSpread {
+    /// Split the output rows across the global rayon pool. Right for a call
+    /// that is the only work in flight — one large matrix, one wide pass.
+    Pool,
+    /// Compute every output row on the calling thread. Right for a caller that
+    /// is *already* inside a parallel iterator and is holding one of a batch of
+    /// small independent matrices: the MoE runs 256 experts per layer, and
+    /// splitting each expert's few hundred output rows again would pay a
+    /// fork/join for work that is a fraction of one core's share.
+    Caller,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -382,20 +404,62 @@ impl QuantizedMatrix {
     }
 
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        self.forward_spread(xs, RowSpread::Pool)
+    }
+
+    /// [`Self::forward`], with the caller choosing where the output rows are
+    /// computed. The result does not depend on that choice; see [`RowSpread`].
+    pub fn forward_spread(&self, xs: &Tensor, spread: RowSpread) -> Result<Tensor> {
         let xs = self.validated_input(xs)?;
         let input_rows = xs.elem_count() / self.columns;
-        if input_rows >= *MULTI_ROW_RANGE.start()
-            && self.tensor.device().is_cpu()
-            && (self.storage_bytes >= SMALL_M_MIN_STORAGE_BYTES || cfg!(test))
-        {
+        if self.takes_multi_row(input_rows) {
             let values = xs.flatten_all()?.to_vec1::<f32>()?;
-            if let Some(output) = self.tiled_multi_row(&values, input_rows)? {
+            if let Some(output) = self.tiled_multi_row(&values, input_rows, spread)? {
                 let mut shape = xs.dims().to_vec();
                 *shape.last_mut().expect("rank validated above") = self.rows;
                 return Ok(Tensor::from_vec(output, shape, xs.device())?);
             }
         }
         Ok(xs.apply_op1_no_bwd(self.tensor.as_ref())?)
+    }
+
+    /// Multiply `input_rows` contiguous rows of `values`, returning the result
+    /// row-major without building a [`Tensor`] for either side.
+    ///
+    /// The MoE gathers its rows for an expert out of a larger activation block
+    /// and scatters the result back into another, so a `Tensor` at this
+    /// boundary is an allocation and a copy on each side of every expert call.
+    /// The arithmetic is [`Self::forward_spread`]'s, unchanged.
+    pub fn forward_rows(
+        &self,
+        values: &[f32],
+        input_rows: usize,
+        spread: RowSpread,
+    ) -> Result<Vec<f32>> {
+        ensure!(
+            values.len() == input_rows * self.columns,
+            "expected {} input values for {input_rows} rows of {} columns, got {}",
+            input_rows * self.columns,
+            self.columns,
+            values.len()
+        );
+        if self.takes_multi_row(input_rows)
+            && let Some(output) = self.tiled_multi_row(values, input_rows, spread)?
+        {
+            return Ok(output);
+        }
+        let xs = Tensor::from_slice(values, (input_rows, self.columns), &Device::Cpu)?;
+        Ok(xs
+            .apply_op1_no_bwd(self.tensor.as_ref())?
+            .flatten_all()?
+            .to_vec1::<f32>()?)
+    }
+
+    /// Whether `forward` hands a pass of this width to the multi-row kernels.
+    fn takes_multi_row(&self, input_rows: usize) -> bool {
+        input_rows >= *MULTI_ROW_RANGE.start()
+            && self.tensor.device().is_cpu()
+            && (self.storage_bytes >= SMALL_M_MIN_STORAGE_BYTES || cfg!(test))
     }
 
     /// Run the fused kernel over every row, a tile at a time.
@@ -408,7 +472,12 @@ impl QuantizedMatrix {
     /// the fused kernel's per-row result does not vary with how many rows it is
     /// given — measured bit-identical against Candle from two rows to two
     /// hundred and fifty-six — so tiling returns what one wide call would.
-    fn tiled_multi_row(&self, values: &[f32], input_rows: usize) -> Result<Option<Vec<f32>>> {
+    fn tiled_multi_row(
+        &self,
+        values: &[f32],
+        input_rows: usize,
+        spread: RowSpread,
+    ) -> Result<Option<Vec<f32>>> {
         let mut output = Vec::with_capacity(input_rows * self.rows);
         let mut start = 0;
         while start < input_rows {
@@ -423,7 +492,7 @@ impl QuantizedMatrix {
                 MULTI_ROW_TILE
             };
             let slice = &values[start * self.columns..(start + rows) * self.columns];
-            match self.multi_row_forward(slice, rows, MultiRowPath::Fused)? {
+            match self.multi_row_forward(slice, rows, MultiRowPath::Fused, spread)? {
                 Some(mut tile) => output.append(&mut tile),
                 None => return Ok(None),
             }
@@ -436,20 +505,29 @@ impl QuantizedMatrix {
     ///
     /// Benchmarks and differential tests use this to hold everything but the
     /// kernel constant. `forward` is the production entry point.
-    pub fn forward_via(&self, xs: &Tensor, path: MultiRowPath) -> Result<Tensor> {
+    pub fn forward_via(
+        &self,
+        xs: &Tensor,
+        path: MultiRowPath,
+        spread: RowSpread,
+    ) -> Result<Tensor> {
         let xs = self.validated_input(xs)?;
         let input_rows = xs.elem_count() / self.columns;
         match path {
             MultiRowPath::Candle => Ok(xs.apply_op1_no_bwd(self.tensor.as_ref())?),
-            MultiRowPath::SmallM | MultiRowPath::Fused => {
+            MultiRowPath::SmallM | MultiRowPath::Fused | MultiRowPath::FusedTiled => {
                 ensure!(
                     self.tensor.device().is_cpu(),
                     "the multi-row kernels require a CPU matrix"
                 );
                 let values = xs.flatten_all()?.to_vec1::<f32>()?;
-                let output = self
-                    .multi_row_forward(&values, input_rows, path)?
-                    .with_context(|| format!("{:?} has no multi-row kernel", self.dtype))?;
+                let output = match path {
+                    MultiRowPath::FusedTiled => {
+                        self.tiled_multi_row(&values, input_rows, spread)?
+                    }
+                    _ => self.multi_row_forward(&values, input_rows, path, spread)?,
+                }
+                .with_context(|| format!("{:?} has no multi-row kernel", self.dtype))?;
                 let mut shape = xs.dims().to_vec();
                 *shape.last_mut().expect("rank validated above") = self.rows;
                 Ok(Tensor::from_vec(output, shape, xs.device())?)
@@ -464,6 +542,7 @@ impl QuantizedMatrix {
         values: &[f32],
         input_rows: usize,
         path: MultiRowPath,
+        spread: RowSpread,
     ) -> Result<Option<Vec<f32>>> {
         let fused = path == MultiRowPath::Fused && qgemm::supported();
         let output = match (self.dtype, fused) {
@@ -472,25 +551,34 @@ impl QuantizedMatrix {
                     values,
                     input_rows,
                     qgemm::q4k_q8k_row,
+                    spread,
                 )?,
             (GgmlDType::Q6K, true) => self
                 .fused_forward::<BlockQ6K, qgemm::Q6KBlock, qgemm::Q8KBlock>(
                     values,
                     input_rows,
                     qgemm::q6k_q8k_row,
+                    spread,
                 )?,
             (GgmlDType::Q8_0, true) => self
                 .fused_forward::<BlockQ8_0, qgemm::Q80Block, qgemm::Q80Block>(
                     values,
                     input_rows,
                     qgemm::q80_q80_row,
+                    spread,
                 )?,
             // Q5K carries 0.3% of this model's bytes and keeps the per-row
             // kernel; see multirow-report-702d043633e0.md.
-            (GgmlDType::Q4K, false) => self.small_m_forward::<BlockQ4K>(values, input_rows)?,
-            (GgmlDType::Q5K, _) => self.small_m_forward::<BlockQ5K>(values, input_rows)?,
-            (GgmlDType::Q6K, false) => self.small_m_forward::<BlockQ6K>(values, input_rows)?,
-            (GgmlDType::Q8_0, false) => self.small_m_forward::<BlockQ8_0>(values, input_rows)?,
+            (GgmlDType::Q4K, false) => {
+                self.small_m_forward::<BlockQ4K>(values, input_rows, spread)?
+            }
+            (GgmlDType::Q5K, _) => self.small_m_forward::<BlockQ5K>(values, input_rows, spread)?,
+            (GgmlDType::Q6K, false) => {
+                self.small_m_forward::<BlockQ6K>(values, input_rows, spread)?
+            }
+            (GgmlDType::Q8_0, false) => {
+                self.small_m_forward::<BlockQ8_0>(values, input_rows, spread)?
+            }
             _ => return Ok(None),
         };
         Ok(Some(output))
@@ -504,6 +592,7 @@ impl QuantizedMatrix {
         xs: &[f32],
         input_rows: usize,
         kernel: fn(&[WeightBlock], &[InputBlock], usize, &mut [f32]),
+        spread: RowSpread,
     ) -> Result<Vec<f32>>
     where
         W: GgmlType,
@@ -558,14 +647,20 @@ impl QuantizedMatrix {
         let inputs = unsafe { qgemm::as_mirror::<W::VecDotType, InputBlock>(&packed) };
 
         let mut transposed = vec![0f32; self.rows * input_rows];
-        transposed
-            .par_chunks_mut(input_rows)
-            .enumerate()
-            .for_each(|(output_row, output)| {
-                let weight =
-                    &weights[output_row * blocks_per_row..(output_row + 1) * blocks_per_row];
-                kernel(weight, inputs, input_rows, output);
-            });
+        let compute = |output_row: usize, output: &mut [f32]| {
+            let weight = &weights[output_row * blocks_per_row..(output_row + 1) * blocks_per_row];
+            kernel(weight, inputs, input_rows, output);
+        };
+        match spread {
+            RowSpread::Pool => transposed
+                .par_chunks_mut(input_rows)
+                .enumerate()
+                .for_each(|(output_row, output)| compute(output_row, output)),
+            RowSpread::Caller => transposed
+                .chunks_mut(input_rows)
+                .enumerate()
+                .for_each(|(output_row, output)| compute(output_row, output)),
+        }
         let mut output = vec![0f32; input_rows * self.rows];
         for input_row in 0..input_rows {
             for output_row in 0..self.rows {
@@ -594,7 +689,12 @@ impl QuantizedMatrix {
         })
     }
 
-    fn small_m_forward<T: GgmlType>(&self, xs: &[f32], input_rows: usize) -> Result<Vec<f32>> {
+    fn small_m_forward<T: GgmlType>(
+        &self,
+        xs: &[f32],
+        input_rows: usize,
+        spread: RowSpread,
+    ) -> Result<Vec<f32>> {
         ensure!(
             self.dtype == T::DTYPE,
             "small-M kernel dtype mismatch: matrix {:?}, block {:?}",
@@ -637,18 +737,24 @@ impl QuantizedMatrix {
         // block once per input row; `fused_forward` decodes it once in total
         // and is preferred wherever the CPU supports it.
         let mut transposed = vec![0f32; self.rows * input_rows];
-        transposed
-            .par_chunks_mut(input_rows)
-            .enumerate()
-            .for_each(|(output_row, output)| {
-                let weight =
-                    &weights[output_row * blocks_per_row..(output_row + 1) * blocks_per_row];
-                for input_row in 0..input_rows {
-                    let input = &quantized_inputs
-                        [input_row * blocks_per_row..(input_row + 1) * blocks_per_row];
-                    output[input_row] = T::vec_dot(self.columns, weight, input);
-                }
-            });
+        let compute = |output_row: usize, output: &mut [f32]| {
+            let weight = &weights[output_row * blocks_per_row..(output_row + 1) * blocks_per_row];
+            for input_row in 0..input_rows {
+                let input =
+                    &quantized_inputs[input_row * blocks_per_row..(input_row + 1) * blocks_per_row];
+                output[input_row] = T::vec_dot(self.columns, weight, input);
+            }
+        };
+        match spread {
+            RowSpread::Pool => transposed
+                .par_chunks_mut(input_rows)
+                .enumerate()
+                .for_each(|(output_row, output)| compute(output_row, output)),
+            RowSpread::Caller => transposed
+                .chunks_mut(input_rows)
+                .enumerate()
+                .for_each(|(output_row, output)| compute(output_row, output)),
+        }
         let mut output = vec![0f32; input_rows * self.rows];
         for input_row in 0..input_rows {
             for output_row in 0..self.rows {
@@ -1516,12 +1622,12 @@ mod tests {
             for rows in [2, 3, 4, 7, 8, 9, 15, 16] {
                 let input = deterministic_input(rows, 512);
                 let reference = matrix
-                    .forward_via(&input, MultiRowPath::Candle)
+                    .forward_via(&input, MultiRowPath::Candle, RowSpread::Pool)
                     .unwrap()
                     .to_vec2::<f32>()
                     .unwrap();
                 let fused = matrix
-                    .forward_via(&input, MultiRowPath::Fused)
+                    .forward_via(&input, MultiRowPath::Fused, RowSpread::Pool)
                     .unwrap()
                     .to_vec2::<f32>()
                     .unwrap();
@@ -1556,11 +1662,46 @@ mod tests {
         let input = deterministic_input(1, 512);
         let dispatched = matrix.forward(&input).unwrap().to_vec2::<f32>().unwrap();
         let candle = matrix
-            .forward_via(&input, MultiRowPath::Candle)
+            .forward_via(&input, MultiRowPath::Candle, RowSpread::Pool)
             .unwrap()
             .to_vec2::<f32>()
             .unwrap();
         assert_eq!(dispatched, candle);
+    }
+
+    /// Where the output rows are computed must not be visible in them.
+    ///
+    /// Each output row reads the whole input and writes only its own slice of
+    /// the result, so spreading the rows across the pool and computing them all
+    /// on the calling thread are the same arithmetic in a different order of
+    /// *execution*, not of summation. The MoE relies on that to run its experts
+    /// in parallel without changing a decoded token, so it is asserted rather
+    /// than argued — at row counts either side of the tile boundary, and on the
+    /// row-major result so a transpose slip would show as well.
+    #[test]
+    fn row_spread_does_not_change_the_result() {
+        for dtype in [GgmlDType::Q4K, GgmlDType::Q6K, GgmlDType::Q8_0] {
+            let matrix = deterministic_matrix(dtype, 96, 512);
+            for rows in [2, 8, 15, 16, 17, 33] {
+                let input = deterministic_input(rows, 512);
+                let values = input.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+                let pool = matrix.forward_rows(&values, rows, RowSpread::Pool).unwrap();
+                let caller = matrix
+                    .forward_rows(&values, rows, RowSpread::Caller)
+                    .unwrap();
+                assert_eq!(pool, caller, "{dtype:?} rows={rows} depended on the spread");
+                // And both are what `forward` returns, so the flat entry point
+                // is not a second implementation of the same product.
+                let dispatched = matrix
+                    .forward(&input)
+                    .unwrap()
+                    .flatten_all()
+                    .unwrap()
+                    .to_vec1::<f32>()
+                    .unwrap();
+                assert_eq!(pool, dispatched, "{dtype:?} rows={rows} flat vs tensor");
+            }
+        }
     }
 
     /// Column counts that are not a whole number of blocks cannot be
