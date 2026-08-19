@@ -416,9 +416,12 @@ mod avx2 {
                         $tile::<TILE>(weight, inputs, rows, base, out);
                         base += TILE;
                     }
-                    // The remainder is smaller than one tile, so it decodes
-                    // each block once more; instantiating every width keeps
-                    // the accumulators in registers there too.
+                    // The loop above leaves fewer than `TILE` rows, so the
+                    // remainder is 0..=TILE-1 and the arms above that were
+                    // never reachable. It decodes each block once more;
+                    // instantiating every width it can actually take keeps the
+                    // accumulators in registers there too.
+                    debug_assert!(rows - base < TILE);
                     match rows - base {
                         0 => {}
                         1 => $tile::<1>(weight, inputs, rows, base, out),
@@ -427,15 +430,7 @@ mod avx2 {
                         4 => $tile::<4>(weight, inputs, rows, base, out),
                         5 => $tile::<5>(weight, inputs, rows, base, out),
                         6 => $tile::<6>(weight, inputs, rows, base, out),
-                        7 => $tile::<7>(weight, inputs, rows, base, out),
-                        8 => $tile::<8>(weight, inputs, rows, base, out),
-                        9 => $tile::<9>(weight, inputs, rows, base, out),
-                        10 => $tile::<10>(weight, inputs, rows, base, out),
-                        11 => $tile::<11>(weight, inputs, rows, base, out),
-                        12 => $tile::<12>(weight, inputs, rows, base, out),
-                        13 => $tile::<13>(weight, inputs, rows, base, out),
-                        14 => $tile::<14>(weight, inputs, rows, base, out),
-                        _ => $tile::<15>(weight, inputs, rows, base, out),
+                        _ => $tile::<7>(weight, inputs, rows, base, out),
                     }
                 }
             }
