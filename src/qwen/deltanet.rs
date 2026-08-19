@@ -54,33 +54,54 @@ fn l2_normalize_slice(x: &mut [f32]) {
     }
 }
 
+/// Fewest rows in a pass for the recurrence to be worth the thread pool.
+///
+/// The step runs once per row, so a pass of `n` rows wakes the pool `n` times
+/// per layer and the waking is paid per row, not per pass. What falls with the
+/// row count is the cost of each waking: consecutive rows call back into the
+/// pool immediately, so only the first finds the workers asleep. Measured on
+/// the qualified host — DeltaNet recurrence, milliseconds per token, over
+/// 96 tokens prefilled at each width:
+///
+/// | rows | 1 | 2 | 3 | 4 | 6 | 8 | 12 | 16 | 32 |
+/// | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+/// | calling thread | 19.93 | 8.15 | 6.95 | 6.65 | 6.13 | 5.99 | 5.71 | 5.67 | 5.37 |
+/// | thread pool | — | 11.77 | 8.01 | 6.15 | 5.53 | 4.97 | 4.13 | 3.96 | 3.36 |
+///
+/// Four is where it turns. That matters beyond prefill because it is also the
+/// width of a speculative verification pass: with an MTP draft accepted about
+/// four times in five, most verifications are two or three rows, and spreading
+/// those cost 4% of decode on the end-to-end agent turn — twice, before this
+/// threshold was measured rather than assumed.
+const HEAD_SPREAD_MIN_ROWS: usize = 4;
+
 /// Where one recurrence step's heads are computed.
 ///
-/// The step is called once per row, so the trade is one fork/join against what
-/// five extra cores return on a fixed amount of work. In a pass of many rows
-/// the calls run back to back and the pool stays awake between them; a one-row
-/// decode pass calls it once per layer with candle's own matvec pool holding
-/// the cores in between, and waking six sleeping workers costs more than they
-/// give back. Measured on the qualified host, DeltaNet recurrence over sixteen
-/// decode passes at 64 context: 0.126 s on the calling thread, 0.161 s through
-/// the pool. Over a 256-row prefill pass, per token: 5.16 ms on the calling
-/// thread, 2.79 ms through the pool.
+/// Measured on the qualified host, DeltaNet recurrence over sixteen decode
+/// passes at 64 context: 0.126 s on the calling thread, 0.161 s through the
+/// pool. Over a 256-row prefill pass, per token: 5.16 ms on the calling
+/// thread, 2.79 ms through the pool. See `HEAD_SPREAD_MIN_ROWS` for where
+/// between those two the choice turns.
 ///
 /// Which one runs cannot change a value — see `recurrent_delta_step` — so this
 /// is a scheduling choice and nothing else.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum HeadSpread {
-    /// Spread the heads across the global rayon pool. For passes of more than
-    /// one row.
+    /// Spread the heads across the global rayon pool. For a prefill pass.
     Pool,
-    /// Run every head on the calling thread. For a one-row decode pass.
+    /// Run every head on the calling thread. For a one-row decode pass and for
+    /// the narrow verification pass speculation runs behind it.
     Caller,
 }
 
 impl HeadSpread {
     /// What a pass of `rows` rows should use.
     pub(crate) fn for_rows(rows: usize) -> Self {
-        if rows > 1 { Self::Pool } else { Self::Caller }
+        if rows >= HEAD_SPREAD_MIN_ROWS {
+            Self::Pool
+        } else {
+            Self::Caller
+        }
     }
 }
 
@@ -518,8 +539,11 @@ mod tests {
 
     #[test]
     fn only_a_wider_pass_pays_for_the_pool() {
+        // A one-row decode and the two- or three-row verification pass behind
+        // a speculative decode both stay on the calling thread.
         assert_eq!(HeadSpread::for_rows(1), HeadSpread::Caller);
-        assert_eq!(HeadSpread::for_rows(2), HeadSpread::Pool);
+        assert_eq!(HeadSpread::for_rows(3), HeadSpread::Caller);
+        assert_eq!(HeadSpread::for_rows(4), HeadSpread::Pool);
         assert_eq!(HeadSpread::for_rows(512), HeadSpread::Pool);
     }
 }
