@@ -31,6 +31,15 @@ const SMALL_M_MIN_STORAGE_BYTES: usize = 4 * 1024 * 1024;
 /// bounded by the draft length, which is capped below that.
 const MULTI_ROW_RANGE: std::ops::RangeInclusive<usize> = 2..=16;
 
+/// Rows handed to the fused kernel at once.
+///
+/// Its per-row cost is flat between eight and sixty-four rows and then climbs
+/// again — on `attn_qkv` (Q6K, 8192x2048) 116 ns/row at eight, 101 at sixteen,
+/// 111 at sixty-four, 151 at two hundred and fifty-six — so a wide pass is
+/// tiled rather than handed over whole. Sixteen is the measured floor of that
+/// curve and the width the multi-row work was validated at.
+const MULTI_ROW_TILE: usize = 16;
+
 /// Which multi-row matmul implementation to run.
 ///
 /// `forward` chooses one of these per call; the kernel benchmarks pin a
@@ -375,20 +384,52 @@ impl QuantizedMatrix {
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let xs = self.validated_input(xs)?;
         let input_rows = xs.elem_count() / self.columns;
-        if MULTI_ROW_RANGE.contains(&input_rows)
+        if input_rows >= *MULTI_ROW_RANGE.start()
             && self.tensor.device().is_cpu()
             && (self.storage_bytes >= SMALL_M_MIN_STORAGE_BYTES || cfg!(test))
         {
             let values = xs.flatten_all()?.to_vec1::<f32>()?;
-            if let Some(output) =
-                self.multi_row_forward(&values, input_rows, MultiRowPath::Fused)?
-            {
+            if let Some(output) = self.tiled_multi_row(&values, input_rows)? {
                 let mut shape = xs.dims().to_vec();
                 *shape.last_mut().expect("rank validated above") = self.rows;
                 return Ok(Tensor::from_vec(output, shape, xs.device())?);
             }
         }
         Ok(xs.apply_op1_no_bwd(self.tensor.as_ref())?)
+    }
+
+    /// Run the fused kernel over every row, a tile at a time.
+    ///
+    /// A prefill pass is hundreds of rows wide and used to fall through to the
+    /// per-row path, which decodes each weight block once per row rather than
+    /// once per tile. Tiling keeps the reuse at the width it is worth most.
+    ///
+    /// Each output row depends only on its own input row and the weights, and
+    /// the fused kernel's per-row result does not vary with how many rows it is
+    /// given — measured bit-identical against Candle from two rows to two
+    /// hundred and fifty-six — so tiling returns what one wide call would.
+    fn tiled_multi_row(&self, values: &[f32], input_rows: usize) -> Result<Option<Vec<f32>>> {
+        let mut output = Vec::with_capacity(input_rows * self.rows);
+        let mut start = 0;
+        while start < input_rows {
+            let remaining = input_rows - start;
+            // Never leave one row for the last tile: the fused kernel begins at
+            // two, and a single row has no decoded block to share anyway.
+            let rows = if remaining <= MULTI_ROW_TILE {
+                remaining
+            } else if remaining - MULTI_ROW_TILE == 1 {
+                MULTI_ROW_TILE - 1
+            } else {
+                MULTI_ROW_TILE
+            };
+            let slice = &values[start * self.columns..(start + rows) * self.columns];
+            match self.multi_row_forward(slice, rows, MultiRowPath::Fused)? {
+                Some(mut tile) => output.append(&mut tile),
+                None => return Ok(None),
+            }
+            start += rows;
+        }
+        Ok(Some(output))
     }
 
     /// Run one specific multi-row implementation, bypassing dispatch.
@@ -862,9 +903,35 @@ impl std::fmt::Debug for GgufCheckpoint {
     }
 }
 
+/// Refuse a build whose kernels do not agree with each other.
+///
+/// Dispatch sends one row to Candle's kernel and two or more to the fused one.
+/// Compiled for this host they reach the same summation order and are
+/// bit-identical, so a speculative run commits exactly what target-only
+/// decoding would. Compiled for baseline x86-64 they do not: measured on
+/// Qwen3.6-35B-A3B Q4_K_M, 3,476,478 of 248,320 logits differ across a pass,
+/// by up to 1.236 against a tightest decision margin of 0.565, and greedy
+/// equivalence becomes probabilistic. See docs/speculative-decoding.md.
+///
+/// The difference is invisible at runtime and the wrong build looks fine, so
+/// it is refused here rather than warned about. This engine targets the host
+/// it is built on; there is no portable configuration to preserve.
+fn require_exact_kernels() -> Result<()> {
+    ensure!(
+        cfg!(target_feature = "fma"),
+        "this build has no FMA, so the one-row and multi-row quantized kernels \
+         reach different summation orders and speculative decoding would stop \
+         being output-preserving. Rebuild for this host:\n  \
+         CARGO_TARGET_DIR=target-native RUSTFLAGS='-C target-cpu=native' \
+         cargo build --release"
+    );
+    Ok(())
+}
+
 impl GgufCheckpoint {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         crate::threading::init();
+        require_exact_kernels()?;
         let path = path.as_ref().to_path_buf();
         let mut file =
             File::open(&path).with_context(|| format!("failed to open {}", path.display()))?;
