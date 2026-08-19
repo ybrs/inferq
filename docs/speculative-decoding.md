@@ -279,6 +279,43 @@ Three gates fail. Per the task's instructions the analysis stops here rather
 than moving into the kernel or dispatch layer; sections below isolate each
 cause with the histograms and stage timings.
 
+### Greedy equivalence depends on the build flags
+
+Whether a speculative run can commit a token target-only decoding would not
+have is not a property of this engine alone — it is a property of how the
+engine was compiled. Dispatch sends one row to Candle's kernel and two or more
+to the fused one, and whether those two agree depends on what the compiler was
+allowed to emit.
+
+Measured on the same commit, the same checkpoint and the same six threads, with
+`tests/speculative_policy.rs`'s
+`a_multi_row_pass_agrees_with_single_row_decoding_on_the_greedy_choice`, which
+compares a logit computed at M=1 against the same logit as row 0 of a wider
+pass:
+
+| build | logits differing | worst delta | tightest top1/top2 margin |
+| --- | ---: | ---: | ---: |
+| `RUSTFLAGS='-C target-cpu=native'` | **0 of 248,320** | **0** | 1.069 |
+| stock `cargo build --release` | 3,476,478 | 1.236 | 0.565 |
+
+On a baseline x86-64 build the two kernels reach different summation orders,
+four layers of ULP become 1.236 against a margin of 0.565, and equivalence is
+probabilistic — which is what task 393 recorded. With AVX2 and FMA available
+both compile to arithmetic that agrees bit for bit, and equivalence is exact.
+`gguf_matmul_bench` confirms the kernel-level statement directly: on a native
+build, Candle, `vec_dot` and the fused kernel are bit-identical on
+`attn_qkv` (Q6K), `attn_gate` (Q4K), `ssm_out` (Q8_0), `attn_k` (Q8_0),
+`attn_output` (Q5K), a fused expert (Q4K) and the 397.9 MiB LM head (Q6K), at
+every width from 2 to 256.
+
+Two consequences. Speculative decoding is exactly output-preserving on the
+build this repository benchmarks and ships, and the caveats elsewhere in these
+reports should be read with that qualification. But the guarantee is only as
+firm as the flags: a stock release build silently gives up exactness, and
+nothing currently checks. That is a reason to treat `target-native` as the
+supported configuration rather than an optimisation, and it is worth a runtime
+assertion rather than a convention.
+
 ### Greedy equivalence
 
 Every n-gram run below emitted a token id sequence bit-identical to the
