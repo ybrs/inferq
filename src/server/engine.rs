@@ -816,18 +816,22 @@ fn store_boundary_entry(
     let wants_mtp =
         effective_speculative_mode(options).allows_mtp() && runtime.model().mtp().is_some();
     runtime.prefill_tokens(&tokens[from..boundary], wants_mtp)?;
-    let image = runtime.session_image(tokens[..boundary].to_vec())?;
     // An entry is written once and then reused forever, so it must not
-    // capture a session that had already lost its predictor state — a halted
-    // turn earlier in this session, for instance. Skipping leaves the key free
-    // for a later request that can fill it properly.
-    if wants_mtp && image.mtp.is_none() {
+    // capture a session that had already lost its predictor state — a session
+    // whose MTP gap could not be repaired, for instance. Skipping leaves the
+    // key free for a later request that can fill it properly. The question is
+    // asked before the image is built rather than of the finished image: an
+    // image is a deep copy of the KV cache and every layer's recurrent state,
+    // and a session that cannot supply the predictor should not pay for one
+    // only to have it thrown away.
+    if wants_mtp && !runtime.images_mtp_state() {
         tracing::debug!(
             boundary,
             "not storing a prompt cache entry: this session cannot supply the MTP predictor's state"
         );
         return Ok(boundary);
     }
+    let image = runtime.session_image(tokens[..boundary].to_vec())?;
     let bytes = image.bytes();
     if cache.store(image) {
         tracing::debug!(
