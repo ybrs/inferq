@@ -4,6 +4,8 @@ use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 use tokenizers::Tokenizer;
 
+use crate::tool_calls::python_json;
+
 #[derive(Clone)]
 pub struct ModelTokenizer {
     tokenizer: Tokenizer,
@@ -338,35 +340,6 @@ fn qwen_system_block(messages: &[ChatMessage], tools: &[Value]) -> String {
     }
     prompt.push_str("<|im_end|>\n");
     prompt
-}
-
-/// JSON with Python's default separators and the key order the request used,
-/// which is what the reference template produces through Jinja's `tojson`
-/// (transformers overrides it with `sort_keys=False, ensure_ascii=False`).
-///
-/// `serde_json` is built with `preserve_order` so a tool definition renders in
-/// the order the client declared it, byte for byte like the reference.
-fn python_json(value: &Value) -> String {
-    match value {
-        Value::Object(map) => {
-            let fields: Vec<String> = map
-                .iter()
-                .map(|(key, value)| {
-                    format!(
-                        "{}: {}",
-                        python_json(&Value::String(key.clone())),
-                        python_json(value)
-                    )
-                })
-                .collect();
-            format!("{{{}}}", fields.join(", "))
-        }
-        Value::Array(items) => {
-            let items: Vec<String> = items.iter().map(python_json).collect();
-            format!("[{}]", items.join(", "))
-        }
-        other => other.to_string(),
-    }
 }
 
 fn qwen_chat_messages(messages: &[ChatMessage], tools: &[Value]) -> String {

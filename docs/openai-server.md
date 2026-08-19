@@ -369,38 +369,42 @@ assistant's `tool_calls` back with them so the model sees its own call.
 
 ### The round trip preserves bytes
 
-A client that echoes an assistant turn back verbatim gets a prompt whose tool
-markup is byte for byte what the model generated. That is a performance
-contract, not a cosmetic one: the engine continues the live session only while
-the new prompt is a token prefix continuation of the last one, so a single
-changed space re-prefills the whole conversation from a cache boundary.
+An assistant turn sent back on the next request is rendered into the prompt
+again, and the markup that comes out is byte for byte what the model generated.
+That is a performance contract, not a cosmetic one: the engine continues the
+live session only while the new prompt is a token prefix continuation of the
+last one, so a single changed space re-prefills the whole conversation from a
+cache boundary.
 
-It costs a specific discipline on both sides of `function.arguments`:
+The bytes cannot simply be carried across. OpenAI's `function.arguments` is a
+JSON *string*, and a client is entitled to parse it and re-emit it — pi 0.84.2
+does exactly that, with `JSON.stringify`, which compacts away every space before
+the call ever comes back. What makes the round trip exact anyway is that the
+model's formatting is not arbitrary. The template writes a structured parameter
+with Jinja's `tojson`; transformers configures `tojson` with Python's default
+separators; so the template — and therefore the model trained on it — writes
+`[{"oldText": "a", "newText": "b"}]`, with a space after every colon and comma.
+Re-rendering the parsed value in that same form lands on the model's own bytes
+whatever the client did in between.
 
-- **Out.** The `arguments` object is assembled from the parameter text, not
-  re-serialised from parsed values. A parameter whose text is already JSON of
-  some non-string type is copied in as it stands, keeping the model's own
-  spacing — `{"edits":[{"oldText": "a", "newText": "b"}]}`, spaces intact.
-  Anything else, including every parameter the schema declares a `string`,
-  becomes a JSON string of exactly that text.
-- **Back.** Rendering reads the members out of the `arguments` *text*, with
-  their own bytes, rather than through a parsed value. A JSON string means "the
-  parameter text is this string's contents" and any other JSON value means "the
-  parameter text is these bytes", so the two encodings above invert exactly.
+Both sides of the field are held to it:
 
-This is also what the reference template does, which is why it matters: the
-template writes a non-string parameter with Jinja's `tojson`, and transformers
-configures that with Python's default separators — `{"a": 1}`, with the spaces.
-The model learned to write its JSON that way, so keeping the model's bytes and
-matching the template are the same thing here.
+- **Out.** The `arguments` object is assembled from the parameter text rather
+  than re-serialised from parsed values, so a client that *does* echo the string
+  verbatim never had a chance to lose anything. A parameter whose text is
+  already JSON of a non-string type is copied in as it stands; anything else —
+  including every parameter the schema declares a `string` — becomes a JSON
+  string of exactly that text.
+- **Back.** A JSON string is written as its contents. An object or an array is
+  written with the template's own separators. A number, a boolean or `null`
+  keeps its exact text, which no formatting choice affects.
 
-The residual: a client that parses `arguments` and re-serialises it before
-sending it back — compacting it, or reordering keys — has already discarded the
-model's bytes, and no amount of care on this side recovers them. Such a turn
-renders as valid, semantically identical markup and simply falls back to
-`reuse="cache"`. The same is true of a parameter whose text is JSON with
-leading or trailing whitespace: the whitespace is trimmed so the value stays
-the type the schema declared, at the cost of exactness on that one parameter.
+The residual is the inverse case: a parameter whose JSON the model wrote in some
+*other* formatting — indented across lines, or compact — is normalised to the
+template's form, because that is the one formatting both ends can agree on
+without the bytes. On this checkpoint the model writes the template's form, so
+this has not been observed in an agent run. Leading or trailing whitespace
+around a JSON-valued parameter is trimmed for the same reason.
 
 A turn ends at the closing `</tool_call>` tag, so it carries at most one call.
 That is a deliberate limit, not an oversight: the template tells the model to
@@ -424,8 +428,9 @@ through Jinja2 with the filter overrides transformers applies, for a tools
 prompt, a full tool round trip, and a plain conversation. `src/tool_calls.rs`
 checks the byte-preservation contract on its own — parse, hand out `arguments`,
 render back, and compare with the markup that went in — over nested JSON with
-the model's spacing, multi-line values, quotes, unicode and untyped
-parameters. `tests/openai_server.rs` closes the loop on the real tokenizer:
+the model's spacing, multi-line values, quotes, unicode and untyped parameters,
+and over arguments a client compacted or pretty-printed on the way back.
+`tests/openai_server.rs` closes the loop on the real tokenizer:
 the prompt built from an echoed tool call must be a token prefix continuation
 of the previous prompt plus the tokens the model generated, which is the
 comparison the engine itself makes.
@@ -492,11 +497,11 @@ contents. The same first turn against an empty cache took 19 minutes.
 
 A longer whole-task run is the measurement that keeps the microbenchmarks
 honest, because it is the only one that pays for every path at once — a cold
-boundary prefill, live-reuse continuations, a cache fallback when pi rewrites
-its history, and a speculative decode behind all of them. Asking pi to identify
-the model a repository uses and update its `CLAUDE.md` and `README.md` produces
-seven turns. On an i7-8700 at six threads with the experts resident, against
-the same task from a clean checkout and an empty prompt cache:
+boundary prefill, live-reuse continuations, a cache fallback, and a speculative
+decode behind all of them. Asking pi to identify the model a repository uses and
+update its `CLAUDE.md` and `README.md` produces seven turns. On an i7-8700 at
+six threads with the experts resident, against the same task from a clean
+checkout and an empty prompt cache:
 
 | turn | prefill tokens | prefill tok/s | decode tok/s |
 | ---: | ---: | ---: | ---: |
@@ -518,10 +523,38 @@ both times. Run the two sides in the same session: the same turn measured
 9.59 tok/s in an earlier session and 9.11 in this one, which is larger than
 anything measured here.
 
-Turn 6 is the one to keep an eye on rather than to read as throughput: pi
-rewrote its own history there, the live prefix no longer matched, and the turn
-re-prefilled 1.8k tokens from the boundary. That costs about 70 seconds of the
-run and is a prompt-cache question, not an engine-throughput one.
+Turns 6 and 7 in that table were not throughput measurements at all. They were
+the tool-call round trip losing the model's bytes: both fell off the live
+session and re-prefilled from the boundary. They are also the first two turns to
+call `edit`, whose `edits` parameter is the only JSON-valued one this task uses
+— see [the round trip](#the-round-trip-preserves-bytes).
+
+Re-measured in one later session, before and after the render side writes that
+parameter the way the template does. Both sides ran back to back on the same
+host with the same warm cache, so the two columns are comparable with each other
+rather than with the table above:
+
+| turn | prompt tokens | prefill tokens | reuse | seconds |
+| ---: | ---: | ---: | --- | ---: |
+| 1 | 1807 | 271 | cache | 22.9 |
+| 2 | 2132 | 197 | live | 15.8 |
+| 3 | 2399 | 171 | live | 19.6 |
+| 4 | 2643 | 116 | live | 13.6 |
+| 5 | 2865 | 132 | live | 46.0 |
+| 6 | 3323 | 1780 → **84** | cache → **live** | 92.5 → **30.5** |
+| 7 | 3635 | 554 → **82** | cache → **live** | 50.2 → **25.5** |
+| whole task | | | | 265 s → **175 s** |
+
+Every turn after the first now continues the live session, the divergence log is
+silent, and the agent's edits to both files are the same edits. Turn 1 stays on
+the cache because it is the first request of the process and has no live session
+to continue; that is the tier working, not failing.
+
+Turns 1 to 5 reused the same way in both runs, so they carry one figure. The
+prompt lengths are the second run's, and they move by a few tokens between runs
+for a reason worth knowing before reading anything into them: the agent's first
+tool call is `ls -la`, whose output carries file timestamps, so no two runs of
+this task decode from quite the same prompt.
 
 ## Thinking
 

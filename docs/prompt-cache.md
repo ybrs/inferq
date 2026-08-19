@@ -84,13 +84,14 @@ recurrence is destructive: state can be extended but never un-applied. That is
 the reason the cache stores *images* captured at a boundary rather than
 trimming a longer state back.
 
-Sending the history back verbatim is only half of it: the server has to render
-it back into the same bytes. A tool call is where that is easy to lose, since
-the model's arguments pass through the API as JSON and come back to be written
-into the prompt again; `docs/openai-server.md` describes the contract that
-keeps them identical. When a request does miss, the log says where the two
-token streams parted and decodes a window of each side, because the difference
-is normally a single character in one message.
+"Verbatim" is more demanding than it sounds, and it is not only the client's
+job. A tool call leaves as JSON inside an OpenAI `arguments` string, and a
+client may parse and re-emit that string before sending it back — pi does — so
+the server has to be able to write the model's bytes back from the value alone.
+It can, because the model's JSON formatting is the template's;
+`docs/openai-server.md` describes the contract. When a request does miss, the
+log says where the two token streams parted and decodes a window of each side,
+because the difference is normally a single character in one message.
 
 ## Boundaries
 
