@@ -1123,6 +1123,75 @@ impl<'a> QuantizedRuntime<'a> {
         Ok(rows)
     }
 
+    /// Drop the retained gap without touching the predictor's own state.
+    fn clear_mtp_gap(&mut self) {
+        self.mtp_gap_tokens.clear();
+        self.mtp_gap_hidden.clear();
+        self.mtp_gap_prior_hidden = None;
+    }
+
+    /// Bring the retained MTP gap back into step with a target state that has
+    /// just been rolled back to `position`.
+    ///
+    /// The gap describes exactly the tokens between the predictor's synced
+    /// position and the target's, so a rollback that drops committed rows has
+    /// to drop the gap entries those rows contributed — and nothing else. The
+    /// alternative, abandoning the gap, ends the arm for the rest of the
+    /// session rather than for the rest of the pass: `mtp_arm_ready` is what
+    /// `arm_configs` gates the arm on, an arm gated off retains no rows, and a
+    /// gap that is never retained can never be closed. One rollback would cost
+    /// every later turn its speculation.
+    ///
+    /// Nothing here changes a committed token: the retained rows the gap keeps
+    /// are the same authoritative rows it held before, in the same order, and
+    /// the predictor still reads them through the same catch-up pass.
+    fn truncate_mtp_gap(&mut self, position: usize) -> Result<()> {
+        match gap_after_rollback(
+            self.mtp_synced_position,
+            self.mtp_gap_tokens.len(),
+            position,
+        ) {
+            GapAfterRollback::Retain(retained) => {
+                let hidden_size = self.model.config().hidden_size;
+                self.mtp_gap_tokens.truncate(retained);
+                self.mtp_gap_hidden.truncate(retained * hidden_size);
+                if retained == 0 {
+                    // The prior row describes the token before the gap's first
+                    // one, and there is no longer a first one; the next
+                    // retained row supplies it again.
+                    self.mtp_gap_prior_hidden = None;
+                }
+            }
+            GapAfterRollback::TruncatePredictor => {
+                // The predictor synced past the rolled-back point, which only
+                // `eager_mtp_resync` arranges: it catches up after a pass has
+                // committed its rows, and the rollback then unwinds some of
+                // them. Its rows for those positions were computed from hidden
+                // rows that no longer describe the sequence, so they are
+                // truncated away — the same operation every catch-up performs
+                // before it writes, and equally exact, because the block's
+                // cache is append-only.
+                if let Some(state) = self.mtp_state.as_mut() {
+                    state.truncate(position)?;
+                }
+                self.mtp_synced_position = position;
+                self.clear_mtp_gap();
+            }
+            GapAfterRollback::Unrecoverable => {
+                tracing::debug!(
+                    position,
+                    synced = self.mtp_synced_position,
+                    gap = self.mtp_gap_tokens.len(),
+                    "the retained MTP gap does not reach the rolled-back position, so the \
+                     MTP arm sits out until this session is reset or restored"
+                );
+                self.mtp_gap_valid = false;
+                self.clear_mtp_gap();
+            }
+        }
+        Ok(())
+    }
+
     /// Retain a committing pass's tokens and hidden rows for the next catch-up.
     fn retain_mtp_gap(
         &mut self,
@@ -1767,13 +1836,29 @@ impl<'a> QuantizedRuntime<'a> {
                     // Leave the session at the boundary immediately before the
                     // token whose output callback failed, with that token
                     // pending, exactly as ordinary generation does.
-                    let evaluated = 1 + output_index.min(accepted);
-                    if snapshotted && evaluated < verification_tokens.len() {
+                    //
+                    // Only a halt inside the accepted drafts has rows to
+                    // unwind. A halt on the pass's authoritative token asks
+                    // for the boundary the state already sits at — a fully
+                    // accepted pass never left it, and a partially rejected
+                    // one was rolled back to it above — and rolling back to
+                    // where the state already is copies every linear layer's
+                    // recurrent state for nothing.
+                    let evaluated = halted_pass_rows(output_index, accepted);
+                    if evaluated < committed_rows {
                         self.state.rollback(&self.snapshots, evaluated)?;
-                        // The retained gap described more tokens than survive
-                        // the rollback and its hidden rows cannot be trimmed
-                        // to match, so the MTP arm sits out until reset.
-                        self.mtp_gap_valid = false;
+                        // The gap entries this pass appended for the unwound
+                        // rows go with them, and the rest of the gap stays: the
+                        // arm survives a halted turn instead of sitting out
+                        // every turn after it.
+                        if self.mtp_gap_valid {
+                            self.truncate_mtp_gap(self.state.position)?;
+                        }
+                        // The carry has to describe the row at the position the
+                        // session now holds, not the last row the pass
+                        // committed before the rollback.
+                        self.last_target_hidden =
+                            Some(nth_hidden_row(&committed_hidden, evaluated - 1)?);
                     }
                     self.halt_with_pending(token);
                     return Err(error);
@@ -1993,7 +2078,56 @@ fn last_hidden_row(hidden: &Tensor) -> Result<Vec<f32>> {
     );
     let rows = hidden.dim(0)?;
     ensure!(rows > 0, "normalized hidden output has no rows");
-    Ok(hidden.i(rows - 1)?.to_vec1::<f32>()?)
+    nth_hidden_row(hidden, rows - 1)
+}
+
+fn nth_hidden_row(hidden: &Tensor, row: usize) -> Result<Vec<f32>> {
+    ensure!(
+        hidden.rank() == 2,
+        "normalized hidden output must be rank two"
+    );
+    let rows = hidden.dim(0)?;
+    ensure!(
+        row < rows,
+        "normalized hidden output has {rows} rows, so row {row} does not exist"
+    );
+    Ok(hidden.i(row)?.to_vec1::<f32>()?)
+}
+
+/// How many of a verification pass's rows a session keeps when the output sink
+/// fails on the pass's output at `output_index`.
+///
+/// A pass emits `accepted + 1` tokens but evaluates only `1 + accepted` rows:
+/// the accepted drafts were evaluated, the authoritative token that follows
+/// them was not. So a halt on accepted draft `j` keeps the rows up to and
+/// including it, and a halt on the authoritative token keeps every committed
+/// row — which is the boundary the state already sits at, so that case must
+/// not roll back at all.
+fn halted_pass_rows(output_index: usize, accepted: usize) -> usize {
+    1 + output_index.min(accepted)
+}
+
+/// What a rollback to `position` leaves of a retained MTP gap of `gap_len`
+/// tokens starting at `synced_position`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GapAfterRollback {
+    /// Keep this many of the gap's entries, and the arm's invariant —
+    /// `synced_position + gap_len == state.position` — holds again.
+    Retain(usize),
+    /// The predictor is ahead of the rolled-back target, so its own state has
+    /// to come back to `position` and the gap goes entirely.
+    TruncatePredictor,
+    /// The gap does not reach the target position, so the invariant was
+    /// already broken before the rollback and truncation cannot restore it.
+    Unrecoverable,
+}
+
+fn gap_after_rollback(synced_position: usize, gap_len: usize, position: usize) -> GapAfterRollback {
+    match position.checked_sub(synced_position) {
+        Some(retained) if retained <= gap_len => GapAfterRollback::Retain(retained),
+        Some(_) => GapAfterRollback::Unrecoverable,
+        None => GapAfterRollback::TruncatePredictor,
+    }
 }
 
 fn shifted_hidden_inputs(
@@ -2171,8 +2305,9 @@ mod quantized_runtime_tests {
     use std::time::Duration;
 
     use super::{
-        QuantizedNgramMetrics, ThinkingBoundary, ThinkingBudget, accepted_draft_prefix,
-        continuation_input, shifted_hidden_inputs, speculative_committed_outputs,
+        GapAfterRollback, QuantizedNgramMetrics, ThinkingBoundary, ThinkingBudget,
+        accepted_draft_prefix, continuation_input, gap_after_rollback, halted_pass_rows,
+        shifted_hidden_inputs, speculative_committed_outputs,
     };
 
     fn thinking_budget(budget: usize) -> ThinkingBudget {
@@ -2378,6 +2513,65 @@ mod quantized_runtime_tests {
         assert_eq!(metrics.rollback_replays, 0);
         assert_eq!(metrics.replayed_tokens, 0);
         assert_eq!(metrics.replay_wall_time, Duration::ZERO);
+    }
+
+    #[test]
+    fn a_halt_on_the_authoritative_token_keeps_every_committed_row() {
+        // Three drafts, two accepted: the pass commits three rows and emits
+        // three tokens. Halting on either accepted draft unwinds back to it;
+        // halting on the authoritative token asks for the boundary the state
+        // already sits at, so that case must not roll back a second time.
+        let accepted = 2;
+        let committed_rows = 1 + accepted;
+        assert_eq!(halted_pass_rows(0, accepted), 1);
+        assert_eq!(halted_pass_rows(1, accepted), 2);
+        assert_eq!(halted_pass_rows(2, accepted), committed_rows);
+        // A pass with nothing accepted emits only its authoritative token.
+        assert_eq!(halted_pass_rows(0, 0), 1);
+    }
+
+    #[test]
+    fn the_retained_gap_follows_the_rollback_rather_than_being_abandoned() {
+        // Predictor synced at 100 with ten retained tokens, so the target sat
+        // at 110. Rolling back to 106 leaves the first six of them, and the
+        // arm's invariant — synced + gap == position — holds again.
+        assert_eq!(
+            gap_after_rollback(100, 10, 106),
+            GapAfterRollback::Retain(6)
+        );
+        // A rollback all the way to the synced position empties the gap
+        // without invalidating it.
+        assert_eq!(
+            gap_after_rollback(100, 10, 100),
+            GapAfterRollback::Retain(0)
+        );
+        // Nothing was unwound.
+        assert_eq!(
+            gap_after_rollback(100, 10, 110),
+            GapAfterRollback::Retain(10)
+        );
+    }
+
+    #[test]
+    fn a_predictor_ahead_of_the_rollback_is_truncated_instead() {
+        // Eager resynchronisation advances the synced position as soon as a
+        // pass commits, so a rollback can land behind it. The gap is empty
+        // there, and the predictor's own rows for those positions have to go.
+        assert_eq!(
+            gap_after_rollback(110, 0, 106),
+            GapAfterRollback::TruncatePredictor
+        );
+    }
+
+    #[test]
+    fn a_gap_too_short_to_reach_the_target_cannot_be_repaired() {
+        // The invariant was already broken before the rollback: no truncation
+        // of a four-token gap describes the ten tokens above the synced
+        // position, so the arm has to sit out.
+        assert_eq!(
+            gap_after_rollback(100, 4, 110),
+            GapAfterRollback::Unrecoverable
+        );
     }
 
     #[test]
