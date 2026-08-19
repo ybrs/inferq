@@ -32,10 +32,10 @@ pub use quantized_layer::{
     QuantizedFullLayer, QuantizedLayerOutput, QuantizedLayerTimings, QuantizedLinearLayer,
 };
 pub use quantized_model::{
-    LayerStateImage, QuantizedForwardOutput, QuantizedForwardTimingReport, QuantizedForwardTimings,
-    QuantizedLayerTimingReport, QuantizedModel, QuantizedModelCheckpoint, QuantizedModelState,
-    QuantizedOperationTimingReport, QuantizedStageTimingReport, QuantizedStateImage,
-    QuantizedStateSnapshots,
+    LayerStateImage, LogitRows, QuantizedForwardOutput, QuantizedForwardTimingReport,
+    QuantizedForwardTimings, QuantizedLayerTimingReport, QuantizedModel, QuantizedModelCheckpoint,
+    QuantizedModelState, QuantizedOperationTimingReport, QuantizedStageTimingReport,
+    QuantizedStateImage, QuantizedStateSnapshots,
 };
 pub use quantized_moe::{
     QuantizedMoeLayer, QuantizedMoeOutput, QuantizedMoeRoutingStats, QuantizedMoeTimings,

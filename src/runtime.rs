@@ -10,9 +10,9 @@ use crate::{
     Checkpoint, ExpertCacheStats, GgufCheckpoint, QuantizedMatrix, Qwen3NextConfig,
     ngram::{NgramDraft, NgramIndex},
     qwen::{
-        ForwardTimings, Model, ModelState, QuantizedAttentionImage, QuantizedForwardTimings,
-        QuantizedModel, QuantizedModelState, QuantizedMtpState, QuantizedMtpTimings,
-        QuantizedStateImage, QuantizedStateSnapshots,
+        ForwardTimings, LogitRows, Model, ModelState, QuantizedAttentionImage,
+        QuantizedForwardTimings, QuantizedModel, QuantizedModelState, QuantizedMtpState,
+        QuantizedMtpTimings, QuantizedStateImage, QuantizedStateSnapshots,
     },
     sampling::{Sampler, SamplingConfig, argmax},
     speculative::{
@@ -649,7 +649,7 @@ impl<'a> QuantizedRuntime<'a> {
         }
         let output = self
             .model
-            .forward_detailed(&evaluated, &mut self.state)
+            .forward_detailed_logits(&evaluated, &mut self.state, None, LogitRows::Last)
             .context("prefill pass failed")?;
         self.mtp_gap_valid = track_mtp && self.mtp_gap_valid;
         if self.mtp_gap_valid {
@@ -777,10 +777,18 @@ impl<'a> QuantizedRuntime<'a> {
     fn forward(&mut self, tokens: &[u32]) -> Result<(Tensor, QuantizedForwardTimings)> {
         let model = &self.model;
         let state = &mut self.state;
-        match self.trace.as_mut() {
-            Some(trace) => model.forward_with_trace(tokens, state, Some(trace.as_mut())),
-            None => model.forward(tokens, state),
-        }
+        // Only the last row's logits are ever read here: this serves the plain
+        // path's prefill and its one-token decodes, and both sample the tail.
+        let output = match self.trace.as_mut() {
+            Some(trace) => model.forward_detailed_logits(
+                tokens,
+                state,
+                Some(trace.as_mut()),
+                LogitRows::Last,
+            )?,
+            None => model.forward_detailed_logits(tokens, state, None, LogitRows::Last)?,
+        };
+        Ok((output.logits, output.timings))
     }
 
     fn force_close_thinking_target_only(
@@ -1235,9 +1243,12 @@ impl<'a> QuantizedRuntime<'a> {
 
         let cache_before = self.model.expert_cache_stats()?;
         let prefill_started = Instant::now();
-        let prefill = self
-            .model
-            .forward_detailed(&evaluated_input_token_ids, &mut self.state)?;
+        let prefill = self.model.forward_detailed_logits(
+            &evaluated_input_token_ids,
+            &mut self.state,
+            None,
+            LogitRows::Last,
+        )?;
         if track_mtp {
             let prior = self.last_target_hidden.clone();
             self.retain_mtp_gap(

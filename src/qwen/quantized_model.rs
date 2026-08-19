@@ -281,6 +281,21 @@ impl QuantizedModelState {
     }
 }
 
+/// Which rows of a pass get logits.
+///
+/// The LM head is the most expensive per-row operation in the model -- a
+/// 248,320-wide vocabulary against a 397.9 MiB Q6_K matrix -- and a prefill
+/// pass reads only the last row of it, because that is the one it samples
+/// from. Rows are independent, so computing fewer changes no value that is
+/// read; verification is the case that genuinely needs all of them, since it
+/// checks a drafted token against every position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogitRows {
+    #[default]
+    All,
+    Last,
+}
+
 pub struct QuantizedForwardOutput {
     pub logits: Tensor,
     pub normalized_hidden: Tensor,
@@ -612,7 +627,7 @@ impl<'a> QuantizedModel<'a> {
         snapshots: &mut QuantizedStateSnapshots,
     ) -> Result<QuantizedForwardOutput> {
         snapshots.begin_pass(state, token_ids.len());
-        self.forward_inner(token_ids, state, None, Some(snapshots))
+        self.forward_inner(token_ids, state, None, Some(snapshots), LogitRows::All)
     }
 
     pub fn forward_detailed_with_trace(
@@ -621,7 +636,19 @@ impl<'a> QuantizedModel<'a> {
         state: &mut QuantizedModelState,
         trace: Option<&mut dyn RoutingTrace>,
     ) -> Result<QuantizedForwardOutput> {
-        self.forward_inner(token_ids, state, trace, None)
+        self.forward_inner(token_ids, state, trace, None, LogitRows::All)
+    }
+
+    /// As [`Self::forward_detailed_with_trace`], but computing logits only for
+    /// the rows the caller will read. See [`LogitRows`].
+    pub fn forward_detailed_logits(
+        &self,
+        token_ids: &[u32],
+        state: &mut QuantizedModelState,
+        trace: Option<&mut dyn RoutingTrace>,
+        logits: LogitRows,
+    ) -> Result<QuantizedForwardOutput> {
+        self.forward_inner(token_ids, state, trace, None, logits)
     }
 
     fn forward_inner(
@@ -630,6 +657,7 @@ impl<'a> QuantizedModel<'a> {
         state: &mut QuantizedModelState,
         mut trace: Option<&mut dyn RoutingTrace>,
         mut snapshots: Option<&mut QuantizedStateSnapshots>,
+        logit_rows: LogitRows,
     ) -> Result<QuantizedForwardOutput> {
         ensure!(!token_ids.is_empty(), "forward requires at least one token");
         ensure!(
@@ -704,7 +732,15 @@ impl<'a> QuantizedModel<'a> {
         hidden = gguf_rms_norm(&hidden, &self.final_norm, self.config.rms_norm_eps)?;
         timings.final_norm = norm_started.elapsed();
         let lm_started = Instant::now();
-        let logits = self.lm_head.forward(&hidden)?;
+        // Only the rows that will be read. `hidden` is returned whole either
+        // way, so the MTP arm and the hidden-state carry are unaffected.
+        let logits = match logit_rows {
+            LogitRows::All => self.lm_head.forward(&hidden)?,
+            LogitRows::Last => {
+                self.lm_head
+                    .forward(&hidden.narrow(0, token_ids.len() - 1, 1)?)?
+            }
+        };
         timings.lm_head = lm_started.elapsed();
         state.position += token_ids.len();
         timings.wall = wall_started.elapsed();
