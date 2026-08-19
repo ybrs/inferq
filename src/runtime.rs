@@ -779,6 +779,17 @@ impl<'a> QuantizedRuntime<'a> {
             && (self.state.position == 0 || self.last_target_hidden.is_some())
     }
 
+    /// Whether an image taken now would carry the MTP predictor's own cache.
+    ///
+    /// This is the condition [`Self::session_image`] applies internally, asked
+    /// separately so a caller that needs the predictor's state can find out
+    /// before it pays for the image: an image is a deep copy of the KV cache
+    /// and every layer's recurrent state, which is hundreds of megabytes at
+    /// agent depths, and a caller that would discard it should not build it.
+    pub fn images_mtp_state(&self) -> bool {
+        self.mtp_state.is_some() && self.mtp_synced_position == self.state.position
+    }
+
     /// Copy everything a later session needs to continue this sequence.
     ///
     /// `tokens` is the exact token prefix the state represents; passing a
@@ -801,7 +812,7 @@ impl<'a> QuantizedRuntime<'a> {
         let mtp = self
             .mtp_state
             .as_ref()
-            .filter(|_| self.mtp_synced_position == self.state.position)
+            .filter(|_| self.images_mtp_state())
             .map(QuantizedMtpState::image);
         Ok(SessionImage {
             tokens,
