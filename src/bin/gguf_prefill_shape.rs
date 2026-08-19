@@ -77,11 +77,18 @@ fn main() -> Result<()> {
     let result = runtime.generate_tokens_with_callback(tokens, &options, |_| Ok(()))?;
     let profile = &result.metrics.prefill_profile;
     let (mut scan, mut other, mut linear, mut moe) = (0., 0., 0., 0.);
+    let mut delta = (0., 0., 0., 0., 0., 0.);
     for layer in &profile.layer_details {
         scan += layer.attention.attention.as_secs_f64();
         other += (layer.attention.wall - layer.attention.attention).as_secs_f64();
         linear += layer.delta.wall.as_secs_f64();
         moe += layer.moe.wall.as_secs_f64();
+        delta.0 += layer.delta.projections.as_secs_f64();
+        delta.1 += layer.delta.convolution.as_secs_f64();
+        delta.2 += layer.delta.recurrence.as_secs_f64();
+        delta.3 += layer.delta.gated_norm.as_secs_f64();
+        delta.4 += layer.delta.output_projection.as_secs_f64();
+        delta.5 += layer.delta.snapshot.as_secs_f64();
     }
     println!();
     println!(
@@ -98,6 +105,20 @@ fn main() -> Result<()> {
     ] {
         println!(
             "  {name:<16} {seconds:>7.2} s  {:>4.1}%",
+            100. * seconds / profile.wall.as_secs_f64()
+        );
+    }
+    println!("  linear splits into:");
+    for (name, seconds) in [
+        ("projections", delta.0),
+        ("convolution", delta.1),
+        ("recurrence", delta.2),
+        ("gated_norm", delta.3),
+        ("output_projection", delta.4),
+        ("snapshot", delta.5),
+    ] {
+        println!(
+            "    {name:<18} {seconds:>7.2} s  {:>4.1}%",
             100. * seconds / profile.wall.as_secs_f64()
         );
     }
