@@ -42,6 +42,13 @@ timings prefill_tokens=11 prefill_seconds=0.661 prefill_tokens_per_second=16.6
 `draft_acceptance` is the share of speculative draft tokens the target kept; a
 run that reports `drafted_tokens=0` is decoding without either arm.
 
+A turn that ends early reports the same fields from the same measurements. An
+agentic client ends every turn early — the engine stops at the first closed
+`</tool_call>` rather than letting the model write call after call — and those
+turns are the ones whose numbers matter most, so their prefill is the prefill
+they actually paid for rather than the boundary pass alone, and the prompt is
+not folded into the decode figure.
+
 ## Decode against context depth
 
 Every throughput figure elsewhere in this repository is measured on a short

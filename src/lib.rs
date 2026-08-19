@@ -30,9 +30,9 @@ pub use residency::{
 };
 pub use runtime::{
     GenerationMetrics, GenerationOptions, GenerationResult, NgramMatchLengthStats,
-    QuantizedDraftObservation, QuantizedGenerationMetrics, QuantizedGenerationResult,
-    QuantizedNgramMetrics, QuantizedRuntime, QuantizedSpeculativeMetrics, Runtime, SessionImage,
-    ThinkingMetrics,
+    PartialRunMetrics, QuantizedDraftObservation, QuantizedGenerationMetrics,
+    QuantizedGenerationResult, QuantizedNgramMetrics, QuantizedRuntime,
+    QuantizedSpeculativeMetrics, Runtime, SessionImage, ThinkingMetrics,
 };
 pub use speculative::{
     ArmConfig, ArmController, ArmStats, PolicyStepRecord, QuantizedPolicyMetrics, SpanCursor,
