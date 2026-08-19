@@ -429,6 +429,19 @@ fn a_multi_row_pass_agrees_with_single_row_decoding_on_the_greedy_choice() -> Re
         "batching vs single-row: {mismatched} logits differ, worst |delta| \
          {worst_delta:e}, tightest top1/top2 margin {tightest_margin:e}"
     );
+    // Bit-exact, not merely agreeing on the argmax. The argmax assertion above
+    // is what this test could claim while the two kernels reached different
+    // summation orders; opening a checkpoint now refuses on a build where they
+    // do, so the stronger statement is available and is the one worth pinning.
+    // If this fails and the argmax assertions did not, the kernels have drifted
+    // apart again and speculative decoding is back to being probabilistic
+    // rather than exact -- see docs/speculative-decoding.md.
+    assert_eq!(
+        mismatched, 0,
+        "a multi-row pass and one-row decoding must produce identical logits, \
+         not merely the same argmax; {mismatched} differ by up to {worst_delta:e} \
+         against a tightest margin of {tightest_margin:e}"
+    );
     Ok(())
 }
 

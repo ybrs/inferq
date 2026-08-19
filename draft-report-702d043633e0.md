@@ -31,7 +31,8 @@ the campaign emitted token ids identical to target-only, with zero mismatches.
 
 Per the original task's gate 8 this is the point at which the default flips to
 `--speculative auto`. It has **not** been flipped, for a reason that is not
-about these numbers: greedy equivalence is currently probabilistic rather than
+about these numbers: greedy equivalence is, on a stock release build,
+probabilistic rather than
 guaranteed (see below), and `AGENTS.md` is explicit that approximate behaviour
 must never become the default. Fixing that is now the only thing standing
 between this work and default-on speculation.
@@ -209,6 +210,18 @@ its gate at every setting, so 0.70 is kept as the compromise that maximises the
 binding constraint. A per-workload optimum is not available to a default.
 
 ## Greedy equivalence is probabilistic, and always was
+
+> **Superseded, 2026-08-19.** This section is correct about the mechanism and
+> wrong about the scope, and is kept as written because the numbers below are
+> what a stock `cargo build --release` still produces. The divergence is a
+> property of the BUILD, not of the kernels: compiled with `-C
+> target-cpu=native`, which is what every benchmark in this repository uses,
+> the one-row and multi-row kernels reach the same summation order and 0 of
+> 248,320 logits differ. `gguf_matmul_bench` measures them bit-identical on
+> every dtype the model carries, at every width from 2 to 256, including the
+> 397.9 MiB LM head. Opening a checkpoint now refuses on a build without FMA,
+> so the numbers below are no longer reachable through the engine. See
+> docs/speculative-decoding.md and task 393.
 
 Validation surfaced a pre-existing problem that three reports have stated as a
 guarantee. It is filed as its own task and is **not** caused by this change.
