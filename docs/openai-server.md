@@ -448,6 +448,39 @@ the second continued the live session — pi had echoed the assistant's
 `tool_calls` and the tool result back verbatim — and answered from the file's
 contents. The same first turn against an empty cache took 19 minutes.
 
+A longer whole-task run is the measurement that keeps the microbenchmarks
+honest, because it is the only one that pays for every path at once — a cold
+boundary prefill, live-reuse continuations, a cache fallback when pi rewrites
+its history, and a speculative decode behind all of them. Asking pi to identify
+the model a repository uses and update its `CLAUDE.md` and `README.md` produces
+seven turns. On an i7-8700 at six threads with the experts resident, against
+the same task from a clean checkout and an empty prompt cache:
+
+| turn | prefill tokens | prefill tok/s | decode tok/s |
+| ---: | ---: | ---: | ---: |
+| 1 (cold) | 1807 | 30.44 → **33.91** | 9.11 → 9.20 |
+| 2 | 197 | 28.40 → 30.47 | 10.13 → 9.86 |
+| 3 | 171 | 26.19 → 28.14 | 10.98 → 10.14 |
+| 4 | 116 | 23.38 → 24.86 | 10.58 → 10.42 |
+| 5 | 132 | 23.29 → 25.49 | 8.39 → 8.98 |
+| 6 (fallback) | ~1820 | 24.53 → 25.88 | 9.13 → 9.32 |
+| 7 | ~590 | 19.55 → **21.01** | 7.66 → 7.52 |
+| whole task | | 330 s → **310 s** | |
+
+Prefill is up on every turn; decode is flat, which is what the depth table
+predicts for a conversation that never passes the blocking threshold. The
+decode columns are not directly comparable turn by turn — the model does not
+generate the same number of tokens twice, and a longer generation ends deeper —
+except on turn 1, which produces the same 128 tokens at the same acceptance
+both times. Run the two sides in the same session: the same turn measured
+9.59 tok/s in an earlier session and 9.11 in this one, which is larger than
+anything measured here.
+
+Turn 6 is the one to keep an eye on rather than to read as throughput: pi
+rewrote its own history there, the live prefix no longer matched, and the turn
+re-prefilled 1.8k tokens from the boundary. That costs about 70 seconds of the
+run and is a prompt-cache question, not an engine-throughput one.
+
 ## Thinking
 
 OpenAI's API has no thinking budget. It has `reasoning_effort` — a categorical
