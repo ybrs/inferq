@@ -13,6 +13,130 @@ use crate::{GgufCheckpoint, QuantizedMatrix, Qwen3NextConfig};
 /// before it. Both effects want the same number, so there is only one to pick.
 const DOT_LANES: usize = 8;
 
+/// Largest grouped-query group the blocked scan carries in registers.
+///
+/// The softmax holds one maximum and one denominator per query head sharing a
+/// KV head, on the stack, so the group size has to have a compile-time bound.
+/// Thirty-two is four times what any Qwen3-Next checkpoint uses; a checkpoint
+/// beyond it takes the per-head scan rather than being scanned wrongly.
+const MAX_GROUP: usize = 32;
+
+/// Live KV bytes, per attention layer, above which the blocked scan wins.
+///
+/// The per-head scan reads each cache row once per query head in the group,
+/// but those reads happen at the same time on the same last-level cache, which
+/// hands them the same lines. So while a layer's live KV fits in that cache
+/// the re-reads are nearly free and the per-head scan's single parallel region
+/// is the cheaper shape; past it they become real misses and reading each row
+/// once starts to matter. Measured on the qualified host (i7-8700, 12 MiB L3,
+/// six threads, Qwen3.6-35B-A3B, sixteen decode passes) — scan wall seconds,
+/// per-head against blocked:
+///
+/// | context | layer KV | per-head | blocked |
+/// | ---: | ---: | ---: | ---: |
+/// | 1024 | 4.2 MB | 0.154 | 0.241 |
+/// | 3072 | 12.6 MB | 0.436 | 0.458 |
+/// | 6144 | 25.2 MB | 0.915 | 0.821 |
+/// | 8192 | 33.6 MB | 1.335 | 1.089 |
+///
+/// Sixteen mebibytes is the first power of two past this host's last-level
+/// cache, and past the depth where the two measured equal. It is a tuning
+/// constant for a class of host, not a property of the checkpoint, and it
+/// cannot change a result: the two scans are bit-identical.
+const KV_BLOCKING_BYTES: usize = 16 << 20;
+
+/// Score scratch the scan keeps in flight, in floats.
+///
+/// One plane costs `attended positions * group size` floats, and a wide pass
+/// at depth has hundreds of planes, so the pass is walked in row chunks that
+/// keep this bounded rather than materialising every token's scores at once.
+/// Four mebibytes is large enough that a chunk still fills the cores and small
+/// enough to stay out of the way of the weights.
+const SCORE_BUDGET: usize = 1 << 20;
+
+/// Fewest positions a score block covers, and fewest columns a weighted-sum
+/// block covers. Splitting finer than this buys parallelism with per-block
+/// overhead and, for the columns, with partial cache lines.
+const MIN_PAST_BLOCK: usize = 128;
+const MIN_COLUMN_BLOCK: usize = 16;
+
+/// How wide a block of `total` should be so that `planes` of them keep
+/// `threads` cores busy, never finer than `grain`.
+fn split(total: usize, planes: usize, threads: usize, grain: usize) -> usize {
+    let parts = (2 * threads).div_ceil(planes.max(1)).max(1);
+    total
+        .div_ceil(parts)
+        .next_multiple_of(grain)
+        .clamp(grain, total.max(grain))
+}
+
+/// One column block of one plane's weighted sum, over every attended position.
+///
+/// The accumulator is transposed — `[column][group]` — so the `G` weights a
+/// position contributes are one vector held in a register for the whole column
+/// block, and each column is one broadcast and one multiply-add. `G` is a
+/// constant for exactly that reason: at a runtime length the innermost loop
+/// keeps its trip count and its prologue.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn weighted_sum_group<const G: usize>(
+    out: &mut [f32],
+    scores: &[f32],
+    values: &[f32],
+    kv_head: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    first_column: usize,
+) {
+    let width = out.len() / G;
+    for (past, weights) in scores.chunks_exact(G).enumerate() {
+        let base = (past * kv_heads + kv_head) * head_dim + first_column;
+        let values = &values[base..base + width];
+        for (out, value) in out.chunks_exact_mut(G).zip(values) {
+            for (out, weight) in out.iter_mut().zip(weights) {
+                *out += *weight * *value;
+            }
+        }
+    }
+}
+
+/// Dispatch the weighted sum on the group size once per column block, rather
+/// than testing it once per attended position.
+#[allow(clippy::too_many_arguments)]
+fn weighted_sum(
+    groups: usize,
+    out: &mut [f32],
+    scores: &[f32],
+    values: &[f32],
+    kv_head: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    first_column: usize,
+) {
+    macro_rules! dispatch {
+        ($($group:literal),*) => {
+            match groups {
+                $($group => weighted_sum_group::<$group>(
+                    out, scores, values, kv_head, kv_heads, head_dim, first_column,
+                ),)*
+                _ => {
+                    let width = out.len() / groups;
+                    for (past, weights) in scores.chunks_exact(groups).enumerate() {
+                        let base = (past * kv_heads + kv_head) * head_dim + first_column;
+                        let values = &values[base..base + width];
+                        for (out, value) in out.chunks_exact_mut(groups).zip(values) {
+                            for (out, weight) in out.iter_mut().zip(weights) {
+                                *out += *weight * *value;
+                            }
+                        }
+                    }
+                }
+            }
+        };
+    }
+    dispatch!(1, 2, 4, 8, 16);
+}
+
 /// The score of one key against one query.
 ///
 /// Written as independent lane accumulators rather than a single running sum.
@@ -166,6 +290,7 @@ pub struct QuantizedAttentionTimings {
     /// The three parts of the scan, so the one that grows with the
     /// conversation can be attributed to an operation rather than a stage.
     /// Summed across threads, so they exceed `attention` by the thread count.
+    /// Both scan plans report them the same way.
     pub scores: Duration,
     pub softmax: Duration,
     pub weighted_sum: Duration,
@@ -347,66 +472,27 @@ impl QuantizedAttentionLayer {
         }
         state.positions += seq;
         let attention_started = Instant::now();
-        let groups = self.query_heads / self.kv_heads;
-        let scale = (self.head_dim as f32).sqrt().recip();
-        let (head_dim, query_heads, kv_heads) = (self.head_dim, self.query_heads, self.kv_heads);
-        let mut result = vec![0.; seq * query_heads * head_dim];
-        // One `(token, head)` output row is an independent piece of work: it
-        // reads the shared cache and writes only its own `head_dim` floats.
-        // Splitting there rather than inside a row is what keeps this exact:
-        // every reduction still runs in the order it ran in serially, so the
-        // heads occupy separate cores without moving a single last bit.
-        //
-        // The scan is the one part of a decode pass that grows with the
-        // conversation — at three thousand context tokens it is most of the
-        // pass — so it is also the one part worth the threads.
-        let (keys, values) = (&state.keys, &state.values);
-        let (scores_time, softmax_time, weighted_time) = result
-            .par_chunks_mut(head_dim)
-            .enumerate()
-            .map(|(row, out)| {
-                let (token, head) = (row / query_heads, row % query_heads);
-                let kv_head = head / groups;
-                let attend_to = existing + token + 1;
-                let query = &queries[token][head];
-                let scores_started = Instant::now();
-                let mut scores = Vec::with_capacity(attend_to);
-                for past in 0..attend_to {
-                    let base = (past * kv_heads + kv_head) * head_dim;
-                    scores.push(dot(query, &keys[base..base + head_dim]) * scale);
-                }
-                let scores_elapsed = scores_started.elapsed();
-                let softmax_started = Instant::now();
-                let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                // Every score's exponential is needed twice, once for the
-                // denominator and once for its own weight. Keeping the first
-                // one halves the transcendental calls and returns the same
-                // float, where recomputing it merely spends the call again.
-                let mut denominator = 0.;
-                for score in scores.iter_mut() {
-                    *score = (*score - max).exp();
-                    denominator += *score;
-                }
-                let softmax_elapsed = softmax_started.elapsed();
-                let weighted_started = Instant::now();
-                for (past, weight) in scores.iter().enumerate() {
-                    // A division, not a multiply by the reciprocal: those two
-                    // do not round alike, and this path is the exact one.
-                    let probability = *weight / denominator;
-                    let base = (past * kv_heads + kv_head) * head_dim;
-                    for (out, value) in out.iter_mut().zip(&values[base..base + head_dim]) {
-                        *out += probability * value;
-                    }
-                }
-                for (out, gate) in out.iter_mut().zip(&gates[token][head]) {
-                    *out *= sigmoid(*gate);
-                }
-                (scores_elapsed, softmax_elapsed, weighted_started.elapsed())
-            })
-            .reduce(
-                || (Duration::ZERO, Duration::ZERO, Duration::ZERO),
-                |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2),
-            );
+        let shape = ScanShape {
+            seq,
+            existing,
+            query_heads: self.query_heads,
+            kv_heads: self.kv_heads,
+            head_dim: self.head_dim,
+            scale: (self.head_dim as f32).sqrt().recip(),
+        };
+        let mut result = vec![0.; seq * self.query_heads * self.head_dim];
+        let scan = match shape.plan() {
+            ScanPlan::PerHead => per_head_scan,
+            ScanPlan::Blocked => blocked_scan,
+        };
+        let (scores_time, softmax_time, weighted_time) = scan(
+            &shape,
+            &queries,
+            &gates,
+            &state.keys,
+            &state.values,
+            &mut result,
+        );
         timings.attention = attention_started.elapsed();
         timings.scores = scores_time;
         timings.softmax = softmax_time;
@@ -419,6 +505,325 @@ impl QuantizedAttentionLayer {
         timings.wall = wall_started.elapsed();
         Ok((result, timings))
     }
+}
+
+/// The KV cache scan, one work item per `(token, query head)`.
+///
+/// Each item reads the shared cache and writes only its own `head_dim` floats.
+/// Splitting there rather than inside a row is what keeps this exact: every
+/// reduction still runs in the order it ran in serially, so the heads occupy
+/// separate cores without moving a single last bit.
+///
+/// The `groups` query heads sharing a KV head each walk that head's whole
+/// cache, so the rows are read `groups` times — but they are read by items
+/// running at the same time on the same last-level cache, which hands them the
+/// same lines. While a layer's live KV fits there that costs nothing, and this
+/// plan's one parallel region and one output write per row are cheaper than
+/// anything blocked. Past that it stops being free; see `blocked_scan`.
+///
+/// Returns the three operations' time summed across threads.
+fn per_head_scan(
+    shape: &ScanShape,
+    queries: &[Vec<Vec<f32>>],
+    gates: &[Vec<Vec<f32>>],
+    keys: &[f32],
+    values: &[f32],
+    result: &mut [f32],
+) -> (Duration, Duration, Duration) {
+    let &ScanShape {
+        existing,
+        query_heads,
+        kv_heads,
+        head_dim,
+        scale,
+        ..
+    } = shape;
+    let groups = shape.groups();
+    result
+        .par_chunks_mut(head_dim)
+        .enumerate()
+        .map(|(row, out)| {
+            let (token, head) = (row / query_heads, row % query_heads);
+            let kv_head = head / groups;
+            let attend_to = existing + token + 1;
+            let query = &queries[token][head];
+            let scores_started = Instant::now();
+            let mut scores = Vec::with_capacity(attend_to);
+            for past in 0..attend_to {
+                let base = (past * kv_heads + kv_head) * head_dim;
+                scores.push(dot(query, &keys[base..base + head_dim]) * scale);
+            }
+            let scores_elapsed = scores_started.elapsed();
+            let softmax_started = Instant::now();
+            let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            // Every score's exponential is needed twice, once for the
+            // denominator and once for its own weight. Keeping the first one
+            // halves the transcendental calls and returns the same float,
+            // where recomputing it merely spends the call again.
+            let mut denominator = 0.;
+            for score in scores.iter_mut() {
+                *score = (*score - max).exp();
+                denominator += *score;
+            }
+            let softmax_elapsed = softmax_started.elapsed();
+            let weighted_started = Instant::now();
+            out.fill(0.);
+            for (past, weight) in scores.iter().enumerate() {
+                // A division, not a multiply by the reciprocal: those two do
+                // not round alike, and this path is the exact one.
+                let probability = *weight / denominator;
+                let base = (past * kv_heads + kv_head) * head_dim;
+                for (out, value) in out.iter_mut().zip(&values[base..base + head_dim]) {
+                    *out += probability * value;
+                }
+            }
+            for (out, gate) in out.iter_mut().zip(&gates[token][head]) {
+                *out *= sigmoid(*gate);
+            }
+            (scores_elapsed, softmax_elapsed, weighted_started.elapsed())
+        })
+        .reduce(
+            || (Duration::ZERO, Duration::ZERO, Duration::ZERO),
+            |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2),
+        )
+}
+
+/// The KV cache scan, blocked so the query heads that share a KV head read it
+/// together.
+///
+/// Every one of the `groups` query heads sharing a KV head attends over the
+/// same key and value rows. Scanning them one at a time — which is what one
+/// work item per `(token, head)` did — reads each of those rows once per query
+/// head, and at agent context depths that traffic, not the arithmetic, is what
+/// the scan waits on. Here a *plane* is one `(token, kv head)` pair carrying
+/// its whole group, so each row is read once and dotted or accumulated against
+/// all `groups` heads while it is still in L1.
+///
+/// The work is exactly the work the per-head scan did, in exactly the order it
+/// did it: each score is the same dot of the same two vectors, each softmax
+/// reduces over its own positions in increasing order, and each output element
+/// accumulates its positions in increasing order. The result is bit-identical,
+/// which `blocking_the_group_does_not_move_a_bit` asserts against a per-head
+/// reference.
+///
+/// Returns the wall time of the three phases, which are disjoint.
+fn blocked_scan(
+    shape: &ScanShape,
+    queries: &[Vec<Vec<f32>>],
+    gates: &[Vec<Vec<f32>>],
+    keys: &[f32],
+    values: &[f32],
+    result: &mut [f32],
+) -> (Duration, Duration, Duration) {
+    let &ScanShape {
+        seq,
+        existing,
+        query_heads,
+        kv_heads,
+        head_dim,
+        scale,
+    } = shape;
+    let groups = shape.groups();
+    let (mut scores_time, mut softmax_time, mut weighted_time) =
+        (Duration::ZERO, Duration::ZERO, Duration::ZERO);
+    let threads = rayon::current_num_threads();
+    // The plane is the unit the cache is read for: one token against one
+    // KV head, carrying all `groups` query heads that share it. Its score
+    // buffer is `[past][group]`, group-minor, so a past block is one
+    // contiguous run and the eight weights one position contributes are
+    // one vector.
+    let plane_stride = (existing + seq) * groups;
+    let rows_per_chunk = (SCORE_BUDGET / (kv_heads * plane_stride)).clamp(1, seq);
+    let mut probabilities = vec![0f32; rows_per_chunk * kv_heads * plane_stride];
+    let mut accumulator = vec![0f32; rows_per_chunk * kv_heads * head_dim * groups];
+    for first_row in (0..seq).step_by(rows_per_chunk) {
+        let rows = rows_per_chunk.min(seq - first_row);
+        let planes = rows * kv_heads;
+        // A prefill pass has planes to spare; a one-row decode has as many
+        // planes as there are KV heads, which is two, so the split has to
+        // come from inside a plane or four cores stand idle.
+        let past_block = split(existing + first_row + rows, planes, threads, MIN_PAST_BLOCK);
+        let column_block = split(head_dim, planes, threads, MIN_COLUMN_BLOCK);
+        let probabilities = &mut probabilities[..planes * plane_stride];
+        let accumulator = &mut accumulator[..planes * head_dim * groups];
+
+        // Scores. Each key row is loaded once and dotted against every
+        // query head in its group, which is the whole point: the cache
+        // traffic falls by the group size while each dot keeps its own
+        // operands and its own order.
+        scores_time += probabilities
+            .par_chunks_mut(plane_stride)
+            .enumerate()
+            .map(|(plane, buffer)| {
+                let (row, kv_head) = (plane / kv_heads, plane % kv_heads);
+                let token = first_row + row;
+                let attend_to = existing + token + 1;
+                let heads = &queries[token][kv_head * groups..(kv_head + 1) * groups];
+                buffer[..attend_to * groups]
+                    .par_chunks_mut(past_block * groups)
+                    .enumerate()
+                    .map(|(block, buffer)| {
+                        let started = Instant::now();
+                        let first_past = block * past_block;
+                        for (offset, slot) in buffer.chunks_mut(groups).enumerate() {
+                            let base = ((first_past + offset) * kv_heads + kv_head) * head_dim;
+                            let key = &keys[base..base + head_dim];
+                            for (slot, query) in slot.iter_mut().zip(heads) {
+                                *slot = dot(query, key) * scale;
+                            }
+                        }
+                        started.elapsed()
+                    })
+                    .sum::<Duration>()
+            })
+            .sum::<Duration>();
+
+        // Softmax, in place, ending in probabilities rather than weights.
+        // The lanes are the group's query heads, so each head's maximum
+        // and denominator are still reduced over the positions in the
+        // order a single head would have taken them.
+        softmax_time += probabilities
+            .par_chunks_mut(plane_stride)
+            .enumerate()
+            .map(|(plane, buffer)| {
+                let started = Instant::now();
+                let attend_to = existing + first_row + plane / kv_heads + 1;
+                let buffer = &mut buffer[..attend_to * groups];
+                let mut max = [f32::NEG_INFINITY; MAX_GROUP];
+                for slot in buffer.chunks(groups) {
+                    for (max, score) in max.iter_mut().zip(slot) {
+                        *max = f32::max(*max, *score);
+                    }
+                }
+                // Every score's exponential is needed twice, once for the
+                // denominator and once for its own weight. Keeping the
+                // first one halves the transcendental calls and returns
+                // the same float, where recomputing it merely spends the
+                // call again.
+                let mut denominator = [0f32; MAX_GROUP];
+                for slot in buffer.chunks_mut(groups) {
+                    for ((slot, max), denominator) in
+                        slot.iter_mut().zip(&max).zip(&mut denominator)
+                    {
+                        *slot = (*slot - *max).exp();
+                        *denominator += *slot;
+                    }
+                }
+                for slot in buffer.chunks_mut(groups) {
+                    for (slot, denominator) in slot.iter_mut().zip(&denominator) {
+                        // A division, not a multiply by the reciprocal:
+                        // those two do not round alike, and this path is
+                        // the exact one.
+                        *slot /= *denominator;
+                    }
+                }
+                started.elapsed()
+            })
+            .sum::<Duration>();
+
+        // Weighted sum, accumulated transposed as `[column][group]`. That
+        // is what lets a column block be a contiguous chunk one core can
+        // own, so the value rows are also read once per group rather than
+        // once per query head, and every output element still sums its
+        // positions in increasing order.
+        let probabilities = &probabilities[..];
+        accumulator.fill(0.);
+        weighted_time += accumulator
+            .par_chunks_mut(head_dim * groups)
+            .enumerate()
+            .map(|(plane, out)| {
+                let (row, kv_head) = (plane / kv_heads, plane % kv_heads);
+                let attend_to = existing + first_row + row + 1;
+                let scores =
+                    &probabilities[plane * plane_stride..plane * plane_stride + attend_to * groups];
+                out.par_chunks_mut(column_block * groups)
+                    .enumerate()
+                    .map(|(block, out)| {
+                        let started = Instant::now();
+                        weighted_sum(
+                            groups,
+                            out,
+                            scores,
+                            values,
+                            kv_head,
+                            kv_heads,
+                            head_dim,
+                            block * column_block,
+                        );
+                        started.elapsed()
+                    })
+                    .sum::<Duration>()
+            })
+            .sum::<Duration>();
+        // Back into `[token][head][column]` order, gated on the way.
+        let accumulator = &accumulator[..];
+        let rows_first = first_row * query_heads * head_dim;
+        weighted_time += result[rows_first..rows_first + rows * query_heads * head_dim]
+            .par_chunks_mut(query_heads * head_dim)
+            .enumerate()
+            .map(|(row, out)| {
+                let started = Instant::now();
+                let token = first_row + row;
+                for (head, out) in out.chunks_mut(head_dim).enumerate() {
+                    let (kv_head, lane) = (head / groups, head % groups);
+                    let plane = (row * kv_heads + kv_head) * head_dim * groups;
+                    let accumulated = &accumulator[plane..plane + head_dim * groups];
+                    for (column, (out, gate)) in out.iter_mut().zip(&gates[token][head]).enumerate()
+                    {
+                        *out = accumulated[column * groups + lane] * sigmoid(*gate);
+                    }
+                }
+                started.elapsed()
+            })
+            .sum::<Duration>();
+    }
+    (scores_time, softmax_time, weighted_time)
+}
+
+/// What one scan is over: a pass of `seq` rows against `existing` cached
+/// positions, in a checkpoint's head geometry.
+struct ScanShape {
+    seq: usize,
+    existing: usize,
+    query_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    scale: f32,
+}
+
+impl ScanShape {
+    /// Query heads per KV head: the width of the block this scan reads for.
+    fn groups(&self) -> usize {
+        self.query_heads / self.kv_heads
+    }
+
+    /// Bytes of key and value this scan's cache holds once it is appended to.
+    fn cache_bytes(&self) -> usize {
+        (self.existing + self.seq) * self.kv_heads * self.head_dim * 2 * size_of::<f32>()
+    }
+
+    /// Which scan this shape should take.
+    fn plan(&self) -> ScanPlan {
+        if self.groups() > 1
+            && self.groups() <= MAX_GROUP
+            && self.cache_bytes() >= KV_BLOCKING_BYTES
+        {
+            ScanPlan::Blocked
+        } else {
+            ScanPlan::PerHead
+        }
+    }
+}
+
+/// Which of the two exact scans a pass takes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ScanPlan {
+    /// One work item per `(token, query head)`, each walking the whole cache
+    /// for its own KV head. See `per_head_scan`.
+    PerHead,
+    /// One work item per `(token, KV head)`, reading each cache row once for
+    /// the whole group. See `blocked_scan`.
+    Blocked,
 }
 
 fn sigmoid(value: f32) -> f32 {
@@ -523,6 +928,143 @@ mod tests {
         };
         longer.restore_image(&image).unwrap();
         assert_eq!(longer.image(), image);
+    }
+
+    /// Per-token per-head queries and gates, plus a filled key and value cache.
+    struct ScanFixture {
+        queries: Vec<Vec<Vec<f32>>>,
+        gates: Vec<Vec<Vec<f32>>>,
+        keys: Vec<f32>,
+        values: Vec<f32>,
+    }
+
+    fn scan_fixture(shape: &ScanShape) -> ScanFixture {
+        // Cheap rather than pretty: the property under test is bit-identity
+        // between two scans of the same numbers, and the deepest fixture fills
+        // eight million cells, so a transcendental per cell is the test's whole
+        // runtime for nothing.
+        let wave = |seed: f32, index: usize| {
+            let mixed = (index as u32)
+                .wrapping_mul(2_654_435_761)
+                .wrapping_add(seed.to_bits().rotate_left(11));
+            ((mixed >> 9) % 4096) as f32 / 2048. - 1.
+        };
+        let rows = |heads: usize, seed: f32| -> Vec<Vec<f32>> {
+            (0..heads)
+                .map(|head| {
+                    (0..shape.head_dim)
+                        .map(|column| wave(seed + head as f32 * 0.11, column))
+                        .collect()
+                })
+                .collect()
+        };
+        let queries = (0..shape.seq)
+            .map(|token| rows(shape.query_heads, 0.37 + token as f32 * 0.07))
+            .collect();
+        let gates = (0..shape.seq)
+            .map(|token| rows(shape.query_heads, 0.91 + token as f32 * 0.05))
+            .collect();
+        let cached = shape.existing + shape.seq;
+        let cells = cached * shape.kv_heads * shape.head_dim;
+        let keys = (0..cells).map(|index| wave(0.013, index)).collect();
+        let values = (0..cells).map(|index| wave(0.029, index)).collect();
+        ScanFixture {
+            queries,
+            gates,
+            keys,
+            values,
+        }
+    }
+
+    #[test]
+    fn blocking_the_group_does_not_move_a_bit() {
+        // Both shapes that matter: a wide pass, where the planes alone fill
+        // the cores, and a one-row decode at depth, where they cannot and the
+        // split has to come from inside a plane.
+        for (seq, existing) in [(6usize, 5usize), (1, 613), (1, 3), (4, 0)] {
+            let shape = ScanShape {
+                seq,
+                existing,
+                query_heads: 8,
+                kv_heads: 2,
+                head_dim: 24,
+                scale: (24f32).sqrt().recip(),
+            };
+            let fixture = scan_fixture(&shape);
+            let ScanFixture {
+                queries,
+                gates,
+                keys,
+                values,
+            } = &fixture;
+            let mut blocked = vec![0.; seq * shape.query_heads * shape.head_dim];
+            let mut reference = blocked.clone();
+            blocked_scan(&shape, queries, gates, keys, values, &mut blocked);
+            per_head_scan(&shape, queries, gates, keys, values, &mut reference);
+            assert_eq!(blocked, reference, "seq {seq}, existing {existing}");
+        }
+    }
+
+    #[test]
+    fn the_two_scans_agree_at_the_checkpoint_geometry_that_switches_them() {
+        // The checkpoint-gated suites never reach a context deep enough to
+        // take the blocked plan, so the equivalence at the geometry and the
+        // depth where the switch actually happens is asserted here: 16 query
+        // heads over 2 KV heads at head_dim 256, one row against 4096 cached
+        // positions, which is the first depth past `KV_BLOCKING_BYTES`.
+        let shape = ScanShape {
+            seq: 1,
+            existing: 4096,
+            query_heads: 16,
+            kv_heads: 2,
+            head_dim: 256,
+            scale: (256f32).sqrt().recip(),
+        };
+        assert_eq!(shape.plan(), ScanPlan::Blocked);
+        let fixture = scan_fixture(&shape);
+        let ScanFixture {
+            queries,
+            gates,
+            keys,
+            values,
+        } = &fixture;
+        let mut blocked = vec![0.; shape.query_heads * shape.head_dim];
+        let mut reference = blocked.clone();
+        blocked_scan(&shape, queries, gates, keys, values, &mut blocked);
+        per_head_scan(&shape, queries, gates, keys, values, &mut reference);
+        assert_eq!(blocked, reference);
+    }
+
+    #[test]
+    fn the_blocked_scan_waits_for_a_cache_that_does_not_fit() {
+        let shape = |existing: usize, seq: usize, query_heads: usize, kv_heads: usize| ScanShape {
+            seq,
+            existing,
+            query_heads,
+            kv_heads,
+            head_dim: 256,
+            scale: 1.,
+        };
+        // Qwen3.6-35B-A3B's geometry: 4.2 MB at 1024 context, 33.6 MB at 8192.
+        assert_eq!(shape(1024, 1, 16, 2).plan(), ScanPlan::PerHead);
+        assert_eq!(shape(3072, 1, 16, 2).plan(), ScanPlan::PerHead);
+        assert_eq!(shape(8192, 1, 16, 2).plan(), ScanPlan::Blocked);
+        // A wide pass counts the rows it is about to append.
+        assert_eq!(shape(3584, 512, 16, 2).plan(), ScanPlan::Blocked);
+        // Nothing to block when every query head has its own KV head, however
+        // deep the conversation gets.
+        assert_eq!(shape(8192, 1, 16, 16).plan(), ScanPlan::PerHead);
+    }
+
+    #[test]
+    fn a_block_never_splits_finer_than_its_grain() {
+        // Enough planes to fill the cores: one block each.
+        assert_eq!(split(3072, 64, 6, 128), 3072);
+        // A one-row decode has two planes, so the positions carry the split.
+        let block = split(3072, 2, 6, 128);
+        assert!(block <= 3072 / 3 && block.is_multiple_of(128), "{block}");
+        // Never finer than the grain, even when the total is smaller than it.
+        assert_eq!(split(8, 1, 64, 16), 16);
     }
 
     #[test]

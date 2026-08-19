@@ -96,8 +96,8 @@ fn main() -> Result<()> {
         let metrics = &result.metrics;
         let profile = &metrics.decode_profile;
         let (mut scan, mut other, mut linear, mut moe) = (0., 0., 0., 0.);
-        // The three parts are the wall time of their own parallel regions, so
-        // they are disjoint and sum to the scan less the chunking between them.
+        // The three parts are summed across threads, so they are reported as a
+        // share of their own total rather than of the wall clock.
         let (mut scores, mut softmax, mut weighted) = (0., 0., 0.);
         let mut delta = (0., 0., 0., 0., 0., 0.);
         for layer in &profile.layer_details {
