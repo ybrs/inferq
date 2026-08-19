@@ -52,12 +52,15 @@ expert IDs, normalized route weights, and optionally full router logits.
 In the fully resident GGUF path, compatible routed and shared expert gate/up
 matrices are row-concatenated without dequantization. Their row results remain
 identical while one compressed kernel launch produces both projections.
-For small multi-token verification batches, routed work is grouped by expert:
-all rows assigned to one expert execute gate/up and down together, while final
-weighted accumulation retains original per-token route order. Large (at least
-4 MiB) Q4_K/Q5_K/Q6_K/Q8_0 dense matrices use a measured small-M path that
-traverses each compressed weight row once for all input rows. K=1 and smaller
-expert matrices retain their established kernels.
+For any multi-row pass — a verification batch or a whole prefill — routed work
+is grouped by expert: all rows assigned to one expert execute gate/up and down
+together, while final weighted accumulation retains original per-token route
+order. The experts themselves run in parallel and each expert's two matmuls run
+whole on one thread, which is why they take the fused kernel rather than
+Candle's: candle's quantized matmul shares one process-wide worker pool that
+several experts cannot enter at once. Large (at least 4 MiB)
+Q4_K/Q5_K/Q6_K/Q8_0 dense matrices use the same fused path from the pool side.
+A K=1 pass is token-major and retains its established kernels throughout.
 
 ## End-to-end validation
 

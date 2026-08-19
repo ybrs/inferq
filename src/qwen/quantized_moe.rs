@@ -6,9 +6,10 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use candle_core::{DType, IndexOp, Tensor};
 use candle_nn::ops;
+use rayon::prelude::*;
 use serde::Serialize;
 
-use crate::{GgufCheckpoint, GgufExpertPair, GgufExpertTensor, QuantizedMatrix};
+use crate::{GgufCheckpoint, GgufExpertPair, GgufExpertTensor, QuantizedMatrix, RowSpread};
 
 use super::{Route, top_k_routes};
 
@@ -316,77 +317,158 @@ impl<'a> QuantizedMoeLayer<'a> {
         Ok(Tensor::cat(&outputs, 0)?)
     }
 
+    /// Run every routed expert, the experts in parallel.
+    ///
+    /// The expert loop used to be serial while each expert's matmul split its
+    /// own few hundred output rows across the thread pool: one fork/join per
+    /// expert per matmul, 20,480 of them in a forty-layer pass, each dividing
+    /// work smaller than one core's share. The experts are the natural
+    /// parallel unit — 256 independent matrices per layer, none of which reads
+    /// another's output — so they take the pool and each matmul runs whole on
+    /// one thread ([`RowSpread::Caller`]).
+    ///
+    /// Nothing about the arithmetic changes. Each expert sees the same rows in
+    /// the same order and multiplies them by the same weights; the weighted
+    /// additions that combine an expert's outputs are still a serial pass in
+    /// token-then-route order below, unchanged and unparallelised, because
+    /// that order is what makes a grouped pass agree with the token-major
+    /// reference bit for bit.
     fn routed_grouped_by_expert(
         &self,
         flat: &Tensor,
         routes: &[Route],
         timings: &mut QuantizedMoeTimings,
     ) -> Result<Tensor> {
-        let mut assignments = BTreeMap::<usize, Vec<(usize, usize)>>::new();
+        let mut grouped = BTreeMap::<usize, Vec<(usize, usize)>>::new();
         for (row, route) in routes.iter().enumerate() {
             for (route_index, &expert) in route.experts.iter().enumerate() {
-                assignments
-                    .entry(expert)
-                    .or_default()
-                    .push((row, route_index));
+                grouped.entry(expert).or_default().push((row, route_index));
             }
         }
-        let mut values = routes
-            .iter()
-            .map(|route| {
-                (0..route.experts.len())
-                    .map(|_| None)
-                    .collect::<Vec<Option<Tensor>>>()
-            })
-            .collect::<Vec<_>>();
+        let assignments: Vec<(usize, Vec<(usize, usize)>)> = grouped.into_iter().collect();
 
-        for (expert, expert_assignments) in assignments {
-            let rows = expert_assignments
-                .iter()
-                .map(|&(row, _)| Ok(flat.i(row)?.unsqueeze(0)?))
-                .collect::<Result<Vec<Tensor>>>()?;
-            let row_refs = rows.iter().collect::<Vec<_>>();
-            let inputs = Tensor::cat(&row_refs, 0)?;
-            let load_started = Instant::now();
-            let gate_up = self.gate_up_experts.load(expert)?;
-            let down = self.down_experts.load(expert)?;
-            timings.expert_load += load_started.elapsed();
-            let compute_started = Instant::now();
-            let gate_up_started = Instant::now();
-            let gate_up = gate_up.forward(&inputs)?;
-            timings.expert_gate_up += gate_up_started.elapsed();
-            let activation_started = Instant::now();
-            let gate = gate_up.narrow(1, 0, self.intermediate_size)?;
-            let up = gate_up.narrow(1, self.intermediate_size, self.intermediate_size)?;
-            let activated = ops::silu(&gate)?.broadcast_mul(&up)?;
-            timings.expert_activation += activation_started.elapsed();
-            let down_started = Instant::now();
-            let expert_output = down.forward(&activated)?;
-            timings.expert_down += down_started.elapsed();
-            timings.expert_compute += compute_started.elapsed();
-            for (expert_row, &(output_row, route_index)) in expert_assignments.iter().enumerate() {
-                values[output_row][route_index] = Some(expert_output.i(expert_row)?.unsqueeze(0)?);
+        // Where each (token, route) slot's result will be found once the
+        // experts have run: which expert group, and which row within it.
+        let mut slots = routes
+            .iter()
+            .map(|route| vec![None; route.experts.len()])
+            .collect::<Vec<Vec<Option<(usize, usize)>>>>();
+        for (group, (_, expert_assignments)) in assignments.iter().enumerate() {
+            for (expert_row, &(row, route_index)) in expert_assignments.iter().enumerate() {
+                slots[row][route_index] = Some((group, expert_row));
             }
+        }
+
+        let flat_values = flat.flatten_all()?.to_vec1::<f32>()?;
+        let compute_started = Instant::now();
+        let executed = assignments
+            .par_iter()
+            .map(|(expert, expert_assignments)| {
+                self.run_one_expert(&flat_values, *expert, expert_assignments)
+            })
+            .collect::<Result<Vec<ExpertRun>>>()?;
+        // Wall time of the whole grouped region, which is what the pass spent.
+        // The gate_up/activation/down/load splits below are summed across the
+        // workers and are therefore thread time, not wall; see docs/profiling.md.
+        timings.expert_compute = compute_started.elapsed();
+        for run in &executed {
+            timings.expert_load += run.load;
+            timings.expert_gate_up += run.gate_up;
+            timings.expert_activation += run.activation;
+            timings.expert_down += run.down;
         }
 
         // Preserve the target-only path's token and route accumulation order.
         // Only expert matrix execution is grouped; weighted additions remain
         // byte-for-byte ordered like the readable token-major reference.
-        let mut outputs = Vec::with_capacity(routes.len());
+        let accumulation_started = Instant::now();
+        let mut combined = vec![0f32; routes.len() * self.hidden_size];
         for (row, route) in routes.iter().enumerate() {
-            let mut combined = Tensor::zeros((1, self.hidden_size), DType::F32, flat.device())?;
+            let output = &mut combined[row * self.hidden_size..(row + 1) * self.hidden_size];
             for (route_index, &route_weight) in route.weights.iter().enumerate() {
-                let accumulation_started = Instant::now();
-                let value = values[row][route_index]
-                    .as_ref()
+                let (group, expert_row) = slots[row][route_index]
                     .context("grouped expert result is missing a routed assignment")?;
-                combined = (combined + (value * f64::from(route_weight))?)?;
-                timings.expert_accumulation += accumulation_started.elapsed();
+                let value = &executed[group].values
+                    [expert_row * self.hidden_size..(expert_row + 1) * self.hidden_size];
+                for (output, value) in output.iter_mut().zip(value) {
+                    // `combined + (value * weight)` as the reference wrote it:
+                    // two roundings, multiply then add, never contracted.
+                    *output += *value * route_weight;
+                }
             }
-            outputs.push(combined);
         }
-        Ok(Tensor::cat(&outputs, 0)?)
+        timings.expert_accumulation = accumulation_started.elapsed();
+        Ok(Tensor::from_vec(
+            combined,
+            (routes.len(), self.hidden_size),
+            flat.device(),
+        )?)
     }
+
+    /// Gather one expert's rows, run its two matmuls, and return its outputs.
+    ///
+    /// Called from inside a parallel iterator over experts, so everything here
+    /// stays on the calling thread: the matmuls take [`RowSpread::Caller`], and
+    /// the activation is written out by hand rather than through candle, whose
+    /// element-wise ops would each allocate a tensor per expert per layer.
+    fn run_one_expert(
+        &self,
+        flat_values: &[f32],
+        expert: usize,
+        expert_assignments: &[(usize, usize)],
+    ) -> Result<ExpertRun> {
+        let hidden = self.hidden_size;
+        let rows = expert_assignments.len();
+        let mut inputs = vec![0f32; rows * hidden];
+        for (expert_row, &(row, _)) in expert_assignments.iter().enumerate() {
+            inputs[expert_row * hidden..(expert_row + 1) * hidden]
+                .copy_from_slice(&flat_values[row * hidden..(row + 1) * hidden]);
+        }
+
+        let load_started = Instant::now();
+        let gate_up_weights = self.gate_up_experts.load(expert)?;
+        let down_weights = self.down_experts.load(expert)?;
+        let load = load_started.elapsed();
+
+        let gate_up_started = Instant::now();
+        let gate_up = gate_up_weights.forward_rows(&inputs, rows, RowSpread::Caller)?;
+        let gate_up_elapsed = gate_up_started.elapsed();
+
+        let activation_started = Instant::now();
+        let intermediate = self.intermediate_size;
+        let mut activated = vec![0f32; rows * intermediate];
+        for row in 0..rows {
+            let (gate, up) = gate_up[row * 2 * intermediate..(row + 1) * 2 * intermediate]
+                .split_at(intermediate);
+            let output = &mut activated[row * intermediate..(row + 1) * intermediate];
+            for ((output, gate), up) in output.iter_mut().zip(gate).zip(up) {
+                // candle's `Silu`, elementwise: `v / (1 + exp(-v))` in f32.
+                *output = (gate / (1. + (-gate).exp())) * up;
+            }
+        }
+        let activation = activation_started.elapsed();
+
+        let down_started = Instant::now();
+        let values = down_weights.forward_rows(&activated, rows, RowSpread::Caller)?;
+        Ok(ExpertRun {
+            values,
+            load,
+            gate_up: gate_up_elapsed,
+            activation,
+            down: down_started.elapsed(),
+        })
+    }
+}
+
+/// One expert's outputs, row-major, with what its own thread spent producing
+/// them. The durations are per-worker and are summed rather than added to wall
+/// time by the caller.
+struct ExpertRun {
+    values: Vec<f32>,
+    load: Duration,
+    gate_up: Duration,
+    activation: Duration,
+    down: Duration,
 }
 
 #[cfg(test)]
@@ -502,11 +584,10 @@ mod tests {
             .unwrap()
             .to_vec1::<f32>()
             .unwrap();
-        let max_abs = actual
-            .iter()
-            .zip(expected)
-            .map(|(actual, expected)| (actual - expected).abs())
-            .fold(0f32, f32::max);
-        assert!(max_abs <= 1e-6, "grouped MoE max abs error {max_abs}");
+        // Identical, not merely close. Grouping changes which rows share a
+        // matmul and which thread runs it, never what is summed or in what
+        // order, and speculative decoding is defined by the target path and
+        // the grouped path agreeing on the token.
+        assert_eq!(actual, expected, "grouped MoE diverged from token-major");
     }
 }

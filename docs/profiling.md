@@ -232,3 +232,20 @@ share input quantization and barriers without giving up the worker pool's
 lower dispatch cost. Larger gains still require fewer weight bytes per token,
 which means a different execution quantization or an explicitly approximate
 reduction in active experts.
+
+That paragraph turned out to name the missing piece exactly. The rejected
+prototype scheduled the experts through Rayon while each expert's matmul was
+still Candle's, so it *was* a second scheduler wrapped around candle's own
+`BarrierPool` and it lost. Doing the same scheduling with a model-specific
+replacement for the inner kernel — `src/qgemm.rs`, which runs entirely on the
+calling thread — wins: MoE compute in a 256-row prefill pass fell from 12.21 to
+6.12 ms/token and prefill from 26.4 to 32.9 tok/s. Decode is untouched, still
+one row and still token-major.
+
+That change also moved what the MoE's timing fields mean, in the grouped
+(multi-row) path only. `expert_compute` is the wall time of the whole parallel
+region, loads included, which is what the pass actually spent. `expert_load`,
+`expert_gate_up`, `expert_activation` and `expert_down` are summed across the
+workers and are therefore thread time: they add up to roughly the thread count
+times `expert_compute`, and must not be read as a share of it. The token-major
+path is unchanged and all six remain serial wall time there.

@@ -106,11 +106,34 @@ per-row and multi-row kernels agree exactly, which is also why the engine now
 refuses to open a checkpoint without it. Decode is
 untouched: a one-token pass is its own last row.
 
-A prefill pass at width 256 now spends 47.6% in the MoE and 42.8% in the
-linear layers, so those two are 90% of it — and the MoE is the larger of the
-two again, having been overtaken while the projections were on the wrong
-kernel. Prefill spends itself on weights;
-decode increasingly on the cache. The two halves want different work.
+That left a prefill pass at width 256 spending 47.6% in the MoE and 42.8% in
+the linear layers, 90% of it between them, with the MoE the larger of the two
+again. Then the MoE turned out to be running its experts one at a time while
+each expert's matmul split its own few hundred output rows across the pool —
+20,480 fork/joins in a forty-layer pass, each dividing work smaller than one
+core's share — and reaching Candle's per-row kernel rather than the fused one,
+because expert matrices are under the 4 MiB dispatch threshold. Inverting that,
+so the 256 experts are the parallel unit and each matmul runs whole on one
+thread through the fused kernel, halved MoE compute:
+
+| width | prefill tok/s | one pass ms/token | MoE | MoE compute | linear |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 | 19.83 → 23.83 | 59.76 → 45.33 | 34.80 → 20.33 | 28.37 → 14.52 | 19.92 → 19.80 |
+| 64 | 25.34 → 31.69 | 42.07 → 31.86 | 21.59 → 11.56 | 16.93 → 8.01 | 16.88 → 16.81 |
+| 256 | 26.37 → **32.86** | 35.71 → 28.63 | 16.13 → 9.24 | 12.21 → 6.12 | 16.11 → 15.97 |
+| 512 | 27.54 → 32.96 | 36.29 → 29.40 | 16.00 → 8.96 | 11.92 → 5.88 | 16.58 → 16.59 |
+
+Bit-identical, and asserted rather than argued: which thread computes an
+output row cannot change it, the weighted accumulation is still a serial pass
+in token-then-route order, and the grouped path is tested equal to the
+token-major reference exactly rather than to a tolerance. Decode is untouched —
+one row is still token-major and still on Candle's matvec.
+
+So the MoE has stopped being the larger half. At width 256 the linear layers
+are now 55.8% of a pass against the MoE's 32.3%, and the next lever is the one
+the DeltaNet work already named: the 8 query heads sharing a kv head each
+re-read that head's whole cache. Prefill spends itself on weights; decode
+increasingly on the cache. The two halves want different work.
 
 The lane accumulators reorder the summation, so this one is a numerical change
 rather than an identity: the last bits move and a token could follow. On this
