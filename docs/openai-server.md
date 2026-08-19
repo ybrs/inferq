@@ -67,6 +67,10 @@ per depth:
 | 2048 | 6.72 | 0.39 s | 12.4 |
 | 3072 | 6.14 | 0.61 s | 11.7 |
 
+(The scan column is the wall time of the whole parallel region over sixteen
+decode passes; `scores`, `softmax` and `weighted_sum` beside it in the profile
+are summed across threads and are a share of each other, not of it.)
+
 The scan was until recently the whole story at depth: it ran on one core, and
 at 3072 context it was 3.38 s of a 5.36 s pass — 63% of decode, against 2.6%
 at 64 tokens. Every other stage was flat across the range, so a long request
@@ -165,7 +169,49 @@ gate, recurrence at decode measured 0.132 / 0.127 / 0.127 s against a
 
 That leaves the KV scan as the largest term at depth, and the lever the
 DeltaNet work already named: the 8 query heads sharing a kv head each re-read
-that head's whole cache.
+that head's whole cache. Blocking them together reads it once — the traffic
+falls by the group size — and it can be done without moving a bit, because
+every score is still the same dot of the same two vectors and every output
+element still sums its positions in increasing order. The scan was built that
+way and measured, and the measurement said something the traffic argument had
+missed.
+
+The eight re-reads were never eight trips to memory. They are eight work items
+running at the same time, on the same last-level cache, asking for the same
+lines. While a layer's live KV fits in that cache they are nearly free, and the
+per-head scan's single parallel region and single write per output row are the
+cheaper shape; the blocked scan needs three regions, a score buffer, and a
+transpose, and loses. Past the cache they become real misses and the blocking
+starts to pay. Scan wall seconds over sixteen decode passes, and what a layer's
+live KV weighs at each depth against this host's 12 MiB L3:
+
+| context | layer KV | per-head | blocked |
+| ---: | ---: | ---: | ---: |
+| 1024 | 4.2 MB | 0.154 | 0.241 |
+| 3072 | 12.6 MB | 0.436 | 0.458 |
+| 6144 | 25.2 MB | 0.915 | 0.821 |
+| 8192 | 33.6 MB | 1.335 | 1.089 |
+
+So both scans stay and a pass picks one by what its cache weighs, at 16 MiB —
+the first power of two past this host's L3, and past the depth where the two
+measured equal. They are bit-identical, so the choice is a scheduling one:
+`the_two_scans_agree_at_the_checkpoint_geometry_that_switches_them` asserts
+them equal at 16 query heads over 2 KV heads at head_dim 256, which is what
+this checkpoint has, at the first depth that switches them.
+
+Against the branch point, with the DeltaNet change already in:
+
+| context | decode tok/s | scan | prefill at that depth |
+| ---: | ---: | ---: | ---: |
+| 1024 | 7.964 → 7.916 | 0.161 → 0.158 | 33.51 → 35.07 |
+| 3072 | 6.494 → 6.754 | 0.457 → 0.451 | 29.81 → 30.88 |
+| 6144 | 5.695 → 5.903 | 0.915 → 0.849 | 21.52 → **24.75** |
+| 8192 | 4.872 → **5.423** | 1.335 → 1.104 | 17.82 → **21.93** |
+
+Prefill gains more than decode past the threshold, and for the reason the
+blocking predicts: a 512-row pass has 512 rows each re-reading the cache eight
+times per KV head, where a one-row decode has one. Below 16 MiB nothing
+changes, because nothing there was worth changing.
 
 The other thing that changed is how wide a pass gets to be. Prefill ran one
 pass over the whole prompt, and a pass costs more per token the wider it goes

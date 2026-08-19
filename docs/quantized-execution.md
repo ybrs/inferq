@@ -378,6 +378,36 @@ products while sharing one quantized kernel launch. Combined with the flat
 convolution, sustained decode measured `5.87 token/s` with the same 128 IDs,
 zero inference reads, and `47,260 MiB` RSS.
 
+## Which KV scan a pass takes
+
+The full-attention layers have two exact scans and pick one per pass.
+
+`per_head_scan` gives each `(token, query head)` its own work item, walking the
+whole cache for its own KV head. `blocked_scan` gives each `(token, KV head)`
+one item carrying all the query heads that share it, so every key and value row
+is read once for the group instead of once per query head. The blocked scan
+holds its scores as `[position][group]` and accumulates transposed as
+`[column][group]`, which is what lets a position block and a column block each
+be one contiguous chunk a core can own, and what makes the group's weights one
+vector.
+
+They compute the same numbers in the same order — the same dot of the same two
+vectors per score, each softmax reduced over its positions in increasing order,
+each output element accumulated over its positions in increasing order — so
+they are bit-identical, and two tests assert that rather than argue it, one at
+small shapes and one at this checkpoint's own head geometry at the depth where
+the choice flips.
+
+The choice is `KV_BLOCKING_BYTES`: a pass takes the blocked scan once the KV
+its layers hold reaches 16 MiB, and the per-head scan below that. The reason is
+that the per-head scan's re-reads are concurrent, so a last-level cache that
+holds the layer's KV serves all of them and there is no traffic to save, while
+the blocked scan still pays for three parallel regions, a score buffer and a
+transpose. See the measurements in
+[openai-server.md](openai-server.md#decode-against-context-depth). This is a
+tuning constant for a class of host, not a property of the checkpoint, and it
+cannot change a result.
+
 ## Where a DeltaNet recurrence step runs
 
 The gated delta rule is serial over tokens and independent over heads: value
