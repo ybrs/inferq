@@ -83,8 +83,18 @@ and decode at 3072 from 6.14 to 7.06 tok/s.
 | 1024 | 5.53 | 7.40 | 7.80 | 1.41x |
 | 3072 | 2.97 | 6.14 | 7.06 | **2.38x** |
 
-Prefill gains the same way — 6.02 to 13.13 tok/s at 3072, since a prefill pass
-is the same scan over more rows.
+Prefill gained twice over, and for a different reason the second time. The
+threading and the lane accumulators took it from 6.02 to 13.13 tok/s at 3072,
+a prefill pass being the same scan over more rows. Then it turned out a pass
+was also computing logits for every position while sampling only the last —
+28% of it, over a 248,320-wide vocabulary — which is unused work rather than a
+trade, since rows are independent. Dropping it took prefill to 17.55 tok/s at
+3072 and 18.90 at 1024, and left the LM head at 0.1% of a pass. Decode is
+untouched: a one-token pass is its own last row.
+
+A prefill pass at width 256 now spends 54.5% in the linear layers and 34.9%
+in the MoE, so those two are 89% of it. Prefill spends itself on weights;
+decode increasingly on the cache. The two halves want different work.
 
 The lane accumulators reorder the summation, so this one is a numerical change
 rather than an identity: the last bits move and a token could follow. On this
