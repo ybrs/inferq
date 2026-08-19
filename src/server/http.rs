@@ -360,6 +360,10 @@ async fn chat_completions(
 
 /// Type a turn's calls with the schemas the request declared, and give each
 /// one the identifier the client will send back with its result.
+///
+/// The `arguments` string carries the parameter text the model wrote rather
+/// than a re-serialisation of it, so a client that echoes this turn back gets
+/// its own bytes rendered into the next prompt; see [`crate::tool_calls`].
 fn response_tool_calls(
     calls: &[ParsedToolCall],
     request: &ChatCompletionRequest,
@@ -374,7 +378,7 @@ fn response_tool_calls(
             kind: "function",
             function: ResponseFunctionCall {
                 name: call.name.clone(),
-                arguments: call.arguments(request.tool_schema(&call.name)).to_string(),
+                arguments: call.arguments_json(request.tool_schema(&call.name)),
             },
         })
         .collect()

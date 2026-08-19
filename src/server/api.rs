@@ -274,11 +274,20 @@ impl ChatCompletionRequest {
                         // OpenAI encodes arguments as a JSON string. A client
                         // that sends something else is told so rather than
                         // having its call quietly dropped.
+                        //
+                        // The text is checked and then kept as text: rendering
+                        // it back into the prompt has to reproduce the bytes
+                        // the model generated, and a parsed value has already
+                        // lost the model's own JSON spacing.
                         let arguments = match function.arguments.as_deref() {
-                            None | Some("") => serde_json::Value::Object(Default::default()),
-                            Some(text) => serde_json::from_str(text).with_context(|| {
-                                format!("tool call `{}` has unparseable arguments", function.name)
-                            })?,
+                            None | Some("") => "{}".to_owned(),
+                            Some(text) => {
+                                let name = &function.name;
+                                serde_json::from_str::<serde_json::Value>(text).with_context(
+                                    || format!("tool call `{name}` has unparseable arguments"),
+                                )?;
+                                text.to_owned()
+                            }
                         };
                         Ok(ChatToolCall {
                             name: function.name.clone(),
@@ -419,7 +428,8 @@ pub struct ResponseToolCall {
 #[derive(Debug, Clone, Serialize)]
 pub struct ResponseFunctionCall {
     pub name: String,
-    /// A JSON object encoded as a string, as OpenAI specifies.
+    /// A JSON object encoded as a string, as OpenAI specifies, carrying the
+    /// parameter text the model wrote; see [`crate::tool_calls`].
     pub arguments: String,
 }
 
@@ -635,5 +645,43 @@ mod tests {
         );
         let bad = parse(r#"{"messages":[{"role":"nonsense","content":"x"}]}"#);
         assert!(bad.chat_messages().is_err());
+    }
+
+    #[test]
+    fn an_echoed_tool_call_keeps_its_arguments_text() {
+        // The spacing here is the model's own, and it has to reach the
+        // renderer unchanged; parsing and re-serialising would lose it and
+        // with it the live-session prefix. See `crate::tool_calls`.
+        let arguments = r#"{\"edits\": [{\"old\": \"a\", \"new\": \"b\"}], \"n\": 1}"#;
+        let request = parse(&format!(
+            r#"{{"messages":[{{"role":"assistant","content":"",
+                "tool_calls":[{{"id":"c1","type":"function",
+                "function":{{"name":"edit","arguments":"{arguments}"}}}}]}},
+                {{"role":"tool","tool_call_id":"c1","content":"done"}}]}}"#
+        ));
+        let messages = request.chat_messages().expect("the call is well formed");
+        assert_eq!(messages[0].tool_calls.len(), 1);
+        assert_eq!(messages[0].tool_calls[0].name, "edit");
+        assert_eq!(
+            messages[0].tool_calls[0].arguments,
+            r#"{"edits": [{"old": "a", "new": "b"}], "n": 1}"#
+        );
+
+        // A call with no arguments is an empty object, not a failure.
+        let empty = parse(
+            r#"{"messages":[{"role":"assistant","content":"",
+                "tool_calls":[{"function":{"name":"now"}}]}]}"#,
+        );
+        assert_eq!(
+            empty.chat_messages().expect("no arguments is fine")[0].tool_calls[0].arguments,
+            "{}"
+        );
+
+        // Arguments that are not JSON at all are still rejected outright.
+        let broken = parse(
+            r#"{"messages":[{"role":"assistant","content":"",
+                "tool_calls":[{"function":{"name":"edit","arguments":"{oops"}}]}]}"#,
+        );
+        assert!(broken.chat_messages().is_err());
     }
 }
