@@ -607,6 +607,14 @@ cache-hot, and transposes the output. The size threshold is important: using
 the same path for the much smaller expert matrices regressed their stages by
 18-42%, so routed experts continue to use Candle's grouped multi-row path.
 
+**Superseded for the expert matrices.** The 18-42% regression was real but was
+a property of the *schedule*, not the size: it was measured with the expert loop
+serial and each expert's matmul splitting its own output rows across the pool.
+Timed over 64 experts as one batch, with the experts as the parallel unit and
+each matmul running whole on one thread, the fused kernel is 1.7-2.6x faster
+than Candle there. The grouped path now takes it. Decode, which is token-major
+at one row, still meets Candle exactly as this paragraph describes.
+
 **This path covers 2 to 8 rows.** A verification pass of more than 8 rows —
 a draft length of 8 or higher, since a pass evaluates the pending token
 plus the drafts — falls back to the slower per-row traversal. The n-gram

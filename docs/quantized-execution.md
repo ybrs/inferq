@@ -8,10 +8,28 @@ whole-matrix dequantization method.
 
 ## Multi-row kernels
 
-`QuantizedMatrix::forward` routes 2..=16 input rows on CPU, for matrices of at
-least 4 MiB, to a fused multi-row kernel in `src/qgemm.rs`. One row keeps
+`QuantizedMatrix::forward` routes two or more input rows on CPU, for matrices of
+at least 4 MiB, to a fused multi-row kernel in `src/qgemm.rs`. One row keeps
 Candle's matvec: no weight byte is reused there, so there is nothing to fuse.
-Above 16 rows Candle's generic loop takes over.
+A pass wider than 16 rows is tiled into 16-row groups rather than handed over
+whole; the kernel's per-row cost is lowest around that width.
+
+`forward_spread(xs, RowSpread)` and `forward_rows(values, rows, RowSpread)` say
+where the output rows are computed. `RowSpread::Pool` splits them across the
+global rayon pool and is what `forward` uses. `RowSpread::Caller` computes them
+all on the calling thread, for a caller that is already inside a parallel
+iterator and holds one of a batch of independent matrices — the MoE's expert
+loop, and nothing else today. Every output row reads the whole input and writes
+only its own slice of the result, so the choice cannot change a value;
+`row_spread_does_not_change_the_result` asserts that rather than arguing it.
+
+Under `RowSpread::Caller` the size threshold and the two-row minimum are both
+skipped and the fused kernels always run. That is not a tuning preference. The
+Candle fallback is `apply_op1_no_bwd`, whose CPU quantized matmul runs on
+candle's `BarrierPool` — a process-wide singleton (see `src/threading.rs`), so
+six experts entering it at once queue for the same workers instead of getting
+six matmuls. The fused kernels touch only the calling thread and have no such
+shared resource.
 
 The fused kernel exists because a per-row dot product re-runs the *block
 decode* — nibble unpacking and scale extraction — once per input row, and that
@@ -40,16 +58,28 @@ about 1e-6, which is reordering noise. Build with `-C target-cpu=native`.
 Q4K, Q6K and Q8_0 have fused kernels. Q5K stays on the per-row path: it carries
 0.3% of Qwen3.6-35B-A3B's bytes.
 
-Routed expert matrices (576-840 KiB) stay below the 4 MiB threshold and do not
-reach either multi-row kernel. That is deliberate and measured: at the 2-3 row
-groups MoE routing actually produces, both multi-row paths are slower than
-Candle's loop, because the fixed per-call cost — input quantization, layout
-repack, output transpose, rayon dispatch — cannot be amortized by a matrix that
-small. See `multirow-report-702d043633e0.md`.
+Routed expert matrices are 576-840 KiB, below the 4 MiB threshold, so a decode
+pass still meets them on Candle's loop. A *prefill* pass does not: its MoE runs
+the experts in parallel and therefore under `RowSpread::Caller`, where the
+threshold does not apply.
 
-`QuantizedMatrix::forward_via(xs, MultiRowPath)` pins one implementation
-regardless of dispatch; it exists for `gguf_matmul_bench` and the differential
-tests, and production code should call `forward`.
+The threshold's original justification — that at the 2-3 row groups MoE routing
+produces, both multi-row paths are slower than Candle's loop, because the fixed
+per-call cost cannot be amortized by a matrix that small
+(`multirow-report-702d043633e0.md`) — was measured on one expert at a time.
+Measured on 64 experts as one batch, which is what a layer meets, it holds only
+while each matmul splits its own output rows across the pool. Timing one
+expert repeatedly leaves it resident in L3 and charges the fused kernel for
+fork/join latency it would not pay if the experts were the parallel unit;
+`gguf_matmul_bench --expert-batch N` times the batch instead. See the table in
+the commit that introduced the flag.
+
+`QuantizedMatrix::forward_via(xs, MultiRowPath, RowSpread)` pins one
+implementation regardless of dispatch; it exists for `gguf_matmul_bench` and the
+differential tests, and production code should call `forward`, `forward_spread`
+or `forward_rows`. `MultiRowPath::Fused` is one wide call and
+`MultiRowPath::FusedTiled` is what dispatch runs above 16 rows; they are not the
+same cost.
 
 Fused expert tensors use the GGUF shape `[experts, rows, columns]`.
 `load_expert_matrix` seeks directly to one expert and reads only that matrix's

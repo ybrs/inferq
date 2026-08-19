@@ -412,7 +412,7 @@ impl QuantizedMatrix {
     pub fn forward_spread(&self, xs: &Tensor, spread: RowSpread) -> Result<Tensor> {
         let xs = self.validated_input(xs)?;
         let input_rows = xs.elem_count() / self.columns;
-        if self.takes_multi_row(input_rows) {
+        if self.takes_multi_row(input_rows, spread) {
             let values = xs.flatten_all()?.to_vec1::<f32>()?;
             if let Some(output) = self.tiled_multi_row(&values, input_rows, spread)? {
                 let mut shape = xs.dims().to_vec();
@@ -443,7 +443,7 @@ impl QuantizedMatrix {
             self.columns,
             values.len()
         );
-        if self.takes_multi_row(input_rows)
+        if self.takes_multi_row(input_rows, spread)
             && let Some(output) = self.tiled_multi_row(values, input_rows, spread)?
         {
             return Ok(output);
@@ -456,10 +456,28 @@ impl QuantizedMatrix {
     }
 
     /// Whether `forward` hands a pass of this width to the multi-row kernels.
-    fn takes_multi_row(&self, input_rows: usize) -> bool {
-        input_rows >= *MULTI_ROW_RANGE.start()
-            && self.tensor.device().is_cpu()
-            && (self.storage_bytes >= SMALL_M_MIN_STORAGE_BYTES || cfg!(test))
+    ///
+    /// Under [`RowSpread::Caller`] the answer is always yes, and neither the
+    /// row count nor the matrix size is consulted. Candle's quantized matmul
+    /// runs on candle's `BarrierPool`, which is a process-wide singleton (see
+    /// `threading`): six experts entering it at once do not get six matmuls,
+    /// they get six callers queueing for the same workers. Measured over 64
+    /// experts, going parallel over experts makes Candle *slower* — 0.85x at
+    /// eight rows, 0.47x at six — while the fused kernels, which only ever
+    /// touch the calling thread, are 1.7x to 2.6x faster than the schedule they
+    /// replace. A caller that has taken the parallelism for itself must not go
+    /// there, at any width, including one row.
+    fn takes_multi_row(&self, input_rows: usize, spread: RowSpread) -> bool {
+        if !self.tensor.device().is_cpu() {
+            return false;
+        }
+        match spread {
+            RowSpread::Caller => true,
+            RowSpread::Pool => {
+                input_rows >= *MULTI_ROW_RANGE.start()
+                    && (self.storage_bytes >= SMALL_M_MIN_STORAGE_BYTES || cfg!(test))
+            }
+        }
     }
 
     /// Run the fused kernel over every row, a tile at a time.
@@ -1619,7 +1637,11 @@ mod tests {
         let mut worst = 0f32;
         for dtype in [GgmlDType::Q4K, GgmlDType::Q6K, GgmlDType::Q8_0] {
             let matrix = deterministic_matrix(dtype, 96, 512);
-            for rows in [2, 3, 4, 7, 8, 9, 15, 16] {
+            // One row is in the list because a caller that has taken the
+            // parallelism for itself sends even a single row here rather than
+            // to candle's shared `BarrierPool`; dispatch otherwise still leaves
+            // a lone row on Candle.
+            for rows in [1, 2, 3, 4, 7, 8, 9, 15, 16] {
                 let input = deterministic_input(rows, 512);
                 let reference = matrix
                     .forward_via(&input, MultiRowPath::Candle, RowSpread::Pool)
