@@ -466,6 +466,72 @@ pub struct QuantizedGenerationMetrics {
     pub thinking: ThinkingMetrics,
 }
 
+/// What a run had measured at the moment it ended, whether or not it produced
+/// a [`QuantizedGenerationResult`].
+///
+/// A turn that ends through its token callback returns the callback's error
+/// instead of a result, so everything the run measured would otherwise be lost
+/// — and that is exactly how an agentic client ends every one of its turns, at
+/// the first closed tool call. These are the fields a caller needs to report
+/// such a turn as honestly as one that ran to completion; they carry the same
+/// meaning as their namesakes on [`QuantizedGenerationMetrics`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PartialRunMetrics {
+    pub prefill_wall_time: Duration,
+    pub decode_wall_time: Duration,
+    pub time_to_first_token: Duration,
+    /// Tokens offered by either arm, and how many of them the target kept.
+    pub drafted_tokens: usize,
+    pub accepted_draft_tokens: usize,
+}
+
+/// The live half of [`PartialRunMetrics`], updated as a run proceeds.
+///
+/// Only what a halted turn has to report is tracked here. The full metrics are
+/// still assembled by whichever generation path produced a result; this exists
+/// so that the path which cannot is not left fabricating numbers.
+#[derive(Debug, Clone, Default)]
+struct RunProgress {
+    prefill_wall_time: Duration,
+    decode_started: Option<Instant>,
+    decode_wall_time: Duration,
+    drafted_tokens: usize,
+    accepted_draft_tokens: usize,
+}
+
+impl RunProgress {
+    /// Discard the previous run's measurements. Called once the turn is past
+    /// the checks that can still reject it without touching the session.
+    fn begin(&mut self) {
+        *self = Self::default();
+    }
+
+    fn finish_prefill(&mut self, prefill_wall_time: Duration) {
+        self.prefill_wall_time = prefill_wall_time;
+        self.decode_started = Some(Instant::now());
+    }
+
+    /// Freeze the decode clock. Idempotent, and called both where a run ends
+    /// normally and at every point a token callback can end one early.
+    fn finish_decode(&mut self) {
+        self.decode_wall_time = self
+            .decode_started
+            .map_or(Duration::ZERO, |started| started.elapsed());
+    }
+
+    fn metrics(&self) -> PartialRunMetrics {
+        PartialRunMetrics {
+            prefill_wall_time: self.prefill_wall_time,
+            decode_wall_time: self.decode_wall_time,
+            // The same convention the completed metrics use: a turn's first
+            // token follows its prefill immediately.
+            time_to_first_token: self.prefill_wall_time,
+            drafted_tokens: self.drafted_tokens,
+            accepted_draft_tokens: self.accepted_draft_tokens,
+        }
+    }
+}
+
 impl QuantizedGenerationMetrics {
     pub fn prefill_tokens_per_second(&self) -> f64 {
         self.evaluated_input_tokens as f64 / self.prefill_wall_time.as_secs_f64()
@@ -557,6 +623,10 @@ pub struct QuantizedRuntime<'a> {
     /// n-gram index over the tokens in context. Maintained only while the
     /// n-gram drafter is in use; it never affects decoding correctness.
     ngram: NgramIndex,
+    /// What the run in progress has measured, so that a turn ended by its
+    /// token callback still has real numbers to report. See
+    /// [`Self::last_run_metrics`].
+    run: RunProgress,
 }
 
 impl<'a> QuantizedRuntime<'a> {
@@ -588,6 +658,7 @@ impl<'a> QuantizedRuntime<'a> {
             trace: None,
             snapshots,
             ngram: NgramIndex::new(),
+            run: RunProgress::default(),
         })
     }
 
@@ -607,6 +678,26 @@ impl<'a> QuantizedRuntime<'a> {
 
     pub fn set_trace(&mut self, trace: Option<Box<dyn RoutingTrace>>) {
         self.trace = trace;
+    }
+
+    /// What the last run measured, including one that ended in its token
+    /// callback and therefore returned an error rather than a result.
+    ///
+    /// The fields carry the same meaning as their namesakes on
+    /// [`QuantizedGenerationMetrics`], so a caller reporting a halted turn
+    /// beside a completed one is comparing like with like.
+    pub fn last_run_metrics(&self) -> PartialRunMetrics {
+        self.run.metrics()
+    }
+
+    /// Leave `token` pending and stop the run's decode clock.
+    ///
+    /// Every path that ends a turn through the output sink goes through here,
+    /// which is what makes the timings a halted turn reports its own rather
+    /// than something the caller has to reconstruct from outside.
+    fn halt_with_pending(&mut self, token: u32) {
+        self.pending_token = Some(token);
+        self.run.finish_decode();
     }
 
     pub fn reset(&mut self) {
@@ -808,7 +899,7 @@ impl<'a> QuantizedRuntime<'a> {
         for &token in forced_close_tokens {
             generated.push(token);
             if let Err(error) = on_token(token) {
-                self.pending_token = Some(token);
+                self.halt_with_pending(token);
                 return Err(error);
             }
             let (next, profile) = self.forward(&[token])?;
@@ -872,10 +963,12 @@ impl<'a> QuantizedRuntime<'a> {
 
         let mut sampler = Sampler::new(options.sampling.clone())?;
         let cache_before = self.model.expert_cache_stats()?;
+        self.run.begin();
         let prefill_started = Instant::now();
         let (mut logits, prefill_profile) = self.forward(&evaluated_input_token_ids)?;
         let prefill_wall_time = prefill_started.elapsed();
         let decode_started = Instant::now();
+        self.run.finish_prefill(prefill_wall_time);
         let mut decode_profile = QuantizedForwardTimings::default();
         let mut generated = Vec::with_capacity(options.max_new_tokens);
         let mut pending_token = None;
@@ -906,7 +999,7 @@ impl<'a> QuantizedRuntime<'a> {
             if let Err(error) = on_token(token) {
                 // The current sampled token has not been evaluated yet, so it
                 // is the correct pending token if the output sink fails.
-                self.pending_token = Some(token);
+                self.halt_with_pending(token);
                 if let Some(trace) = &mut self.trace {
                     trace.flush()?;
                 }
@@ -952,6 +1045,7 @@ impl<'a> QuantizedRuntime<'a> {
             trace.flush()?;
         }
         let decode_wall_time = decode_started.elapsed();
+        self.run.finish_decode();
         let expert_cache = self
             .model
             .expert_cache_stats()?
@@ -1119,7 +1213,7 @@ impl<'a> QuantizedRuntime<'a> {
             generated.push(token);
             self.ngram.push(token);
             if let Err(error) = on_token(token) {
-                self.pending_token = Some(token);
+                self.halt_with_pending(token);
                 return Err(error);
             }
             logits = Some(self.evaluate_authoritative(token, decode_profile, track_mtp)?);
@@ -1242,6 +1336,7 @@ impl<'a> QuantizedRuntime<'a> {
         }
 
         let cache_before = self.model.expert_cache_stats()?;
+        self.run.begin();
         let prefill_started = Instant::now();
         let prefill = self.model.forward_detailed_logits(
             &evaluated_input_token_ids,
@@ -1264,6 +1359,7 @@ impl<'a> QuantizedRuntime<'a> {
 
         let mut sampler = Sampler::new(options.sampling.clone())?;
         let decode_started = Instant::now();
+        self.run.finish_prefill(prefill_wall_time);
         let mut decode_profile = QuantizedForwardTimings::default();
         // A disabled arm reports a zero cap, which is what keeps its section
         // out of the run report entirely.
@@ -1458,6 +1554,7 @@ impl<'a> QuantizedRuntime<'a> {
                     speculative.draft_wall_time += draft_started.elapsed();
                     speculative.draft_profile.accumulate(&draft_profile);
                     speculative.drafted_tokens += candidates.len();
+                    self.run.drafted_tokens += candidates.len();
                     let verified_count =
                         options
                             .speculative_mtp_min_margin
@@ -1540,12 +1637,18 @@ impl<'a> QuantizedRuntime<'a> {
             let authoritative = argmax(&verifier_logits[accepted])? as u32;
             let committed_rows = 1 + accepted;
 
+            // Both arms' proposals and acceptances are also counted into the
+            // session's run progress as they happen, so a turn that never
+            // reaches its metrics can still say what it drafted.
+            self.run.accepted_draft_tokens += accepted;
+
             match arm {
                 StepArm::Ngram | StepArm::NgramSpan => {
                     policy.ngram_steps += 1;
                     if arm == StepArm::NgramSpan {
                         policy.ngram_span_steps += 1;
                     }
+                    self.run.drafted_tokens += drafts.len();
                     ngram.record_draft(
                         proposal
                             .as_ref()
@@ -1672,7 +1775,7 @@ impl<'a> QuantizedRuntime<'a> {
                         // to match, so the MTP arm sits out until reset.
                         self.mtp_gap_valid = false;
                     }
-                    self.pending_token = Some(token);
+                    self.halt_with_pending(token);
                     return Err(error);
                 }
                 let is_stop = self.is_stop_token(token, options);
@@ -1714,6 +1817,7 @@ impl<'a> QuantizedRuntime<'a> {
 
         self.pending_token = pending_token;
         let decode_wall_time = decode_started.elapsed();
+        self.run.finish_decode();
         policy.ngram_arm = ngram_arm.stats().clone();
         policy.mtp_arm = mtp_arm.stats().clone();
         speculative.resync_wall_time = policy.resync_wall_time;

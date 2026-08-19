@@ -918,12 +918,8 @@ fn generate(
     let mut generated = Vec::new();
     let mut halted = None;
     let mut reasoning = ThinkingCounter::new(*thinking_open);
-    // A halted turn never returns metrics, so the wall clock is kept here too.
-    let generation_started = Instant::now();
-    let mut first_token_at = None;
     let result = runtime.generate_tokens_with_callback(&tokens[prefilled_to..], options, |token| {
         completion_tokens += 1;
-        first_token_at.get_or_insert_with(Instant::now);
         generated.push(token);
         let Some(chunk) = decode(token)? else {
             return Ok(());
@@ -982,6 +978,19 @@ fn generate(
             + metrics.ngram.draft_tokens_accepted,
         drafted_tokens: metrics.speculative.drafted_tokens + metrics.ngram.draft_tokens_proposed,
     };
+    // A halted turn returns its callback's error instead of a result, so its
+    // measurements come from the session rather than from metrics that were
+    // never built. Same fields, same accounting: the boundary pass is prefill
+    // this request paid for either way, so a halted turn's figures are
+    // comparable with a completed one's.
+    let halted_timing = |partial: &crate::PartialRunMetrics| Timing {
+        prefill_tokens: prompt_tokens - reused,
+        prefill: partial.prefill_wall_time + boundary_prefill,
+        decode: partial.decode_wall_time,
+        time_to_first_token: partial.time_to_first_token + boundary_prefill,
+        accepted_draft_tokens: partial.accepted_draft_tokens,
+        drafted_tokens: partial.drafted_tokens,
+    };
     let completion = |finish_reason, timing| Completion {
         finish_reason,
         prompt_tokens,
@@ -1029,26 +1038,13 @@ fn generate(
             Some(Halt::Disconnected) => Ok(None),
             // A closed tool call halts the turn the same way a stop string
             // does, but the client needs to be told which of the two it was.
-            // A halted turn has no result to read metrics from, so what the
-            // callback counted is all there is; the decode figure covers the
-            // whole turn rather than being split out.
             Some(Halt::StopString) => Ok(Some(completion(
                 if parsed.is_empty() {
                     FinishReason::Stop
                 } else {
                     FinishReason::ToolCalls
                 },
-                Timing {
-                    prefill_tokens: prompt_tokens - reused,
-                    prefill: boundary_prefill,
-                    decode: generation_started
-                        .elapsed()
-                        .saturating_sub(boundary_prefill),
-                    time_to_first_token: first_token_at
-                        .map(|at| at.duration_since(generation_started) + boundary_prefill)
-                        .unwrap_or_default(),
-                    ..Timing::default()
-                },
+                halted_timing(&runtime.last_run_metrics()),
             ))),
             None => {
                 // A failure inside a pass can leave the session anywhere; the
