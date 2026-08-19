@@ -89,11 +89,20 @@ a prefill pass being the same scan over more rows. Then it turned out a pass
 was also computing logits for every position while sampling only the last —
 28% of it, over a 248,320-wide vocabulary — which is unused work rather than a
 trade, since rows are independent. Dropping it took prefill to 17.55 tok/s at
-3072 and 18.90 at 1024, and left the LM head at 0.1% of a pass. Decode is
+3072 and left the LM head at 0.1% of a pass. Then the dispatch turned out to
+be handing wide passes to the per-row kernel — it only used the fused one for
+two to sixteen rows — so a 256-row prefill was decoding each weight block once
+per row. Tiling those passes into sixteen-row groups took the DeltaNet
+projections from 3.76 s to 1.48 s and prefill to 21.48 tok/s at 3072, or 24.54
+measured on the pass alone. That one is bit-identical: on a build with FMA the
+per-row and multi-row kernels agree exactly, which is also why the engine now
+refuses to open a checkpoint without it. Decode is
 untouched: a one-token pass is its own last row.
 
-A prefill pass at width 256 now spends 54.5% in the linear layers and 34.9%
-in the MoE, so those two are 89% of it. Prefill spends itself on weights;
+A prefill pass at width 256 now spends 47.6% in the MoE and 42.8% in the
+linear layers, so those two are 90% of it — and the MoE is the larger of the
+two again, having been overtaken while the projections were on the wrong
+kernel. Prefill spends itself on weights;
 decode increasingly on the cache. The two halves want different work.
 
 The lane accumulators reorder the summation, so this one is a numerical change

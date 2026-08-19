@@ -68,12 +68,20 @@ Run `./scripts/validate.sh` before handing off a change. During iteration, run t
 narrowest relevant test first. The canonical sequence is:
 
 ```bash
+export CARGO_TARGET_DIR=target-native RUSTFLAGS='-C target-cpu=native'
 cargo fmt --check
 cargo check --all-targets
 cargo test --all-targets
 cargo clippy --all-targets -- -D warnings
 cargo build --release --bins
 ```
+
+Build for this host, not for baseline x86-64. The one-row and multi-row
+quantized kernels only reach the same summation order when FMA is available;
+without it a speculative run can commit a token target-only decoding would not
+have. Opening a checkpoint refuses outright on such a build rather than
+returning quietly wrong numbers, so a stock `cargo test` fails on any test that
+loads one.
 
 Tests requiring the full checkpoint or llama.cpp reference artifacts must be
 opt-in and skip with a clear message when their inputs are absent. Unit tests
