@@ -64,62 +64,45 @@ fn main() -> Result<()> {
         );
     }
 
-    // Where one wide pass actually spends itself. Prefill is the same layers
-    // decode runs, so the interesting question is whether the ratios differ.
-    runtime.reset();
-    let options = GenerationOptions {
-        max_new_tokens: 1,
-        speculative_mode: SpeculativeMode::Off,
-        speculative_mtp_draft_tokens: 0,
-        speculative_ngram_draft_tokens: 0,
-        ..GenerationOptions::default()
-    };
-    let result = runtime.generate_tokens_with_callback(tokens, &options, |_| Ok(()))?;
-    let profile = &result.metrics.prefill_profile;
-    let (mut scan, mut other, mut linear, mut moe) = (0., 0., 0., 0.);
-    let mut delta = (0., 0., 0., 0., 0., 0.);
-    for layer in &profile.layer_details {
-        scan += layer.attention.attention.as_secs_f64();
-        other += (layer.attention.wall - layer.attention.attention).as_secs_f64();
-        linear += layer.delta.wall.as_secs_f64();
-        moe += layer.moe.wall.as_secs_f64();
-        delta.0 += layer.delta.projections.as_secs_f64();
-        delta.1 += layer.delta.convolution.as_secs_f64();
-        delta.2 += layer.delta.recurrence.as_secs_f64();
-        delta.3 += layer.delta.gated_norm.as_secs_f64();
-        delta.4 += layer.delta.output_projection.as_secs_f64();
-        delta.5 += layer.delta.snapshot.as_secs_f64();
-    }
+    // What one pass of each width costs PER TOKEN. A wider pass reads each
+    // expert's weights once for more tokens, so if that reuse is being taken
+    // the MoE column falls as the width rises; if it is not, it stays flat.
     println!();
-    println!(
-        "one pass of {} tokens: {:.2} s",
-        args.tokens,
-        profile.wall.as_secs_f64()
-    );
-    for (name, seconds) in [
-        ("moe", moe),
-        ("linear", linear),
-        ("attention scan", scan),
-        ("attention other", other),
-        ("lm_head", profile.lm_head.as_secs_f64()),
-    ] {
+    println!("one pass of N rows, milliseconds per token");
+    println!("width  total    moe  linear   proj  recur    moe_load  moe_compute");
+    for width in &args.widths {
+        let width = (*width).min(args.tokens);
+        let options = GenerationOptions {
+            max_new_tokens: 1,
+            speculative_mode: SpeculativeMode::Off,
+            speculative_mtp_draft_tokens: 0,
+            speculative_ngram_draft_tokens: 0,
+            ..GenerationOptions::default()
+        };
+        runtime.reset();
+        let result =
+            runtime.generate_tokens_with_callback(&tokens[..width], &options, |_| Ok(()))?;
+        let profile = &result.metrics.prefill_profile;
+        let (mut moe, mut linear, mut proj, mut recur) = (0., 0., 0., 0.);
+        let (mut load, mut compute) = (0., 0.);
+        for layer in &profile.layer_details {
+            moe += layer.moe.wall.as_secs_f64();
+            linear += layer.delta.wall.as_secs_f64();
+            proj += layer.delta.projections.as_secs_f64();
+            recur += layer.delta.recurrence.as_secs_f64();
+            load += layer.moe.expert_load.as_secs_f64();
+            compute += layer.moe.expert_compute.as_secs_f64();
+        }
+        let per = |seconds: f64| seconds / width as f64 * 1000.;
         println!(
-            "  {name:<16} {seconds:>7.2} s  {:>4.1}%",
-            100. * seconds / profile.wall.as_secs_f64()
-        );
-    }
-    println!("  linear splits into:");
-    for (name, seconds) in [
-        ("projections", delta.0),
-        ("convolution", delta.1),
-        ("recurrence", delta.2),
-        ("gated_norm", delta.3),
-        ("output_projection", delta.4),
-        ("snapshot", delta.5),
-    ] {
-        println!(
-            "    {name:<18} {seconds:>7.2} s  {:>4.1}%",
-            100. * seconds / profile.wall.as_secs_f64()
+            "{width:>5} {:>6.2} {:>6.2} {:>7.2} {:>6.2} {:>6.2} {:>11.2} {:>12.2}",
+            per(profile.wall.as_secs_f64()),
+            per(moe),
+            per(linear),
+            per(proj),
+            per(recur),
+            per(load),
+            per(compute),
         );
     }
     Ok(())
