@@ -4,7 +4,8 @@
 #
 # Usage: quality.sh <model-file.gguf> [suite]
 #   suite: "task" (t1-t3, default), "faith" (h1-h3), "control" (c1-c2),
-#          or "cap" (translation, code reading, DAG/script, diagram)
+#          "cap" (translation, code reading, DAG/script, diagram),
+#          or "tools" (picking taskq MCP tools for a request)
 #
 # Env:
 #   SYSTEM=<file>  prepend this file as a system message. The user prompts stay
@@ -33,6 +34,8 @@ case "$SUITE" in
          PROMPTS="x1-nl-ticket x2-nl-technical x3-nl-falsefriends
                   y1-rust-summary y2-python-summary y3-file-routing y4-file-routing-2
                   z1-dag-json z2-python-script z3-mermaid z4-matplotlib" ;;
+  tools) TESTS="${TESTS_ENV:-$HERE/tests-capability}"
+         PROMPTS="w1-tool-update w2-tool-search w3-tool-create" ;;
   *)     echo "unknown suite: $SUITE" >&2; exit 2 ;;
 esac
 

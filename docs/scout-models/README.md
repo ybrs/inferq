@@ -4,7 +4,8 @@ Evaluation of small CPU models for a **scout** role next to the main engine:
 organizing tasks, summarizing tickets, and writing throwaway Python — work that
 does not justify loading Qwen3.6-35B-A3B.
 
-Full findings: [`report.md`](report.md). Lower quants and smaller models:
+Everything in one place: [`findings.md`](findings.md). The evaluation it came
+from: [`report.md`](report.md). Lower quants and smaller models:
 [`alternates.md`](alternates.md). How far strict prompting moves the numbers:
 [`guards.md`](guards.md). Whether the small models can translate, read code,
 build DAGs or draw diagrams: [`capabilities.md`](capabilities.md).
@@ -46,6 +47,7 @@ python3 report.py       # scoreboard: speed + task suite
 python3 grade_h.py      # scoreboard: faithfulness suite
 python3 grade_c.py      # scoreboard: control probes (over-refusal check)
 python3 grade_cap.py    # scoreboard: capability probes (DAG, script, diagram)
+python3 grade_tools.py  # scoreboard: MCP tool selection
 ```
 
 The three graders take an outputs directory as their first argument
@@ -86,6 +88,7 @@ Clients must send `"chat_template_kwargs": {"enable_thinking": false}` and a har
 ## Layout
 
 ```
+findings.md            all of it in one document — start here
 report.md              findings, tables, and the raw outputs that decided it
 alternates.md          low quants and smaller models
 guards.md              prompt guards: what they fix, and what they break
@@ -101,7 +104,7 @@ harness/
   grade_h.py           faithfulness grader
   report.py            speed + task-suite scoreboard
   tests/               the six suite prompts plus the two control probes
-  tests-capability/    the capability probes (translation, code, DAG, diagram)
+  tests-capability/    capability probes (translation, code, DAG, diagram, MCP tools)
   tests-guarded/       system guards; -v2 adds the extraction example
   outputs/             raw model responses, one file per model per prompt
   outputs-lowbit/      the same for the low-quant builds

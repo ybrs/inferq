@@ -17,6 +17,7 @@ you wait for.
 | Working Python script | no | no | yes |
 | Mermaid diagram | degenerates | no edges at all | valid, but wrong topology |
 | matplotlib chart | renders a **misleading** chart | crashes | crashes |
+| Picking the right MCP tool | **invents tool names** | correct | correct |
 
 Mechanically-scored probes (`grade_cap.py`; the translation and file-summary
 probes need a reader and are discussed below):
@@ -165,9 +166,46 @@ failures are single typos that an execute-and-repair loop would fix in one round
 the 0.6B's are semantic and would survive any number of rounds, because nothing
 errors.
 
+## 5. Picking the right tool
+
+46 taskq MCP tools with one-line descriptions, three requests, answer as a JSON
+array of tool names in call order. The listing is full of near-misses on purpose:
+`set_task_status` / `set_task_summary` / `update_task`, `search_taskq` /
+`list_tasks` / `task_queue`.
+
+| Model | update a ticket | search for one | create one | Total |
+| --- | ---: | ---: | ---: | ---: |
+| Qwen3-1.7B Q4_K_M | 6/6 | 6/6 | 5/6 | **17/18** |
+| granite-4.1-3b Q4_K_M | 5/6 | 6/6 | 6/6 | **17/18** |
+| Qwen3-0.6B Q4_K_M | 1/6 | 2/6 | 3/6 | 6/18 |
+
+**The 0.6B fabricated a tool name in all three probes** — `ticket_status`,
+`get_taskq`, `request_task`, each a plausible blend of real names in the listing
+it was handed. And asked to mark ticket 405 *done*, it answered
+`["create_task", "claim_task", "pr_status", "ticket_status"]`: the request to
+update a ticket would have created a new one.
+
+Both larger models found the right tool every time — `set_task_status` for the
+update, `search_taskq` for the search, `create_task` for the create. Their shared
+mistake is subtler: **both bolt on an unrequested side effect.** granite followed
+`set_task_status` with `task_to_issue`, and the 1.7B followed `create_task` with
+`task_to_issue`. Neither request mentioned GitHub; `task_to_issue` opens a real
+issue.
+
+The two failure modes are not equally bad:
+
+- a **fabricated name fails closed** — the MCP server rejects it, the agent gets
+  an error and can retry;
+- an **extra real call fails open** — it runs, and an issue now exists that
+  nobody asked for.
+
+A small model driving tools therefore needs a per-request allowlist more than it
+needs a longer tool listing. And the 0.6B does not belong in a tool loop that
+writes anything.
+
 ## What this means for tiering
 
-Of the four, **only code indexing and file routing survive at 0.6B**, and those
+Of the five, **only code indexing and file routing survive at 0.6B**, and those
 are exactly the jobs where a wrong answer costs one wasted file read and can be
 validated against ground truth the caller already has. Translation, DAG
 authoring, script writing, and diagram generation all fail in the same
@@ -184,6 +222,9 @@ past it when you cannot.
 cd harness
 OUTDIR=$PWD/outputs-cap ./quality.sh Qwen3-0.6B-Q4_K_M.gguf cap
 MPL_PYTHON=/path/to/venv/bin/python python3 grade_cap.py outputs-cap
+
+OUTDIR=$PWD/outputs-tools ./quality.sh Qwen3-0.6B-Q4_K_M.gguf tools
+python3 grade_tools.py outputs-tools
 ```
 
 The chart probe needs an interpreter with matplotlib installed; `grade_cap.py`

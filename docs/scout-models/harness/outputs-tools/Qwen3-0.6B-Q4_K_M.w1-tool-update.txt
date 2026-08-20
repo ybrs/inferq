@@ -1,0 +1,7 @@
+[elapsed 3.0s, completion_tokens 23, prompt_tokens 901]
+[
+  "create_task",
+  "claim_task",
+  "pr_status",
+  "ticket_status"
+]
