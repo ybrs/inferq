@@ -4,7 +4,8 @@ Evaluation of small CPU models for a **scout** role next to the main engine:
 organizing tasks, summarizing tickets, and writing throwaway Python — work that
 does not justify loading Qwen3.6-35B-A3B.
 
-Full findings: [`report.md`](report.md).
+Full findings: [`report.md`](report.md). Lower quants, smaller models, and
+whether prompt guards rescue them: [`alternates.md`](alternates.md).
 
 **Result:** run `granite-4.1-3b-Q4_K_M`. The two fastest models
 (`Qwen3-1.7B`, `Qwen3.5-2B`) fabricate task assignees and are not usable for
@@ -76,16 +77,20 @@ Clients must send `"chat_template_kwargs": {"enable_thinking": false}` and a har
 
 ```
 report.md              findings, tables, and the raw outputs that decided it
+alternates.md          low quants and smaller models; what prompt guards fix
 harness/
   bench.sh             llama-bench sweep
-  quality.sh           task suite against one model
-  quality-h.sh         faithfulness suite against one model
+  quality.sh           one model, one suite (task or faith)
   run-quality-all.sh   task suite across all models
   run-halluc.sh        faithfulness suite across the leaders
+  serve.sh / ask.sh    start a model, send it one prompt — the loop for
+                       iterating on prompt guards
   grade.py             task-suite grader
   grade_h.py           faithfulness grader
   report.py            speed + task-suite scoreboard
   tests/               the six prompts
+  tests-guarded/       guarded variants tried in alternates.md
   outputs/             raw model responses, one file per model per prompt
+  outputs-lowbit/      the same for the low-quant builds
   bench-results.md     raw llama-bench output
 ```

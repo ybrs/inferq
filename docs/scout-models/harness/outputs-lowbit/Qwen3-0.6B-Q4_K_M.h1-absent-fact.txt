@@ -1,0 +1,2 @@
+[elapsed 0.9s, completion_tokens 19, prompt_tokens 198]
+The customer's endpoint is negotiating TLS 1.2 and TLS 1.3.

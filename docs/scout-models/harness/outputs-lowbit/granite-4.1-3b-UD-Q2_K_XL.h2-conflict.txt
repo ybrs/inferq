@@ -1,0 +1,2 @@
+[elapsed 13.2s, completion_tokens 105, prompt_tokens 178]
+The customer, Bolt Industries, reported that their API began returning 500 errors at 10:00 UTC, despite no deployments being made that day. Internal notes indicate that release v4.812 was rolled out at 09:58 UTC, suggesting a potential cause. The customer's staging environment, running the same API version, functions correctly, and error monitoring shows the issue is limited to POST /v2/invoices, with an overall error rate of 4%. The root cause has not been definitively identified.
