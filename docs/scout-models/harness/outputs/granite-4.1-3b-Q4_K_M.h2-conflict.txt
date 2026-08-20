@@ -1,0 +1,2 @@
+[elapsed 11.4s, completion_tokens 95, prompt_tokens 178]
+The customer, Bolt Industries, reported that their API began returning 500 Internal Server Errors at 10:00 UTC, despite noting no deployments had been made that day. Internal support notes that a release (v4.812) was indeed rolled out at 09:58 UTC, and the error is limited to the POST /v2/invoices endpoint, with an overall error rate of 4%. The root cause has not yet been identified.

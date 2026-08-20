@@ -1,0 +1,106 @@
+[elapsed 69.2s, completion_tokens 946, prompt_tokens 102]
+<think>We need to write a small Python script that reads a CSV file path from sys.argv[1], counts rows grouped by the value in the "status" column, prints each status with its count sorted by count descending, one per line as "status: count". Use only standard library. Handle missing "status" column by printing an error to stderr and exiting with code 1. Output ONLY the code, no explanation, no markdown fences.
+
+Thus we need to output a Python script (text) that does this. Must be only the code, no extra text. No markdown fences (i.e., no triple backticks). So just raw code.
+
+We need to import sys, csv. Use argparse? Not needed; just read sys.argv[1]. Check length. If missing, error.
+
+Implementation steps:
+
+- import sys, csv
+- if len(sys.argv) < 2: maybe error? The problem says reads a CSV file path from sys.argv[1]; we can assume it's provided. But we could also check and exit with error. Not required but safe.
+
+- file = sys.argv[1]
+
+- Try to open file, read with csv.DictReader.
+
+- Check if 'status' in fieldnames; if not, print error to stderr (sys.stderr.write("Error: missing 'status' column\n")) and sys.exit(1).
+
+- Initialize a dict counts = {}.
+
+- For each row in reader: status = row['status']; counts[status] = counts.get(status, 0) + 1
+
+- Then sort items by count descending: sorted_counts = sorted(counts.items(), key=lambda x: x[1], reverse=True)
+
+- For each (status, count) in sorted_counts: print(f"{status}: {count}")
+
+That's it.
+
+Make sure to use only standard library. That's fine.
+
+Potential edge cases: empty file? Then counts empty; nothing printed. That's okay.
+
+Make sure to handle missing column: print error to stderr and exit with code 1.
+
+Now produce final answer: just the code.
+
+Check formatting: no markdown fences. So just plain text.
+
+Let's write:
+
+#!/usr/bin/env python3
+import sys
+import csv
+
+def main():
+    if len(sys.argv) != 2:
+        sys.stderr.write("Usage: script.py <csv_file>\n")
+        sys.exit(1)
+
+    filepath = sys.argv[1]
+
+    try:
+        with open(filepath, newline='') as f:
+            reader = csv.DictReader(f)
+            if 'status' not in reader.fieldnames:
+                sys.stderr.write("Error: missing 'status' column\n")
+                sys.exit(1)
+            counts = {}
+            for row in reader:
+                status = row['status']
+                counts[status] = counts.get(status, 0) + 1
+            for status, cnt in sorted(counts.items(), key=lambda x: x[1], reverse=True):
+                print(f"{status}: {cnt}")
+    except Exception as e:
+        sys.stderr.write(f"Error reading file: {e}\n")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
+
+That's the code. Ensure no extra whitespace before/after. It's okay.
+
+Check that we used only standard library: sys, csv. Yes.
+
+Potential improvements: handle empty file gracefully; counts will be empty, sorted yields empty list, nothing printed. That's fine.
+
+Now output exactly that code.</think>
+#!/usr/bin/env python3
+import sys
+import csv
+
+def main():
+    if len(sys.argv) != 2:
+        sys.stderr.write("Usage: script.py <csv_file>\n")
+        sys.exit(1)
+
+    filepath = sys.argv[1]
+
+    try:
+        with open(filepath, newline='') as f:
+            reader = csv.DictReader(f)
+            if 'status' not in reader.fieldnames:
+                sys.stderr.write("Error: missing 'status' column\n")
+                sys.exit(1)
+            counts = {}
+            for row in reader:
+                status = row['status']
+                counts[status] = counts.get(status, 0) + 1
+            for status, cnt in sorted(counts.items(), key=lambda x: x[1], reverse=True):
+                print(f"{status}: {cnt}")
+    except Exception as e:
+        sys.stderr.write(f"Error reading file: {e}\n")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

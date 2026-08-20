@@ -1,0 +1,2 @@
+[elapsed 7.2s, completion_tokens 75, prompt_tokens 187]
+Bolt Industries reported a 500 error issue at 10:00 UTC, but internal logs confirm v4.812 was deployed at 09:58 UTC, not the cause of the problem. The issue appears limited to POST /v2/invoices in staging and production, with a 4% error rate overall. The root cause remains unidentified.

@@ -1,0 +1,2 @@
+[elapsed 13.9s, completion_tokens 86, prompt_tokens 154]
+[{"title": "Fix login redirect loop", "assignee": "Sarah", "due": "Friday", "priority": "high"}, {"title": "Update changelog", "assignee": "null", "due": "null", "priority": "low"}, {"title": "Rotate staging DB credentials", "assignee": "Dan", "due": "Wednesday", "priority": "high"}]

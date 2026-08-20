@@ -1,0 +1,30 @@
+[elapsed 24.1s, completion_tokens 201, prompt_tokens 92]
+```python
+import csv
+import sys
+from collections import Counter
+from sys import stderr
+
+def main():
+    if len(sys.argv) != 2:
+        print("Usage: script.py <csv_file_path>", file=stderr)
+        sys.exit(1)
+
+    csv_file_path = sys.argv[1]
+
+    try:
+        with open(csv_file_path, newline='') as csvfile:
+            reader = csv.DictReader(csvfile)
+            if 'status' not in reader.fieldnames:
+                raise ValueError("Missing 'status' column")
+
+            status_counts = Counter(row['status'] for row in csv.reader(csvfile) if 'status' in row)
+            for status, count in sorted(status_counts.items(), key=lambda x: x[1], reverse=True):
+                print(f"{status}: {count}")
+    except ValueError as e:
+        print(e, file=stderr)
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
+```

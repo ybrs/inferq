@@ -1,0 +1,2 @@
+[elapsed 4.4s, completion_tokens 57, prompt_tokens 217]
+The customer reported webhook delivery failures to https://hooks.acme.example/orders since 06:30 UTC. The issue is unknown to the support team, as the customer stated no changes were made. The delivery logs show TLS handshake timeouts and retries exhausted after 5 attempts.

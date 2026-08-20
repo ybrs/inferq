@@ -1,0 +1,6 @@
+Extract action items from the message into JSON. Output ONLY a JSON array, no prose, no fences. Each item: {"title": string, "assignee": string or null, "due": string or null, "blocked_by": string or null}. Use null when the message does not state a value. Never invent an assignee or a date.
+
+Message:
+"Standup notes: the invoice export is still broken — we can't start on it until legal signs off on the data retention question. Emily said she'd take the migration script once the export is fixed. We should also bump the Postgres version at some point. Kevin is out until the 14th."
+
+JSON:

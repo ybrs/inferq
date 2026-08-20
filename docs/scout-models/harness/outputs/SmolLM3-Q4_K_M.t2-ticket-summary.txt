@@ -1,0 +1,3 @@
+[elapsed 8.4s, completion_tokens 67, prompt_tokens 258]
+
+Since 06:30 UTC, webhook deliveries to the customer's endpoint have been failing with a TLS handshake timeout after 10 seconds, resulting in retries being exhausted after 5 attempts. The customer has not made any changes to their side, and the support team has not observed any errors on the egress proxy for other customers.

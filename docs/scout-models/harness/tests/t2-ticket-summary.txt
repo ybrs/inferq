@@ -1,0 +1,9 @@
+Summarize the support ticket below in at most 3 sentences for an engineer. Use ONLY facts stated in the ticket. If the cause is unknown, say it is unknown — do not guess. Do not mention anything not in the ticket.
+
+Ticket #8841 (customer: Acme Corp, plan: enterprise)
+- 09:14 customer: "Since this morning our webhook deliveries to https://hooks.acme.example/orders are failing. Dashboard shows 100% failure since 06:30 UTC."
+- 09:20 support: asked for a sample delivery ID.
+- 09:31 customer: "dlv_9f3k2. Also we changed nothing on our side."
+- 09:40 support: internal note — delivery logs show TLS handshake timeout after 10s on all attempts to the customer endpoint. Retries exhausted after 5 attempts. No errors on our egress proxy for other customers.
+
+Summary:

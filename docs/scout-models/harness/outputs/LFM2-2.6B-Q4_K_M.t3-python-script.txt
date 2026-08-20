@@ -1,0 +1,31 @@
+[elapsed 19.2s, completion_tokens 257, prompt_tokens 106]
+import sys
+import csv
+import sys
+
+if len(sys.argv) != 2:
+    sys.stderr.write("Usage: python script.py <csv_file_path>\n")
+    sys.exit(1)
+
+csv_path = sys.argv[1]
+
+try:
+    with open(csv_path, newline='') as csvfile:
+        reader = csv.DictReader(csvfile)
+        if "status" not in reader.fieldnames:
+            sys.stderr.write("Error: 'status' column is missing in the CSV file.\n")
+            sys.exit(1)
+        
+        status_counts = {}
+        for row in reader:
+            status = row["status"]
+            status_counts[status] = status_counts.get(status, 0) + 1
+        
+        sorted_statuses = sorted(status_counts.items(), key=lambda x: x[1], reverse=True)
+        
+        for status, count in sorted_statuses:
+            print(f"{status}: {count}")
+
+except Exception as e:
+    sys.stderr.write(f"Error reading CSV file: {e}\n")
+    sys.exit(1)

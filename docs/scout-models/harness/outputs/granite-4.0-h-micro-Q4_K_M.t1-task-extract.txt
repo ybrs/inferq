@@ -1,0 +1,27 @@
+[elapsed 17.0s, completion_tokens 145, prompt_tokens 169]
+[
+  {
+    "title": "Fix the login redirect loop",
+    "assignee": "Sarah",
+    "due": "Friday",
+    "priority": "high"
+  },
+  {
+    "title": "Update the changelog",
+    "assignee": null,
+    "due": null,
+    "priority": "low"
+  },
+  {
+    "title": "Rotate the staging DB credentials",
+    "assignee": "Dan",
+    "due": "Wednesday",
+    "priority": "high"
+  },
+  {
+    "title": "Look into dark mode",
+    "assignee": null,
+    "due": null,
+    "priority": "low"
+  }
+]
