@@ -1,0 +1,22 @@
+Rewrite the following Rust function, adding error context to each failure path.
+
+```rust
+/// Parses a semver string into (major, minor, patch) tuple.
+///
+/// # Examples
+///
+/// ```
+/// let (major, minor, patch) = parse_semver("1.2.3").unwrap();
+/// assert_eq!((major, minor, patch), (1, 2, 3));
+/// ```
+pub fn parse_semver(s: &str) -> Result<(u32, u32, u32), String> {
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() != 3 {
+        return Err("invalid semver string".to_string());
+    }
+    let major = parts[0].parse::<u32>().map_err(|_| "invalid major version".to_string())?;
+    let minor = parts[1].parse::<u32>().map_err(|_| "invalid minor version".to_string())?;
+    let patch = parts[2].parse::<u32>().map_err(|_| "invalid patch version".to_string())?;
+    Ok((major, minor, patch))
+}
+```

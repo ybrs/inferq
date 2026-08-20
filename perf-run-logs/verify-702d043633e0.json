@@ -1,0 +1,1628 @@
+{
+  "schema_version": 1,
+  "source": {
+    "git_commit": "3497f143aa7f86621d54e286b4822f86192bffd8",
+    "git_dirty": true
+  },
+  "build": {
+    "target_arch": "x86_64",
+    "debug_assertions": false,
+    "avx2": true,
+    "fma": true,
+    "candle_threads": 6,
+    "rayon_threads": 1
+  },
+  "host": {
+    "cpu_model": "Intel(R) Core(TM) i7-8700 CPU @ 3.20GHz",
+    "logical_cpus": 6,
+    "physical_cores": 6,
+    "memory_total_bytes": 134976667648,
+    "kernel": "Linux 6.8.0-100-generic x86_64 GNU/Linux",
+    "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "filesystem": "btrfs",
+    "storage_source": "/dev/nvme1n1p1[/projects/localllm/models]",
+    "storage_rotational": null
+  },
+  "model": {
+    "path": "/models/Qwen3.6-35B-A3B/Qwen_Qwen3.6-35B-A3B-Q4_K_M.gguf",
+    "size_bytes": 22285080192,
+    "modified_unix_nanos": 1786892293527620609,
+    "layout_fingerprint": "fnv1a64:c9cb348f1d86017c",
+    "quantization": [
+      "BF16",
+      "F32",
+      "Q4K",
+      "Q5K",
+      "Q6K",
+      "Q8_0"
+    ]
+  },
+  "prompt": "Measure deterministic target verification scaling.",
+  "prompt_token_ids": [
+    31173,
+    69892,
+    2100,
+    22188,
+    26079,
+    13
+  ],
+  "verification_token_ids": [
+    8160,
+    579,
+    264,
+    7047,
+    1817,
+    25,
+    271,
+    16
+  ],
+  "batch_sizes": [
+    1,
+    2,
+    4,
+    8
+  ],
+  "expert_cache_mib": 24000,
+  "results": [
+    {
+      "rows": 1,
+      "repetitions": 3,
+      "stages": {
+        "wall": {
+          "total_seconds": 0.13239662500000002,
+          "per_row_seconds": 0.13239662500000002
+        },
+        "deltanet_projections": {
+          "total_seconds": 0.02912396866666667,
+          "per_row_seconds": 0.02912396866666667
+        },
+        "deltanet_recurrence": {
+          "total_seconds": 0.009081368333333334,
+          "per_row_seconds": 0.009081368333333334
+        },
+        "full_attention": {
+          "total_seconds": 0.011121144666666668,
+          "per_row_seconds": 0.011121144666666668
+        },
+        "moe_router": {
+          "total_seconds": 0.0037263170000000003,
+          "per_row_seconds": 0.0037263170000000003
+        },
+        "moe_top_k": {
+          "total_seconds": 0.0004148296666666667,
+          "per_row_seconds": 0.0004148296666666667
+        },
+        "moe_routed_gate_up": {
+          "total_seconds": 0.020869956666666665,
+          "per_row_seconds": 0.020869956666666665
+        },
+        "moe_activation": {
+          "total_seconds": 0.0014086370000000001,
+          "per_row_seconds": 0.0014086370000000001
+        },
+        "moe_routed_down": {
+          "total_seconds": 0.012750741333333334,
+          "per_row_seconds": 0.012750741333333334
+        },
+        "moe_routed_accumulation": {
+          "total_seconds": 0.0005325653333333334,
+          "per_row_seconds": 0.0005325653333333334
+        },
+        "moe_shared_expert": {
+          "total_seconds": 0.006968242666666667,
+          "per_row_seconds": 0.006968242666666667
+        },
+        "dense_projections_outside_moe": {
+          "total_seconds": 0.05046779866666667,
+          "per_row_seconds": 0.05046779866666667
+        },
+        "final_norm": {
+          "total_seconds": 7.126333333333333e-6,
+          "per_row_seconds": 7.126333333333333e-6
+        },
+        "lm_head": {
+          "total_seconds": 0.019088497,
+          "per_row_seconds": 0.019088497
+        }
+      },
+      "state_operations": {
+        "checkpoint_seconds": 0.031484764,
+        "restore_seconds": 0.007962511333333333,
+        "rejection_replay_seconds": 0.130373197,
+        "rejection_replay_rows": 1
+      },
+      "expert_reuse_by_layer": [
+        {
+          "layer": 0,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 1,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 2,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 3,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 4,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 5,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 6,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 7,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 8,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 9,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 10,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 11,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 12,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 13,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 14,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 15,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 16,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 17,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 18,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 19,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 20,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 21,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 22,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 23,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 24,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 25,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 26,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 27,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 28,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 29,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 30,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 31,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 32,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 33,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 34,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 35,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 36,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 37,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 38,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 39,
+          "token_expert_assignments": 8.0,
+          "unique_experts_selected": 8.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        }
+      ]
+    },
+    {
+      "rows": 2,
+      "repetitions": 3,
+      "stages": {
+        "wall": {
+          "total_seconds": 0.38119020800000003,
+          "per_row_seconds": 0.19059510400000002
+        },
+        "deltanet_projections": {
+          "total_seconds": 0.11291514466666665,
+          "per_row_seconds": 0.056457572333333324
+        },
+        "deltanet_recurrence": {
+          "total_seconds": 0.01689593066666667,
+          "per_row_seconds": 0.008447965333333335
+        },
+        "full_attention": {
+          "total_seconds": 0.044047765999999995,
+          "per_row_seconds": 0.022023882999999998
+        },
+        "moe_router": {
+          "total_seconds": 0.009946827666666663,
+          "per_row_seconds": 0.0049734138333333315
+        },
+        "moe_top_k": {
+          "total_seconds": 0.0008183706666666669,
+          "per_row_seconds": 0.00040918533333333344
+        },
+        "moe_routed_gate_up": {
+          "total_seconds": 0.04339492933333333,
+          "per_row_seconds": 0.021697464666666666
+        },
+        "moe_activation": {
+          "total_seconds": 0.0026521550000000002,
+          "per_row_seconds": 0.0013260775000000001
+        },
+        "moe_routed_down": {
+          "total_seconds": 0.027253195333333338,
+          "per_row_seconds": 0.013626597666666669
+        },
+        "moe_routed_accumulation": {
+          "total_seconds": 0.0009115936666666668,
+          "per_row_seconds": 0.0004557968333333334
+        },
+        "moe_shared_expert": {
+          "total_seconds": 0.01027886666666667,
+          "per_row_seconds": 0.005139433333333335
+        },
+        "dense_projections_outside_moe": {
+          "total_seconds": 0.18881721366666668,
+          "per_row_seconds": 0.09440860683333334
+        },
+        "final_norm": {
+          "total_seconds": 0.000010458666666666667,
+          "per_row_seconds": 5.2293333333333335e-6
+        },
+        "lm_head": {
+          "total_seconds": 0.064519606,
+          "per_row_seconds": 0.032259803
+        }
+      },
+      "state_operations": {
+        "checkpoint_seconds": 0.032828257,
+        "restore_seconds": 0.008264529333333333,
+        "rejection_replay_seconds": 0.130632239,
+        "rejection_replay_rows": 1
+      },
+      "expert_reuse_by_layer": [
+        {
+          "layer": 0,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 16.0,
+          "duplicate_expert_assignment_rate": 0.0,
+          "average_rows_per_selected_expert": 1.0,
+          "maximum_rows_assigned_to_one_expert": 1
+        },
+        {
+          "layer": 1,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 15.0,
+          "duplicate_expert_assignment_rate": 0.0625,
+          "average_rows_per_selected_expert": 1.0666666666666667,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 2,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 10.0,
+          "duplicate_expert_assignment_rate": 0.375,
+          "average_rows_per_selected_expert": 1.6,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 3,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 11.0,
+          "duplicate_expert_assignment_rate": 0.3125,
+          "average_rows_per_selected_expert": 1.4545454545454546,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 4,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 11.0,
+          "duplicate_expert_assignment_rate": 0.3125,
+          "average_rows_per_selected_expert": 1.4545454545454546,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 5,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 12.0,
+          "duplicate_expert_assignment_rate": 0.25,
+          "average_rows_per_selected_expert": 1.3333333333333333,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 6,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 13.0,
+          "duplicate_expert_assignment_rate": 0.1875,
+          "average_rows_per_selected_expert": 1.2307692307692308,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 7,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 14.0,
+          "duplicate_expert_assignment_rate": 0.125,
+          "average_rows_per_selected_expert": 1.1428571428571428,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 8,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 12.0,
+          "duplicate_expert_assignment_rate": 0.25,
+          "average_rows_per_selected_expert": 1.3333333333333333,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 9,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 12.0,
+          "duplicate_expert_assignment_rate": 0.25,
+          "average_rows_per_selected_expert": 1.3333333333333333,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 10,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 14.0,
+          "duplicate_expert_assignment_rate": 0.125,
+          "average_rows_per_selected_expert": 1.1428571428571428,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 11,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 12.0,
+          "duplicate_expert_assignment_rate": 0.25,
+          "average_rows_per_selected_expert": 1.3333333333333333,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 12,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 12.0,
+          "duplicate_expert_assignment_rate": 0.25,
+          "average_rows_per_selected_expert": 1.3333333333333333,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 13,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 12.0,
+          "duplicate_expert_assignment_rate": 0.25,
+          "average_rows_per_selected_expert": 1.3333333333333333,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 14,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 13.0,
+          "duplicate_expert_assignment_rate": 0.1875,
+          "average_rows_per_selected_expert": 1.2307692307692308,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 15,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 12.0,
+          "duplicate_expert_assignment_rate": 0.25,
+          "average_rows_per_selected_expert": 1.3333333333333333,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 16,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 13.0,
+          "duplicate_expert_assignment_rate": 0.1875,
+          "average_rows_per_selected_expert": 1.2307692307692308,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 17,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 13.0,
+          "duplicate_expert_assignment_rate": 0.1875,
+          "average_rows_per_selected_expert": 1.2307692307692308,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 18,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 12.0,
+          "duplicate_expert_assignment_rate": 0.25,
+          "average_rows_per_selected_expert": 1.3333333333333333,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 19,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 12.0,
+          "duplicate_expert_assignment_rate": 0.25,
+          "average_rows_per_selected_expert": 1.3333333333333333,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 20,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 11.0,
+          "duplicate_expert_assignment_rate": 0.3125,
+          "average_rows_per_selected_expert": 1.4545454545454546,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 21,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 13.0,
+          "duplicate_expert_assignment_rate": 0.1875,
+          "average_rows_per_selected_expert": 1.2307692307692308,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 22,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 13.0,
+          "duplicate_expert_assignment_rate": 0.1875,
+          "average_rows_per_selected_expert": 1.2307692307692308,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 23,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 13.0,
+          "duplicate_expert_assignment_rate": 0.1875,
+          "average_rows_per_selected_expert": 1.2307692307692308,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 24,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 13.0,
+          "duplicate_expert_assignment_rate": 0.1875,
+          "average_rows_per_selected_expert": 1.2307692307692308,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 25,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 13.0,
+          "duplicate_expert_assignment_rate": 0.1875,
+          "average_rows_per_selected_expert": 1.2307692307692308,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 26,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 13.0,
+          "duplicate_expert_assignment_rate": 0.1875,
+          "average_rows_per_selected_expert": 1.2307692307692308,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 27,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 11.0,
+          "duplicate_expert_assignment_rate": 0.3125,
+          "average_rows_per_selected_expert": 1.4545454545454546,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 28,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 12.0,
+          "duplicate_expert_assignment_rate": 0.25,
+          "average_rows_per_selected_expert": 1.3333333333333333,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 29,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 12.0,
+          "duplicate_expert_assignment_rate": 0.25,
+          "average_rows_per_selected_expert": 1.3333333333333333,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 30,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 11.0,
+          "duplicate_expert_assignment_rate": 0.3125,
+          "average_rows_per_selected_expert": 1.4545454545454546,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 31,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 12.0,
+          "duplicate_expert_assignment_rate": 0.25,
+          "average_rows_per_selected_expert": 1.3333333333333333,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 32,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 11.0,
+          "duplicate_expert_assignment_rate": 0.3125,
+          "average_rows_per_selected_expert": 1.4545454545454546,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 33,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 13.0,
+          "duplicate_expert_assignment_rate": 0.1875,
+          "average_rows_per_selected_expert": 1.2307692307692308,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 34,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 14.0,
+          "duplicate_expert_assignment_rate": 0.125,
+          "average_rows_per_selected_expert": 1.1428571428571428,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 35,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 14.0,
+          "duplicate_expert_assignment_rate": 0.125,
+          "average_rows_per_selected_expert": 1.1428571428571428,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 36,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 14.0,
+          "duplicate_expert_assignment_rate": 0.125,
+          "average_rows_per_selected_expert": 1.1428571428571428,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 37,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 12.0,
+          "duplicate_expert_assignment_rate": 0.25,
+          "average_rows_per_selected_expert": 1.3333333333333333,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 38,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 13.0,
+          "duplicate_expert_assignment_rate": 0.1875,
+          "average_rows_per_selected_expert": 1.2307692307692308,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 39,
+          "token_expert_assignments": 16.0,
+          "unique_experts_selected": 15.0,
+          "duplicate_expert_assignment_rate": 0.0625,
+          "average_rows_per_selected_expert": 1.0666666666666667,
+          "maximum_rows_assigned_to_one_expert": 2
+        }
+      ]
+    },
+    {
+      "rows": 4,
+      "repetitions": 3,
+      "stages": {
+        "wall": {
+          "total_seconds": 0.5471613093333333,
+          "per_row_seconds": 0.13679032733333332
+        },
+        "deltanet_projections": {
+          "total_seconds": 0.15768302933333336,
+          "per_row_seconds": 0.03942075733333334
+        },
+        "deltanet_recurrence": {
+          "total_seconds": 0.026452894999999994,
+          "per_row_seconds": 0.006613223749999998
+        },
+        "full_attention": {
+          "total_seconds": 0.05782540233333333,
+          "per_row_seconds": 0.014456350583333333
+        },
+        "moe_router": {
+          "total_seconds": 0.007307994666666667,
+          "per_row_seconds": 0.0018269986666666668
+        },
+        "moe_top_k": {
+          "total_seconds": 0.0013934966666666671,
+          "per_row_seconds": 0.0003483741666666668
+        },
+        "moe_routed_gate_up": {
+          "total_seconds": 0.061430963333333345,
+          "per_row_seconds": 0.015357740833333336
+        },
+        "moe_activation": {
+          "total_seconds": 0.004542209666666666,
+          "per_row_seconds": 0.0011355524166666664
+        },
+        "moe_routed_down": {
+          "total_seconds": 0.03638474133333333,
+          "per_row_seconds": 0.009096185333333333
+        },
+        "moe_routed_accumulation": {
+          "total_seconds": 0.001745447333333333,
+          "per_row_seconds": 0.00043636183333333324
+        },
+        "moe_shared_expert": {
+          "total_seconds": 0.012031117666666667,
+          "per_row_seconds": 0.003007779416666667
+        },
+        "dense_projections_outside_moe": {
+          "total_seconds": 0.2645406456666667,
+          "per_row_seconds": 0.06613516141666667
+        },
+        "final_norm": {
+          "total_seconds": 0.000015361666666666666,
+          "per_row_seconds": 3.840416666666666e-6
+        },
+        "lm_head": {
+          "total_seconds": 0.10638601800000001,
+          "per_row_seconds": 0.026596504500000003
+        }
+      },
+      "state_operations": {
+        "checkpoint_seconds": 0.031822700333333336,
+        "restore_seconds": 0.0076205,
+        "rejection_replay_seconds": 0.11488825166666666,
+        "rejection_replay_rows": 1
+      },
+      "expert_reuse_by_layer": [
+        {
+          "layer": 0,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 31.0,
+          "duplicate_expert_assignment_rate": 0.03125,
+          "average_rows_per_selected_expert": 1.032258064516129,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 1,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 28.0,
+          "duplicate_expert_assignment_rate": 0.125,
+          "average_rows_per_selected_expert": 1.1428571428571428,
+          "maximum_rows_assigned_to_one_expert": 3
+        },
+        {
+          "layer": 2,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 17.0,
+          "duplicate_expert_assignment_rate": 0.46875,
+          "average_rows_per_selected_expert": 1.8823529411764706,
+          "maximum_rows_assigned_to_one_expert": 4
+        },
+        {
+          "layer": 3,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 23.0,
+          "duplicate_expert_assignment_rate": 0.28125,
+          "average_rows_per_selected_expert": 1.391304347826087,
+          "maximum_rows_assigned_to_one_expert": 3
+        },
+        {
+          "layer": 4,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 21.0,
+          "duplicate_expert_assignment_rate": 0.34375,
+          "average_rows_per_selected_expert": 1.5238095238095237,
+          "maximum_rows_assigned_to_one_expert": 4
+        },
+        {
+          "layer": 5,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 25.0,
+          "duplicate_expert_assignment_rate": 0.21875,
+          "average_rows_per_selected_expert": 1.28,
+          "maximum_rows_assigned_to_one_expert": 3
+        },
+        {
+          "layer": 6,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 23.0,
+          "duplicate_expert_assignment_rate": 0.28125,
+          "average_rows_per_selected_expert": 1.391304347826087,
+          "maximum_rows_assigned_to_one_expert": 3
+        },
+        {
+          "layer": 7,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 22.0,
+          "duplicate_expert_assignment_rate": 0.3125,
+          "average_rows_per_selected_expert": 1.4545454545454546,
+          "maximum_rows_assigned_to_one_expert": 3
+        },
+        {
+          "layer": 8,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 20.0,
+          "duplicate_expert_assignment_rate": 0.375,
+          "average_rows_per_selected_expert": 1.6,
+          "maximum_rows_assigned_to_one_expert": 4
+        },
+        {
+          "layer": 9,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 20.0,
+          "duplicate_expert_assignment_rate": 0.375,
+          "average_rows_per_selected_expert": 1.6,
+          "maximum_rows_assigned_to_one_expert": 4
+        },
+        {
+          "layer": 10,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 25.0,
+          "duplicate_expert_assignment_rate": 0.21875,
+          "average_rows_per_selected_expert": 1.28,
+          "maximum_rows_assigned_to_one_expert": 3
+        },
+        {
+          "layer": 11,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 24.0,
+          "duplicate_expert_assignment_rate": 0.25,
+          "average_rows_per_selected_expert": 1.3333333333333333,
+          "maximum_rows_assigned_to_one_expert": 3
+        },
+        {
+          "layer": 12,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 21.0,
+          "duplicate_expert_assignment_rate": 0.34375,
+          "average_rows_per_selected_expert": 1.5238095238095237,
+          "maximum_rows_assigned_to_one_expert": 4
+        },
+        {
+          "layer": 13,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 21.0,
+          "duplicate_expert_assignment_rate": 0.34375,
+          "average_rows_per_selected_expert": 1.5238095238095237,
+          "maximum_rows_assigned_to_one_expert": 4
+        },
+        {
+          "layer": 14,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 21.0,
+          "duplicate_expert_assignment_rate": 0.34375,
+          "average_rows_per_selected_expert": 1.5238095238095237,
+          "maximum_rows_assigned_to_one_expert": 4
+        },
+        {
+          "layer": 15,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 20.0,
+          "duplicate_expert_assignment_rate": 0.375,
+          "average_rows_per_selected_expert": 1.6,
+          "maximum_rows_assigned_to_one_expert": 3
+        },
+        {
+          "layer": 16,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 23.0,
+          "duplicate_expert_assignment_rate": 0.28125,
+          "average_rows_per_selected_expert": 1.391304347826087,
+          "maximum_rows_assigned_to_one_expert": 4
+        },
+        {
+          "layer": 17,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 18.0,
+          "duplicate_expert_assignment_rate": 0.4375,
+          "average_rows_per_selected_expert": 1.7777777777777777,
+          "maximum_rows_assigned_to_one_expert": 4
+        },
+        {
+          "layer": 18,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 23.0,
+          "duplicate_expert_assignment_rate": 0.28125,
+          "average_rows_per_selected_expert": 1.391304347826087,
+          "maximum_rows_assigned_to_one_expert": 3
+        },
+        {
+          "layer": 19,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 21.0,
+          "duplicate_expert_assignment_rate": 0.34375,
+          "average_rows_per_selected_expert": 1.5238095238095237,
+          "maximum_rows_assigned_to_one_expert": 3
+        },
+        {
+          "layer": 20,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 19.0,
+          "duplicate_expert_assignment_rate": 0.40625,
+          "average_rows_per_selected_expert": 1.6842105263157894,
+          "maximum_rows_assigned_to_one_expert": 4
+        },
+        {
+          "layer": 21,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 22.0,
+          "duplicate_expert_assignment_rate": 0.3125,
+          "average_rows_per_selected_expert": 1.4545454545454546,
+          "maximum_rows_assigned_to_one_expert": 4
+        },
+        {
+          "layer": 22,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 24.0,
+          "duplicate_expert_assignment_rate": 0.25,
+          "average_rows_per_selected_expert": 1.3333333333333333,
+          "maximum_rows_assigned_to_one_expert": 3
+        },
+        {
+          "layer": 23,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 27.0,
+          "duplicate_expert_assignment_rate": 0.15625,
+          "average_rows_per_selected_expert": 1.1851851851851851,
+          "maximum_rows_assigned_to_one_expert": 3
+        },
+        {
+          "layer": 24,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 20.0,
+          "duplicate_expert_assignment_rate": 0.375,
+          "average_rows_per_selected_expert": 1.6,
+          "maximum_rows_assigned_to_one_expert": 4
+        },
+        {
+          "layer": 25,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 21.0,
+          "duplicate_expert_assignment_rate": 0.34375,
+          "average_rows_per_selected_expert": 1.5238095238095237,
+          "maximum_rows_assigned_to_one_expert": 4
+        },
+        {
+          "layer": 26,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 19.0,
+          "duplicate_expert_assignment_rate": 0.40625,
+          "average_rows_per_selected_expert": 1.6842105263157894,
+          "maximum_rows_assigned_to_one_expert": 4
+        },
+        {
+          "layer": 27,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 18.0,
+          "duplicate_expert_assignment_rate": 0.4375,
+          "average_rows_per_selected_expert": 1.7777777777777777,
+          "maximum_rows_assigned_to_one_expert": 4
+        },
+        {
+          "layer": 28,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 17.0,
+          "duplicate_expert_assignment_rate": 0.46875,
+          "average_rows_per_selected_expert": 1.8823529411764706,
+          "maximum_rows_assigned_to_one_expert": 4
+        },
+        {
+          "layer": 29,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 18.0,
+          "duplicate_expert_assignment_rate": 0.4375,
+          "average_rows_per_selected_expert": 1.7777777777777777,
+          "maximum_rows_assigned_to_one_expert": 4
+        },
+        {
+          "layer": 30,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 16.0,
+          "duplicate_expert_assignment_rate": 0.5,
+          "average_rows_per_selected_expert": 2.0,
+          "maximum_rows_assigned_to_one_expert": 4
+        },
+        {
+          "layer": 31,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 18.0,
+          "duplicate_expert_assignment_rate": 0.4375,
+          "average_rows_per_selected_expert": 1.7777777777777777,
+          "maximum_rows_assigned_to_one_expert": 4
+        },
+        {
+          "layer": 32,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 21.0,
+          "duplicate_expert_assignment_rate": 0.34375,
+          "average_rows_per_selected_expert": 1.5238095238095237,
+          "maximum_rows_assigned_to_one_expert": 4
+        },
+        {
+          "layer": 33,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 22.0,
+          "duplicate_expert_assignment_rate": 0.3125,
+          "average_rows_per_selected_expert": 1.4545454545454546,
+          "maximum_rows_assigned_to_one_expert": 4
+        },
+        {
+          "layer": 34,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 25.0,
+          "duplicate_expert_assignment_rate": 0.21875,
+          "average_rows_per_selected_expert": 1.28,
+          "maximum_rows_assigned_to_one_expert": 4
+        },
+        {
+          "layer": 35,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 20.0,
+          "duplicate_expert_assignment_rate": 0.375,
+          "average_rows_per_selected_expert": 1.6,
+          "maximum_rows_assigned_to_one_expert": 4
+        },
+        {
+          "layer": 36,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 23.0,
+          "duplicate_expert_assignment_rate": 0.28125,
+          "average_rows_per_selected_expert": 1.391304347826087,
+          "maximum_rows_assigned_to_one_expert": 4
+        },
+        {
+          "layer": 37,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 20.0,
+          "duplicate_expert_assignment_rate": 0.375,
+          "average_rows_per_selected_expert": 1.6,
+          "maximum_rows_assigned_to_one_expert": 4
+        },
+        {
+          "layer": 38,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 18.0,
+          "duplicate_expert_assignment_rate": 0.4375,
+          "average_rows_per_selected_expert": 1.7777777777777777,
+          "maximum_rows_assigned_to_one_expert": 4
+        },
+        {
+          "layer": 39,
+          "token_expert_assignments": 32.0,
+          "unique_experts_selected": 27.0,
+          "duplicate_expert_assignment_rate": 0.15625,
+          "average_rows_per_selected_expert": 1.1851851851851851,
+          "maximum_rows_assigned_to_one_expert": 3
+        }
+      ]
+    },
+    {
+      "rows": 8,
+      "repetitions": 3,
+      "stages": {
+        "wall": {
+          "total_seconds": 0.9889955693333333,
+          "per_row_seconds": 0.12362444616666667
+        },
+        "deltanet_projections": {
+          "total_seconds": 0.284060577,
+          "per_row_seconds": 0.035507572125
+        },
+        "deltanet_recurrence": {
+          "total_seconds": 0.04880971366666665,
+          "per_row_seconds": 0.006101214208333331
+        },
+        "full_attention": {
+          "total_seconds": 0.10730283866666668,
+          "per_row_seconds": 0.013412854833333335
+        },
+        "moe_router": {
+          "total_seconds": 0.010569941000000001,
+          "per_row_seconds": 0.0013212426250000001
+        },
+        "moe_top_k": {
+          "total_seconds": 0.002850170999999999,
+          "per_row_seconds": 0.0003562713749999999
+        },
+        "moe_routed_gate_up": {
+          "total_seconds": 0.10739711066666664,
+          "per_row_seconds": 0.01342463883333333
+        },
+        "moe_activation": {
+          "total_seconds": 0.008347874,
+          "per_row_seconds": 0.00104348425
+        },
+        "moe_routed_down": {
+          "total_seconds": 0.06301599366666667,
+          "per_row_seconds": 0.007876999208333334
+        },
+        "moe_routed_accumulation": {
+          "total_seconds": 0.004087066666666667,
+          "per_row_seconds": 0.0005108833333333333
+        },
+        "moe_shared_expert": {
+          "total_seconds": 0.02006041566666666,
+          "per_row_seconds": 0.0025075519583333326
+        },
+        "dense_projections_outside_moe": {
+          "total_seconds": 0.481410004,
+          "per_row_seconds": 0.0601762505
+        },
+        "final_norm": {
+          "total_seconds": 0.000020488333333333332,
+          "per_row_seconds": 2.5610416666666665e-6
+        },
+        "lm_head": {
+          "total_seconds": 0.19077561466666668,
+          "per_row_seconds": 0.023846951833333335
+        }
+      },
+      "state_operations": {
+        "checkpoint_seconds": 0.03175687733333333,
+        "restore_seconds": 0.008061993,
+        "rejection_replay_seconds": 0.122585304,
+        "rejection_replay_rows": 1
+      },
+      "expert_reuse_by_layer": [
+        {
+          "layer": 0,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 57.0,
+          "duplicate_expert_assignment_rate": 0.109375,
+          "average_rows_per_selected_expert": 1.1228070175438596,
+          "maximum_rows_assigned_to_one_expert": 2
+        },
+        {
+          "layer": 1,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 46.0,
+          "duplicate_expert_assignment_rate": 0.28125,
+          "average_rows_per_selected_expert": 1.391304347826087,
+          "maximum_rows_assigned_to_one_expert": 3
+        },
+        {
+          "layer": 2,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 35.0,
+          "duplicate_expert_assignment_rate": 0.453125,
+          "average_rows_per_selected_expert": 1.8285714285714285,
+          "maximum_rows_assigned_to_one_expert": 7
+        },
+        {
+          "layer": 3,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 37.0,
+          "duplicate_expert_assignment_rate": 0.421875,
+          "average_rows_per_selected_expert": 1.7297297297297298,
+          "maximum_rows_assigned_to_one_expert": 7
+        },
+        {
+          "layer": 4,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 37.0,
+          "duplicate_expert_assignment_rate": 0.421875,
+          "average_rows_per_selected_expert": 1.7297297297297298,
+          "maximum_rows_assigned_to_one_expert": 8
+        },
+        {
+          "layer": 5,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 34.0,
+          "duplicate_expert_assignment_rate": 0.46875,
+          "average_rows_per_selected_expert": 1.8823529411764706,
+          "maximum_rows_assigned_to_one_expert": 5
+        },
+        {
+          "layer": 6,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 30.0,
+          "duplicate_expert_assignment_rate": 0.53125,
+          "average_rows_per_selected_expert": 2.1333333333333333,
+          "maximum_rows_assigned_to_one_expert": 7
+        },
+        {
+          "layer": 7,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 27.0,
+          "duplicate_expert_assignment_rate": 0.578125,
+          "average_rows_per_selected_expert": 2.3703703703703702,
+          "maximum_rows_assigned_to_one_expert": 7
+        },
+        {
+          "layer": 8,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 30.0,
+          "duplicate_expert_assignment_rate": 0.53125,
+          "average_rows_per_selected_expert": 2.1333333333333333,
+          "maximum_rows_assigned_to_one_expert": 8
+        },
+        {
+          "layer": 9,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 32.0,
+          "duplicate_expert_assignment_rate": 0.5,
+          "average_rows_per_selected_expert": 2.0,
+          "maximum_rows_assigned_to_one_expert": 8
+        },
+        {
+          "layer": 10,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 32.0,
+          "duplicate_expert_assignment_rate": 0.5,
+          "average_rows_per_selected_expert": 2.0,
+          "maximum_rows_assigned_to_one_expert": 6
+        },
+        {
+          "layer": 11,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 34.0,
+          "duplicate_expert_assignment_rate": 0.46875,
+          "average_rows_per_selected_expert": 1.8823529411764706,
+          "maximum_rows_assigned_to_one_expert": 7
+        },
+        {
+          "layer": 12,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 28.0,
+          "duplicate_expert_assignment_rate": 0.5625,
+          "average_rows_per_selected_expert": 2.2857142857142856,
+          "maximum_rows_assigned_to_one_expert": 8
+        },
+        {
+          "layer": 13,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 28.0,
+          "duplicate_expert_assignment_rate": 0.5625,
+          "average_rows_per_selected_expert": 2.2857142857142856,
+          "maximum_rows_assigned_to_one_expert": 7
+        },
+        {
+          "layer": 14,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 28.0,
+          "duplicate_expert_assignment_rate": 0.5625,
+          "average_rows_per_selected_expert": 2.2857142857142856,
+          "maximum_rows_assigned_to_one_expert": 8
+        },
+        {
+          "layer": 15,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 30.0,
+          "duplicate_expert_assignment_rate": 0.53125,
+          "average_rows_per_selected_expert": 2.1333333333333333,
+          "maximum_rows_assigned_to_one_expert": 7
+        },
+        {
+          "layer": 16,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 27.0,
+          "duplicate_expert_assignment_rate": 0.578125,
+          "average_rows_per_selected_expert": 2.3703703703703702,
+          "maximum_rows_assigned_to_one_expert": 8
+        },
+        {
+          "layer": 17,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 27.0,
+          "duplicate_expert_assignment_rate": 0.578125,
+          "average_rows_per_selected_expert": 2.3703703703703702,
+          "maximum_rows_assigned_to_one_expert": 8
+        },
+        {
+          "layer": 18,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 32.0,
+          "duplicate_expert_assignment_rate": 0.5,
+          "average_rows_per_selected_expert": 2.0,
+          "maximum_rows_assigned_to_one_expert": 7
+        },
+        {
+          "layer": 19,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 33.0,
+          "duplicate_expert_assignment_rate": 0.484375,
+          "average_rows_per_selected_expert": 1.9393939393939394,
+          "maximum_rows_assigned_to_one_expert": 5
+        },
+        {
+          "layer": 20,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 32.0,
+          "duplicate_expert_assignment_rate": 0.5,
+          "average_rows_per_selected_expert": 2.0,
+          "maximum_rows_assigned_to_one_expert": 8
+        },
+        {
+          "layer": 21,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 29.0,
+          "duplicate_expert_assignment_rate": 0.546875,
+          "average_rows_per_selected_expert": 2.206896551724138,
+          "maximum_rows_assigned_to_one_expert": 8
+        },
+        {
+          "layer": 22,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 31.0,
+          "duplicate_expert_assignment_rate": 0.515625,
+          "average_rows_per_selected_expert": 2.064516129032258,
+          "maximum_rows_assigned_to_one_expert": 6
+        },
+        {
+          "layer": 23,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 35.0,
+          "duplicate_expert_assignment_rate": 0.453125,
+          "average_rows_per_selected_expert": 1.8285714285714285,
+          "maximum_rows_assigned_to_one_expert": 7
+        },
+        {
+          "layer": 24,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 30.0,
+          "duplicate_expert_assignment_rate": 0.53125,
+          "average_rows_per_selected_expert": 2.1333333333333333,
+          "maximum_rows_assigned_to_one_expert": 8
+        },
+        {
+          "layer": 25,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 31.0,
+          "duplicate_expert_assignment_rate": 0.515625,
+          "average_rows_per_selected_expert": 2.064516129032258,
+          "maximum_rows_assigned_to_one_expert": 7
+        },
+        {
+          "layer": 26,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 24.0,
+          "duplicate_expert_assignment_rate": 0.625,
+          "average_rows_per_selected_expert": 2.6666666666666665,
+          "maximum_rows_assigned_to_one_expert": 8
+        },
+        {
+          "layer": 27,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 24.0,
+          "duplicate_expert_assignment_rate": 0.625,
+          "average_rows_per_selected_expert": 2.6666666666666665,
+          "maximum_rows_assigned_to_one_expert": 8
+        },
+        {
+          "layer": 28,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 25.0,
+          "duplicate_expert_assignment_rate": 0.609375,
+          "average_rows_per_selected_expert": 2.56,
+          "maximum_rows_assigned_to_one_expert": 8
+        },
+        {
+          "layer": 29,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 25.0,
+          "duplicate_expert_assignment_rate": 0.609375,
+          "average_rows_per_selected_expert": 2.56,
+          "maximum_rows_assigned_to_one_expert": 8
+        },
+        {
+          "layer": 30,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 23.0,
+          "duplicate_expert_assignment_rate": 0.640625,
+          "average_rows_per_selected_expert": 2.782608695652174,
+          "maximum_rows_assigned_to_one_expert": 7
+        },
+        {
+          "layer": 31,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 23.0,
+          "duplicate_expert_assignment_rate": 0.640625,
+          "average_rows_per_selected_expert": 2.782608695652174,
+          "maximum_rows_assigned_to_one_expert": 8
+        },
+        {
+          "layer": 32,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 34.0,
+          "duplicate_expert_assignment_rate": 0.46875,
+          "average_rows_per_selected_expert": 1.8823529411764706,
+          "maximum_rows_assigned_to_one_expert": 6
+        },
+        {
+          "layer": 33,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 36.0,
+          "duplicate_expert_assignment_rate": 0.4375,
+          "average_rows_per_selected_expert": 1.7777777777777777,
+          "maximum_rows_assigned_to_one_expert": 8
+        },
+        {
+          "layer": 34,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 36.0,
+          "duplicate_expert_assignment_rate": 0.4375,
+          "average_rows_per_selected_expert": 1.7777777777777777,
+          "maximum_rows_assigned_to_one_expert": 6
+        },
+        {
+          "layer": 35,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 27.0,
+          "duplicate_expert_assignment_rate": 0.578125,
+          "average_rows_per_selected_expert": 2.3703703703703702,
+          "maximum_rows_assigned_to_one_expert": 7
+        },
+        {
+          "layer": 36,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 31.0,
+          "duplicate_expert_assignment_rate": 0.515625,
+          "average_rows_per_selected_expert": 2.064516129032258,
+          "maximum_rows_assigned_to_one_expert": 7
+        },
+        {
+          "layer": 37,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 34.0,
+          "duplicate_expert_assignment_rate": 0.46875,
+          "average_rows_per_selected_expert": 1.8823529411764706,
+          "maximum_rows_assigned_to_one_expert": 7
+        },
+        {
+          "layer": 38,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 33.0,
+          "duplicate_expert_assignment_rate": 0.484375,
+          "average_rows_per_selected_expert": 1.9393939393939394,
+          "maximum_rows_assigned_to_one_expert": 8
+        },
+        {
+          "layer": 39,
+          "token_expert_assignments": 64.0,
+          "unique_experts_selected": 50.0,
+          "duplicate_expert_assignment_rate": 0.21875,
+          "average_rows_per_selected_expert": 1.28,
+          "maximum_rows_assigned_to_one_expert": 5
+        }
+      ]
+    }
+  ]
+}

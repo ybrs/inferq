@@ -33,15 +33,17 @@ pub struct FullExpertWarmupReport {
 
 /// Sequentially visit every fused expert tensor in GGUF file order.
 ///
-/// A configured expert cache pins every per-expert matrix in process memory.
-/// With zero cache capacity the same traversal only warms the OS page cache.
+/// A configured expert cache pins every expert matrix, then combines compatible
+/// gate/up rows without changing resident bytes. With zero cache capacity the
+/// same traversal only warms the OS page cache.
 pub fn warm_all_experts(
     checkpoint: &GgufCheckpoint,
     config: &Qwen3NextConfig,
     mut on_progress: impl FnMut(FullExpertWarmupProgress),
 ) -> Result<FullExpertWarmupReport> {
-    let mut tensors = Vec::with_capacity(config.num_hidden_layers * 3);
-    for layer in 0..config.num_hidden_layers {
+    let resident_layers = config.num_hidden_layers + config.mtp_num_hidden_layers;
+    let mut tensors = Vec::with_capacity(resident_layers * 3);
+    for layer in 0..resident_layers {
         for suffix in [
             "ffn_gate_exps.weight",
             "ffn_up_exps.weight",
@@ -98,10 +100,20 @@ pub fn warm_all_experts(
             bytes_total: total_bytes,
         });
     }
-    let elapsed = started.elapsed();
     if pin_in_process {
+        // File-order warmup keeps HDD access sequential. Once all matrices are
+        // resident, replace each gate/up pair with one row-concatenated cache
+        // entry without changing the byte footprint or rereading the GGUF.
+        for layer in 0..resident_layers {
+            let prefix = format!("blk.{layer}");
+            checkpoint.fuse_cached_expert_pair(
+                &format!("{prefix}.ffn_gate_exps.weight"),
+                &format!("{prefix}.ffn_up_exps.weight"),
+            )?;
+        }
         checkpoint.mark_expert_cache_fully_resident()?;
     }
+    let elapsed = started.elapsed();
     let cache = checkpoint
         .expert_cache_stats()?
         .activity_since(cache_before);

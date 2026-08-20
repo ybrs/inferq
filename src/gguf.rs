@@ -13,14 +13,77 @@ use candle_core::{
     quantized::{
         GgmlDType, QStorage, QTensor,
         gguf_file::{Content, Value},
+        k_quants::{BlockQ4K, BlockQ5K, BlockQ6K, BlockQ8_0, GgmlType},
     },
 };
+use rayon::prelude::*;
+
+use crate::qgemm;
 use serde::{Deserialize, Serialize};
+
+const SMALL_M_MIN_STORAGE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Input row counts routed to a multi-row kernel.
+///
+/// One row stays on Candle's matvec, which is a different problem: no weight
+/// byte is reused, so there is nothing to fuse. Above sixteen rows the tiling
+/// stops paying and Candle's generic loop takes over; a verification pass is
+/// bounded by the draft length, which is capped below that.
+const MULTI_ROW_RANGE: std::ops::RangeInclusive<usize> = 2..=16;
+
+/// Rows handed to the fused kernel at once.
+///
+/// Its per-row cost is flat between eight and sixty-four rows and then climbs
+/// again — on `attn_qkv` (Q6K, 8192x2048) 116 ns/row at eight, 101 at sixteen,
+/// 111 at sixty-four, 151 at two hundred and fifty-six — so a wide pass is
+/// tiled rather than handed over whole. Sixteen is the measured floor of that
+/// curve and the width the multi-row work was validated at.
+const MULTI_ROW_TILE: usize = 16;
+
+/// Which multi-row matmul implementation to run.
+///
+/// `forward` chooses one of these per call; the kernel benchmarks pin a
+/// choice so the same matrix and input can be timed on each path at any row
+/// count, including counts the dispatch would never route there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MultiRowPath {
+    /// Candle's own CPU implementation: a `BarrierPool` matvec at one row, a
+    /// generic per-row loop above that.
+    Candle,
+    /// Traverse each compressed weight row once and apply it to every input
+    /// row while it is cache-hot, decoding the block once per input row.
+    SmallM,
+    /// As `SmallM`, but decode each weight block once for all input rows.
+    Fused,
+    /// `Fused`, split into the tiles `forward` would use. Above one tile this
+    /// is what dispatch actually runs, and it is not the same cost as one wide
+    /// `Fused` call, so a sweep that wants to predict prefill must time it.
+    FusedTiled,
+}
+
+/// Where a multi-row matmul finds the threads for its output rows.
+///
+/// Every output row reads the same inputs and writes its own disjoint slice of
+/// the result, so which thread computes which row is invisible in the output:
+/// the two spreads are bit-identical, and only the scheduling differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowSpread {
+    /// Split the output rows across the global rayon pool. Right for a call
+    /// that is the only work in flight — one large matrix, one wide pass.
+    Pool,
+    /// Compute every output row on the calling thread. Right for a caller that
+    /// is *already* inside a parallel iterator and is holding one of a batch of
+    /// small independent matrices: the MoE runs 256 experts per layer, and
+    /// splitting each expert's few hundred output rows again would pay a
+    /// fork/join for work that is a fraction of one core's share.
+    Caller,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GgufSummary {
     pub architecture: String,
     pub layers: usize,
+    pub auxiliary_predictor_layers: usize,
     pub hidden_size: usize,
     pub experts_per_layer: usize,
     pub experts_selected: usize,
@@ -107,6 +170,7 @@ pub struct QuantizedMatrix {
     storage_bytes: usize,
 }
 
+#[derive(Clone)]
 pub struct QuantizedEmbedding {
     tensor: Arc<QTensor>,
     rows: usize,
@@ -127,6 +191,14 @@ pub struct GgufExpertTensor<'a> {
     columns: usize,
     expert_bytes: usize,
     tensor_start: u64,
+}
+
+/// Two compatible fused expert tensors viewed as one row-concatenated matrix
+/// per expert. This preserves each compressed row byte-for-byte.
+pub struct GgufExpertPair<'a> {
+    checkpoint: &'a GgufCheckpoint,
+    first: GgufExpertTensor<'a>,
+    second: GgufExpertTensor<'a>,
 }
 
 impl std::fmt::Debug for GgufExpertTensor<'_> {
@@ -152,6 +224,32 @@ impl GgufExpertTensor<'_> {
 
     pub fn load(&self, expert: usize) -> Result<QuantizedMatrix> {
         self.checkpoint.load_resolved_expert_matrix(self, expert)
+    }
+
+    pub fn warm(&self, expert: usize) -> Result<usize> {
+        Ok(self.load(expert)?.storage_bytes())
+    }
+}
+
+impl std::fmt::Debug for GgufExpertPair<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GgufExpertPair")
+            .field("first", &self.first.name)
+            .field("second", &self.second.name)
+            .field("expert_count", &self.first.expert_count)
+            .field("rows", &(self.first.rows + self.second.rows))
+            .field("columns", &self.first.columns)
+            .finish_non_exhaustive()
+    }
+}
+
+impl GgufExpertPair<'_> {
+    pub fn expert_count(&self) -> usize {
+        self.first.expert_count
+    }
+
+    pub fn load(&self, expert: usize) -> Result<QuantizedMatrix> {
+        self.checkpoint.load_resolved_expert_pair(self, expert)
     }
 
     pub fn warm(&self, expert: usize) -> Result<usize> {
@@ -207,9 +305,14 @@ impl QuantizedMatrix {
         ensure!(
             matches!(
                 tensor.dtype(),
-                GgmlDType::Q4K | GgmlDType::Q5K | GgmlDType::Q6K | GgmlDType::Q8_0 | GgmlDType::F32
+                GgmlDType::Q4K
+                    | GgmlDType::Q5K
+                    | GgmlDType::Q6K
+                    | GgmlDType::Q8_0
+                    | GgmlDType::F32
+                    | GgmlDType::BF16
             ),
-            "unsupported executable GGUF matrix dtype {:?}; expected Q4_K, Q5_K, Q6_K, Q8_0, or F32",
+            "unsupported executable GGUF matrix dtype {:?}; expected Q4_K, Q5_K, Q6_K, Q8_0, F32, or BF16",
             tensor.dtype()
         );
         let (rows, columns) = tensor.shape().dims2()?;
@@ -238,6 +341,41 @@ impl QuantizedMatrix {
     /// Concatenate two identically quantized matrices along their output rows.
     /// Quantized GGUF blocks are row-major, so this preserves every row's bytes
     /// while allowing callers to share one kernel launch for related outputs.
+    /// A new matrix holding this one's first `rows` output rows.
+    ///
+    /// GGUF quantized blocks are row-major and every row occupies the same
+    /// number of bytes, so a leading row range is a contiguous byte prefix and
+    /// needs no requantization. Used to build a cheap draft-only LM head: the
+    /// MTP predictor's argmax over a vocabulary prefix reads a fraction of the
+    /// weight traffic, and a draft the prefix gets wrong is simply rejected by
+    /// the target, which never uses this path.
+    pub fn leading_rows(&self, rows: usize) -> Result<Self> {
+        ensure!(
+            rows > 0 && rows <= self.rows,
+            "cannot take {rows} leading rows of a {}-row matrix",
+            self.rows
+        );
+        ensure!(
+            self.tensor.device().is_cpu(),
+            "leading-row slicing currently supports CPU quantized matrices only"
+        );
+        ensure!(
+            self.storage_bytes.is_multiple_of(self.rows),
+            "quantized matrix of {} bytes does not divide evenly into {} rows",
+            self.storage_bytes,
+            self.rows
+        );
+        if rows == self.rows {
+            return Ok(self.clone());
+        }
+        let bytes_per_row = self.storage_bytes / self.rows;
+        let data = self.tensor.data()?;
+        let prefix = data[..rows * bytes_per_row].to_vec();
+        let storage = QStorage::from_data(Cow::Owned(prefix), &Device::Cpu, self.dtype)?;
+        let tensor = QTensor::new(storage, (rows, self.columns))?;
+        Self::new(tensor)
+    }
+
     pub fn concatenate_rows(&self, other: &Self) -> Result<Self> {
         ensure!(
             self.dtype == other.dtype,
@@ -266,6 +404,292 @@ impl QuantizedMatrix {
     }
 
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        self.forward_spread(xs, RowSpread::Pool)
+    }
+
+    /// [`Self::forward`], with the caller choosing where the output rows are
+    /// computed. The result does not depend on that choice; see [`RowSpread`].
+    pub fn forward_spread(&self, xs: &Tensor, spread: RowSpread) -> Result<Tensor> {
+        let xs = self.validated_input(xs)?;
+        let input_rows = xs.elem_count() / self.columns;
+        if self.takes_multi_row(input_rows, spread) {
+            let values = xs.flatten_all()?.to_vec1::<f32>()?;
+            if let Some(output) = self.tiled_multi_row(&values, input_rows, spread)? {
+                let mut shape = xs.dims().to_vec();
+                *shape.last_mut().expect("rank validated above") = self.rows;
+                return Ok(Tensor::from_vec(output, shape, xs.device())?);
+            }
+        }
+        Ok(xs.apply_op1_no_bwd(self.tensor.as_ref())?)
+    }
+
+    /// Multiply `input_rows` contiguous rows of `values`, returning the result
+    /// row-major without building a [`Tensor`] for either side.
+    ///
+    /// The MoE gathers its rows for an expert out of a larger activation block
+    /// and scatters the result back into another, so a `Tensor` at this
+    /// boundary is an allocation and a copy on each side of every expert call.
+    /// The arithmetic is [`Self::forward_spread`]'s, unchanged.
+    pub fn forward_rows(
+        &self,
+        values: &[f32],
+        input_rows: usize,
+        spread: RowSpread,
+    ) -> Result<Vec<f32>> {
+        ensure!(
+            values.len() == input_rows * self.columns,
+            "expected {} input values for {input_rows} rows of {} columns, got {}",
+            input_rows * self.columns,
+            self.columns,
+            values.len()
+        );
+        if self.takes_multi_row(input_rows, spread)
+            && let Some(output) = self.tiled_multi_row(values, input_rows, spread)?
+        {
+            return Ok(output);
+        }
+        let xs = Tensor::from_slice(values, (input_rows, self.columns), &Device::Cpu)?;
+        Ok(xs
+            .apply_op1_no_bwd(self.tensor.as_ref())?
+            .flatten_all()?
+            .to_vec1::<f32>()?)
+    }
+
+    /// Whether `forward` hands a pass of this width to the multi-row kernels.
+    ///
+    /// Under [`RowSpread::Caller`] the answer is always yes, and neither the
+    /// row count nor the matrix size is consulted. Candle's quantized matmul
+    /// runs on candle's `BarrierPool`, which is a process-wide singleton (see
+    /// `threading`): six experts entering it at once do not get six matmuls,
+    /// they get six callers queueing for the same workers. Measured over 64
+    /// experts, going parallel over experts makes Candle *slower* — 0.85x at
+    /// eight rows, 0.47x at six — while the fused kernels, which only ever
+    /// touch the calling thread, are 1.7x to 2.6x faster than the schedule they
+    /// replace. A caller that has taken the parallelism for itself must not go
+    /// there, at any width, including one row.
+    fn takes_multi_row(&self, input_rows: usize, spread: RowSpread) -> bool {
+        if !self.tensor.device().is_cpu() {
+            return false;
+        }
+        match spread {
+            RowSpread::Caller => true,
+            RowSpread::Pool => {
+                input_rows >= *MULTI_ROW_RANGE.start()
+                    && (self.storage_bytes >= SMALL_M_MIN_STORAGE_BYTES || cfg!(test))
+            }
+        }
+    }
+
+    /// Run the fused kernel over every row, a tile at a time.
+    ///
+    /// A prefill pass is hundreds of rows wide and used to fall through to the
+    /// per-row path, which decodes each weight block once per row rather than
+    /// once per tile. Tiling keeps the reuse at the width it is worth most.
+    ///
+    /// Each output row depends only on its own input row and the weights, and
+    /// the fused kernel's per-row result does not vary with how many rows it is
+    /// given — measured bit-identical against Candle from two rows to two
+    /// hundred and fifty-six — so tiling returns what one wide call would.
+    fn tiled_multi_row(
+        &self,
+        values: &[f32],
+        input_rows: usize,
+        spread: RowSpread,
+    ) -> Result<Option<Vec<f32>>> {
+        let mut output = Vec::with_capacity(input_rows * self.rows);
+        let mut start = 0;
+        while start < input_rows {
+            let remaining = input_rows - start;
+            // Never leave one row for the last tile: the fused kernel begins at
+            // two, and a single row has no decoded block to share anyway.
+            let rows = if remaining <= MULTI_ROW_TILE {
+                remaining
+            } else if remaining - MULTI_ROW_TILE == 1 {
+                MULTI_ROW_TILE - 1
+            } else {
+                MULTI_ROW_TILE
+            };
+            let slice = &values[start * self.columns..(start + rows) * self.columns];
+            match self.multi_row_forward(slice, rows, MultiRowPath::Fused, spread)? {
+                Some(mut tile) => output.append(&mut tile),
+                None => return Ok(None),
+            }
+            start += rows;
+        }
+        Ok(Some(output))
+    }
+
+    /// Run one specific multi-row implementation, bypassing dispatch.
+    ///
+    /// Benchmarks and differential tests use this to hold everything but the
+    /// kernel constant. `forward` is the production entry point.
+    pub fn forward_via(
+        &self,
+        xs: &Tensor,
+        path: MultiRowPath,
+        spread: RowSpread,
+    ) -> Result<Tensor> {
+        let xs = self.validated_input(xs)?;
+        let input_rows = xs.elem_count() / self.columns;
+        match path {
+            MultiRowPath::Candle => Ok(xs.apply_op1_no_bwd(self.tensor.as_ref())?),
+            MultiRowPath::SmallM | MultiRowPath::Fused | MultiRowPath::FusedTiled => {
+                ensure!(
+                    self.tensor.device().is_cpu(),
+                    "the multi-row kernels require a CPU matrix"
+                );
+                let values = xs.flatten_all()?.to_vec1::<f32>()?;
+                let output = match path {
+                    MultiRowPath::FusedTiled => {
+                        self.tiled_multi_row(&values, input_rows, spread)?
+                    }
+                    _ => self.multi_row_forward(&values, input_rows, path, spread)?,
+                }
+                .with_context(|| format!("{:?} has no multi-row kernel", self.dtype))?;
+                let mut shape = xs.dims().to_vec();
+                *shape.last_mut().expect("rank validated above") = self.rows;
+                Ok(Tensor::from_vec(output, shape, xs.device())?)
+            }
+        }
+    }
+
+    /// Run whichever multi-row kernel `path` selects, or `None` when this
+    /// dtype has none and the caller should fall back to Candle.
+    fn multi_row_forward(
+        &self,
+        values: &[f32],
+        input_rows: usize,
+        path: MultiRowPath,
+        spread: RowSpread,
+    ) -> Result<Option<Vec<f32>>> {
+        let fused = path == MultiRowPath::Fused && qgemm::supported();
+        let output = match (self.dtype, fused) {
+            (GgmlDType::Q4K, true) => self
+                .fused_forward::<BlockQ4K, qgemm::Q4KBlock, qgemm::Q8KBlock>(
+                    values,
+                    input_rows,
+                    qgemm::q4k_q8k_row,
+                    spread,
+                )?,
+            (GgmlDType::Q6K, true) => self
+                .fused_forward::<BlockQ6K, qgemm::Q6KBlock, qgemm::Q8KBlock>(
+                    values,
+                    input_rows,
+                    qgemm::q6k_q8k_row,
+                    spread,
+                )?,
+            (GgmlDType::Q8_0, true) => self
+                .fused_forward::<BlockQ8_0, qgemm::Q80Block, qgemm::Q80Block>(
+                    values,
+                    input_rows,
+                    qgemm::q80_q80_row,
+                    spread,
+                )?,
+            // Q5K carries 0.3% of this model's bytes and keeps the per-row
+            // kernel; see multirow-report-702d043633e0.md.
+            (GgmlDType::Q4K, false) => {
+                self.small_m_forward::<BlockQ4K>(values, input_rows, spread)?
+            }
+            (GgmlDType::Q5K, _) => self.small_m_forward::<BlockQ5K>(values, input_rows, spread)?,
+            (GgmlDType::Q6K, false) => {
+                self.small_m_forward::<BlockQ6K>(values, input_rows, spread)?
+            }
+            (GgmlDType::Q8_0, false) => {
+                self.small_m_forward::<BlockQ8_0>(values, input_rows, spread)?
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(output))
+    }
+
+    /// Multi-row product that decodes each weight block once for all input
+    /// rows. Layout and parallelism match `small_m_forward`; only the inner
+    /// kernel differs, which is what keeps the two directly comparable.
+    fn fused_forward<W, WeightBlock, InputBlock>(
+        &self,
+        xs: &[f32],
+        input_rows: usize,
+        kernel: fn(&[WeightBlock], &[InputBlock], usize, &mut [f32]),
+        spread: RowSpread,
+    ) -> Result<Vec<f32>>
+    where
+        W: GgmlType,
+        WeightBlock: Sync,
+        InputBlock: Sync,
+    {
+        ensure!(
+            self.dtype == W::DTYPE,
+            "fused kernel dtype mismatch: matrix {:?}, block {:?}",
+            self.dtype,
+            W::DTYPE
+        );
+        let blocks_per_row = self.columns.div_ceil(W::BLCK_SIZE);
+        let bytes = self.tensor.data()?;
+        // SAFETY: identical to `small_m_forward` — Candle's CPU QStorage owns
+        // a correctly aligned Vec<W> of repr(C) numeric PODs, and the
+        // prefix/suffix checks reject misalignment or a partial block.
+        let (prefix, weights, suffix) = unsafe { bytes.align_to::<W>() };
+        ensure!(
+            prefix.is_empty() && suffix.is_empty(),
+            "quantized matrix bytes are not aligned to complete {:?} blocks",
+            W::DTYPE
+        );
+        ensure!(
+            weights.len() == self.rows * blocks_per_row,
+            "quantized matrix has {} {:?} blocks, expected {}",
+            weights.len(),
+            W::DTYPE,
+            self.rows * blocks_per_row
+        );
+        // SAFETY: `WeightBlock` is the layout mirror of `W`, pinned by the
+        // compile-time size assertions in `qgemm`.
+        let weights = unsafe { qgemm::as_mirror::<W, WeightBlock>(weights) };
+
+        let mut quantized_inputs = vec![W::VecDotType::zeros(); input_rows * blocks_per_row];
+        for row in 0..input_rows {
+            W::VecDotType::from_float(
+                &xs[row * self.columns..(row + 1) * self.columns],
+                &mut quantized_inputs[row * blocks_per_row..(row + 1) * blocks_per_row],
+            );
+        }
+        // Repack block-major so the kernel's inner loop over input rows walks
+        // contiguous memory: at 16 rows the row-major layout alternates
+        // between two halves that together exceed L1.
+        let mut packed = Vec::with_capacity(quantized_inputs.len());
+        for block in 0..blocks_per_row {
+            for row in 0..input_rows {
+                packed.push(quantized_inputs[row * blocks_per_row + block].clone());
+            }
+        }
+        // SAFETY: `InputBlock` is the layout mirror of `W::VecDotType`.
+        let inputs = unsafe { qgemm::as_mirror::<W::VecDotType, InputBlock>(&packed) };
+
+        let mut transposed = vec![0f32; self.rows * input_rows];
+        let compute = |output_row: usize, output: &mut [f32]| {
+            let weight = &weights[output_row * blocks_per_row..(output_row + 1) * blocks_per_row];
+            kernel(weight, inputs, input_rows, output);
+        };
+        match spread {
+            RowSpread::Pool => transposed
+                .par_chunks_mut(input_rows)
+                .enumerate()
+                .for_each(|(output_row, output)| compute(output_row, output)),
+            RowSpread::Caller => transposed
+                .chunks_mut(input_rows)
+                .enumerate()
+                .for_each(|(output_row, output)| compute(output_row, output)),
+        }
+        let mut output = vec![0f32; input_rows * self.rows];
+        for input_row in 0..input_rows {
+            for output_row in 0..self.rows {
+                output[input_row * self.rows + output_row] =
+                    transposed[output_row * input_rows + input_row];
+            }
+        }
+        Ok(output)
+    }
+
+    fn validated_input(&self, xs: &Tensor) -> Result<Tensor> {
         ensure!(
             xs.rank() >= 2,
             "quantized matrix input must have rank at least two"
@@ -276,12 +700,87 @@ impl QuantizedMatrix {
             xs.dim(xs.rank() - 1)?,
             self.columns
         );
-        let xs = if xs.dtype() == DType::F32 {
+        Ok(if xs.dtype() == DType::F32 {
             xs.clone()
         } else {
             xs.to_dtype(DType::F32)?
+        })
+    }
+
+    fn small_m_forward<T: GgmlType>(
+        &self,
+        xs: &[f32],
+        input_rows: usize,
+        spread: RowSpread,
+    ) -> Result<Vec<f32>> {
+        ensure!(
+            self.dtype == T::DTYPE,
+            "small-M kernel dtype mismatch: matrix {:?}, block {:?}",
+            self.dtype,
+            T::DTYPE
+        );
+        let blocks_per_row = self.columns.div_ceil(T::BLCK_SIZE);
+        let bytes = self.tensor.data()?;
+        // SAFETY: Candle's CPU QStorage owns a correctly aligned Vec<T> and
+        // exposes its exact initialized bytes here. The four concrete block
+        // types dispatched above are repr(C) numeric PODs for which every bit
+        // pattern is valid. Prefix/suffix checks below reject misalignment or
+        // a partial block before the typed slice is used.
+        let (prefix, weights, suffix) = unsafe { bytes.align_to::<T>() };
+        ensure!(
+            prefix.is_empty() && suffix.is_empty(),
+            "quantized matrix bytes are not aligned to complete {:?} blocks",
+            T::DTYPE
+        );
+        ensure!(
+            weights.len() == self.rows * blocks_per_row,
+            "quantized matrix has {} {:?} blocks, expected {}",
+            weights.len(),
+            T::DTYPE,
+            self.rows * blocks_per_row
+        );
+
+        let mut quantized_inputs = vec![T::VecDotType::zeros(); input_rows * blocks_per_row];
+        for row in 0..input_rows {
+            T::VecDotType::from_float(
+                &xs[row * self.columns..(row + 1) * self.columns],
+                &mut quantized_inputs[row * blocks_per_row..(row + 1) * blocks_per_row],
+            );
+        }
+
+        // Store output-column-major while parallel workers stream disjoint
+        // compressed rows. Applying all M inputs before advancing retains a
+        // weight row in cache instead of traversing the complete matrix M
+        // times as Candle's generic CPU loop does. This path decodes each
+        // block once per input row; `fused_forward` decodes it once in total
+        // and is preferred wherever the CPU supports it.
+        let mut transposed = vec![0f32; self.rows * input_rows];
+        let compute = |output_row: usize, output: &mut [f32]| {
+            let weight = &weights[output_row * blocks_per_row..(output_row + 1) * blocks_per_row];
+            for input_row in 0..input_rows {
+                let input =
+                    &quantized_inputs[input_row * blocks_per_row..(input_row + 1) * blocks_per_row];
+                output[input_row] = T::vec_dot(self.columns, weight, input);
+            }
         };
-        Ok(xs.apply_op1_no_bwd(self.tensor.as_ref())?)
+        match spread {
+            RowSpread::Pool => transposed
+                .par_chunks_mut(input_rows)
+                .enumerate()
+                .for_each(|(output_row, output)| compute(output_row, output)),
+            RowSpread::Caller => transposed
+                .chunks_mut(input_rows)
+                .enumerate()
+                .for_each(|(output_row, output)| compute(output_row, output)),
+        }
+        let mut output = vec![0f32; input_rows * self.rows];
+        for input_row in 0..input_rows {
+            for output_row in 0..self.rows {
+                output[input_row * self.rows + output_row] =
+                    transposed[output_row * input_rows + input_row];
+            }
+        }
+        Ok(output)
     }
 }
 
@@ -304,6 +803,7 @@ struct CachedExpertMatrix {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ExpertMatrixKey {
     tensor_start: u64,
+    second_tensor_start: Option<u64>,
     expert: usize,
 }
 
@@ -425,6 +925,93 @@ impl ExpertMatrixCache {
         self.compact_lru_if_needed();
     }
 
+    fn fuse_pair(&mut self, pair: &GgufExpertPair<'_>) -> Result<usize> {
+        ensure!(
+            self.capacity_bytes > 0,
+            "cannot fuse expert matrices in a disabled cache"
+        );
+        let mut fused_bytes = 0usize;
+        for expert in 0..pair.first.expert_count {
+            let first_key = ExpertMatrixKey {
+                tensor_start: pair.first.tensor_start,
+                second_tensor_start: None,
+                expert,
+            };
+            let second_key = ExpertMatrixKey {
+                tensor_start: pair.second.tensor_start,
+                second_tensor_start: None,
+                expert,
+            };
+            let pair_key = ExpertMatrixKey {
+                tensor_start: pair.first.tensor_start,
+                second_tensor_start: Some(pair.second.tensor_start),
+                expert,
+            };
+            if let Some(existing) = self.entries.get(&pair_key) {
+                fused_bytes = fused_bytes
+                    .checked_add(existing.storage_bytes)
+                    .context("fused expert byte count overflowed")?;
+                continue;
+            }
+            let first = self
+                .entries
+                .get(&first_key)
+                .with_context(|| {
+                    format!(
+                        "expert {expert} from tensor {:?} is not resident for fusion",
+                        pair.first.name
+                    )
+                })?
+                .matrix
+                .clone();
+            let second = self
+                .entries
+                .get(&second_key)
+                .with_context(|| {
+                    format!(
+                        "expert {expert} from tensor {:?} is not resident for fusion",
+                        pair.second.name
+                    )
+                })?
+                .matrix
+                .clone();
+            let combined = first.concatenate_rows(&second)?;
+            let combined_bytes = combined.storage_bytes();
+            ensure!(
+                combined_bytes == first.storage_bytes() + second.storage_bytes(),
+                "fused expert storage changed from {} to {} bytes",
+                first.storage_bytes() + second.storage_bytes(),
+                combined_bytes
+            );
+            let removed_first = self
+                .entries
+                .remove(&first_key)
+                .context("validated first expert cache entry disappeared")?;
+            let removed_second = self
+                .entries
+                .remove(&second_key)
+                .context("validated second expert cache entry disappeared")?;
+            self.resident_bytes = self
+                .resident_bytes
+                .saturating_sub(removed_first.storage_bytes)
+                .saturating_sub(removed_second.storage_bytes);
+            self.access_clock += 1;
+            self.entries.insert(
+                pair_key,
+                CachedExpertMatrix {
+                    matrix: combined,
+                    storage_bytes: combined_bytes,
+                    last_access: self.access_clock,
+                },
+            );
+            self.resident_bytes += combined_bytes;
+            fused_bytes = fused_bytes
+                .checked_add(combined_bytes)
+                .context("fused expert byte count overflowed")?;
+        }
+        Ok(fused_bytes)
+    }
+
     fn mark_fully_resident(&mut self) {
         self.fully_resident = true;
         self.lru.clear();
@@ -440,8 +1027,35 @@ impl std::fmt::Debug for GgufCheckpoint {
     }
 }
 
+/// Refuse a build whose kernels do not agree with each other.
+///
+/// Dispatch sends one row to Candle's kernel and two or more to the fused one.
+/// Compiled for this host they reach the same summation order and are
+/// bit-identical, so a speculative run commits exactly what target-only
+/// decoding would. Compiled for baseline x86-64 they do not: measured on
+/// Qwen3.6-35B-A3B Q4_K_M, 3,476,478 of 248,320 logits differ across a pass,
+/// by up to 1.236 against a tightest decision margin of 0.565, and greedy
+/// equivalence becomes probabilistic. See docs/speculative-decoding.md.
+///
+/// The difference is invisible at runtime and the wrong build looks fine, so
+/// it is refused here rather than warned about. This engine targets the host
+/// it is built on; there is no portable configuration to preserve.
+fn require_exact_kernels() -> Result<()> {
+    ensure!(
+        cfg!(target_feature = "fma"),
+        "this build has no FMA, so the one-row and multi-row quantized kernels \
+         reach different summation orders and speculative decoding would stop \
+         being output-preserving. Rebuild for this host:\n  \
+         CARGO_TARGET_DIR=target-native RUSTFLAGS='-C target-cpu=native' \
+         cargo build --release"
+    );
+    Ok(())
+}
+
 impl GgufCheckpoint {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        crate::threading::init();
+        require_exact_kernels()?;
         let path = path.as_ref().to_path_buf();
         let mut file =
             File::open(&path).with_context(|| format!("failed to open {}", path.display()))?;
@@ -542,19 +1156,15 @@ impl GgufCheckpoint {
     /// leaves residency decisions to the OS page cache.
     pub fn warm_expert(&self, layer: usize, expert: usize) -> Result<usize> {
         let prefix = format!("blk.{layer}");
-        let mut bytes = 0usize;
-        for tensor in [
-            "ffn_gate_exps.weight",
-            "ffn_up_exps.weight",
-            "ffn_down_exps.weight",
-        ] {
-            let tensor = self.expert_tensor(&format!("{prefix}.{tensor}"))?;
-            let matrix = tensor.load(expert)?;
-            bytes = bytes
-                .checked_add(matrix.storage_bytes())
-                .context("expert warmup byte count overflowed")?;
-        }
-        Ok(bytes)
+        let gate_up = self.expert_pair(
+            &format!("{prefix}.ffn_gate_exps.weight"),
+            &format!("{prefix}.ffn_up_exps.weight"),
+        )?;
+        let down = self.expert_tensor(&format!("{prefix}.ffn_down_exps.weight"))?;
+        gate_up
+            .warm(expert)?
+            .checked_add(down.warm(expert)?)
+            .context("expert warmup byte count overflowed")
     }
 
     /// Load one expert matrix through the configured cache and return its
@@ -708,6 +1318,40 @@ impl GgufCheckpoint {
         })
     }
 
+    /// Resolve two compatible `[experts, rows, columns]` tensors whose rows
+    /// can be executed by one quantized matrix multiplication.
+    pub fn expert_pair(&self, first: &str, second: &str) -> Result<GgufExpertPair<'_>> {
+        let first = self.expert_tensor(first)?;
+        let second = self.expert_tensor(second)?;
+        ensure!(
+            first.dtype == second.dtype,
+            "cannot pair expert tensors {:?} and {:?} with dtypes {:?} and {:?}",
+            first.name,
+            second.name,
+            first.dtype,
+            second.dtype
+        );
+        ensure!(
+            first.expert_count == second.expert_count
+                && first.rows == second.rows
+                && first.columns == second.columns,
+            "cannot pair expert tensors {:?} [{}, {}, {}] and {:?} [{}, {}, {}]",
+            first.name,
+            first.expert_count,
+            first.rows,
+            first.columns,
+            second.name,
+            second.expert_count,
+            second.rows,
+            second.columns
+        );
+        Ok(GgufExpertPair {
+            checkpoint: self,
+            first,
+            second,
+        })
+    }
+
     fn load_resolved_expert_matrix(
         &self,
         tensor: &GgufExpertTensor<'_>,
@@ -721,6 +1365,7 @@ impl GgufCheckpoint {
         );
         let key = ExpertMatrixKey {
             tensor_start: tensor.tensor_start,
+            second_tensor_start: None,
             expert,
         };
         if let Some(matrix) = self
@@ -756,6 +1401,72 @@ impl GgufCheckpoint {
         Ok(matrix)
     }
 
+    fn load_resolved_expert_pair(
+        &self,
+        pair: &GgufExpertPair<'_>,
+        expert: usize,
+    ) -> Result<QuantizedMatrix> {
+        ensure!(
+            expert < pair.first.expert_count,
+            "expert index {expert} is outside paired tensors with {} experts",
+            pair.first.expert_count
+        );
+        let key = ExpertMatrixKey {
+            tensor_start: pair.first.tensor_start,
+            second_tensor_start: Some(pair.second.tensor_start),
+            expert,
+        };
+        if let Some(matrix) = self
+            .expert_cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("expert cache lock was poisoned"))?
+            .get(key)
+        {
+            return Ok(matrix);
+        }
+        let mut raw = Vec::with_capacity(pair.first.expert_bytes + pair.second.expert_bytes);
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|_| anyhow::anyhow!("GGUF file lock was poisoned"))?;
+        for tensor in [&pair.first, &pair.second] {
+            let expert_offset = expert
+                .checked_mul(tensor.expert_bytes)
+                .context("GGUF expert matrix offset overflowed")?;
+            let start = tensor.tensor_start.saturating_add(expert_offset as u64);
+            file.seek(SeekFrom::Start(start))?;
+            let previous_len = raw.len();
+            raw.resize(previous_len + tensor.expert_bytes, 0);
+            file.read_exact(&mut raw[previous_len..]).with_context(|| {
+                format!(
+                    "failed to read expert {expert} from GGUF tensor {:?}",
+                    tensor.name
+                )
+            })?;
+        }
+        drop(file);
+        let storage = QStorage::from_data(Cow::Owned(raw), &Device::Cpu, pair.first.dtype)?;
+        let matrix = QuantizedMatrix::new(QTensor::new(
+            storage,
+            (pair.first.rows + pair.second.rows, pair.first.columns),
+        )?)?;
+        self.expert_cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("expert cache lock was poisoned"))?
+            .record_read_and_insert(key, &matrix);
+        Ok(matrix)
+    }
+
+    /// Replace separately cached pair members with byte-identical combined
+    /// matrices. Full warmup uses this after sequential file-order loading.
+    pub fn fuse_cached_expert_pair(&self, first: &str, second: &str) -> Result<usize> {
+        let pair = self.expert_pair(first, second)?;
+        self.expert_cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("expert cache lock was poisoned"))?
+            .fuse_pair(&pair)
+    }
+
     pub fn load_f32_vector(&self, name: &str) -> Result<Tensor> {
         let tensor = self.load_f32_tensor(name)?;
         ensure!(
@@ -773,8 +1484,8 @@ impl GgufCheckpoint {
             .get(name)
             .with_context(|| format!("GGUF is missing tensor {name:?}"))?;
         ensure!(
-            info.ggml_dtype == GgmlDType::F32,
-            "GGUF tensor {name:?} has dtype {:?}, expected F32",
+            matches!(info.ggml_dtype, GgmlDType::F32 | GgmlDType::BF16),
+            "GGUF tensor {name:?} has dtype {:?}, expected F32 or BF16",
             info.ggml_dtype
         );
         let mut file = self
@@ -821,12 +1532,27 @@ pub fn inspect_gguf(path: impl AsRef<Path>) -> Result<GgufSummary> {
         Some(Value::String(value)) => value.clone(),
         other => anyhow::bail!("invalid general.architecture metadata: {other:?}"),
     };
+    let metadata_prefix = match architecture.as_str() {
+        "qwen3next" => "qwen3next",
+        "qwen35moe" => "qwen35moe",
+        _ => anyhow::bail!("unsupported GGUF architecture {architecture:?}"),
+    };
+    let all_layers = get_usize(&content, &format!("{metadata_prefix}.block_count"))?;
+    let auxiliary_predictor_layers = content
+        .metadata
+        .get(&format!("{metadata_prefix}.nextn_predict_layers"))
+        .map(integer)
+        .transpose()?
+        .unwrap_or(0);
     ensure!(
-        architecture == "qwen3next",
-        "unsupported GGUF architecture {architecture:?}"
+        auxiliary_predictor_layers <= all_layers,
+        "next-token predictor layer count exceeds total GGUF block count"
     );
-    let layers = get_usize(&content, "qwen3next.block_count")?;
-    let interval = get_usize(&content, "qwen3next.full_attention_interval")?;
+    let layers = all_layers - auxiliary_predictor_layers;
+    let interval = get_usize(
+        &content,
+        &format!("{metadata_prefix}.full_attention_interval"),
+    )?;
     ensure!(interval > 0, "full_attention_interval must be positive");
     let full_attention_layers = layers / interval;
     let vocab_size = match content.metadata.get("tokenizer.ggml.tokens") {
@@ -843,9 +1569,10 @@ pub fn inspect_gguf(path: impl AsRef<Path>) -> Result<GgufSummary> {
     Ok(GgufSummary {
         architecture,
         layers,
-        hidden_size: get_usize(&content, "qwen3next.embedding_length")?,
-        experts_per_layer: get_usize(&content, "qwen3next.expert_count")?,
-        experts_selected: get_usize(&content, "qwen3next.expert_used_count")?,
+        auxiliary_predictor_layers,
+        hidden_size: get_usize(&content, &format!("{metadata_prefix}.embedding_length"))?,
+        experts_per_layer: get_usize(&content, &format!("{metadata_prefix}.expert_count"))?,
+        experts_selected: get_usize(&content, &format!("{metadata_prefix}.expert_used_count"))?,
         vocab_size,
         full_attention_layers,
         linear_attention_layers: layers - full_attention_layers,
@@ -863,6 +1590,153 @@ mod tests {
     use candle_core::{IndexOp, quantized::gguf_file};
 
     use super::*;
+
+    fn deterministic_matrix(dtype: GgmlDType, rows: usize, columns: usize) -> QuantizedMatrix {
+        let weights: Vec<f32> = (0..rows * columns)
+            .map(|index| {
+                let row = index / columns;
+                let column = index % columns;
+                ((column * 37 + row * 11) % 71) as f32 / 71. - 0.5
+            })
+            .collect();
+        let weights = Tensor::from_vec(weights, (rows, columns), &Device::Cpu).unwrap();
+        QuantizedMatrix::new(QTensor::quantize(&weights, dtype).unwrap()).unwrap()
+    }
+
+    fn deterministic_input(rows: usize, columns: usize) -> Tensor {
+        let values: Vec<f32> = (0..rows * columns)
+            .map(|index| {
+                let row = index / columns;
+                let column = index % columns;
+                (((column * 23 + row * 5) % 53) as f32 - 26.) / 32.
+            })
+            .collect();
+        Tensor::from_vec(values, (rows, columns), &Device::Cpu).unwrap()
+    }
+
+    /// The fused kernel decodes each weight block once instead of once per
+    /// input row, but keeps Candle's arithmetic: the per-block integer sums are
+    /// associative, and the f32 accumulators advance once per block in the same
+    /// order. Against Candle's own AVX2 kernel the results are therefore
+    /// **exact**, which is what makes greedy decoding token-identical.
+    ///
+    /// Candle only compiles that AVX2 kernel when `target_feature = "avx2"` is
+    /// set for the build; otherwise its `vec_dot` falls back to a scalar
+    /// implementation that accumulates in a different order. This kernel always
+    /// runs AVX2 once the CPU reports it, so in a build without that feature
+    /// the comparison is against a different reference and only agrees to
+    /// reordering noise. The release builds used for all measurements set
+    /// `-C target-cpu=native`, so they take the exact branch.
+    #[test]
+    fn fused_kernel_matches_candle_across_row_counts() {
+        if !qgemm::supported() {
+            eprintln!("skipping: the fused kernels need AVX2 and FMA");
+            return;
+        }
+        let candle_uses_avx2 = cfg!(target_feature = "avx2");
+        let mut worst = 0f32;
+        for dtype in [GgmlDType::Q4K, GgmlDType::Q6K, GgmlDType::Q8_0] {
+            let matrix = deterministic_matrix(dtype, 96, 512);
+            // One row is in the list because a caller that has taken the
+            // parallelism for itself sends even a single row here rather than
+            // to candle's shared `BarrierPool`; dispatch otherwise still leaves
+            // a lone row on Candle.
+            for rows in [1, 2, 3, 4, 7, 8, 9, 15, 16] {
+                let input = deterministic_input(rows, 512);
+                let reference = matrix
+                    .forward_via(&input, MultiRowPath::Candle, RowSpread::Pool)
+                    .unwrap()
+                    .to_vec2::<f32>()
+                    .unwrap();
+                let fused = matrix
+                    .forward_via(&input, MultiRowPath::Fused, RowSpread::Pool)
+                    .unwrap()
+                    .to_vec2::<f32>()
+                    .unwrap();
+                for (row, (fused, reference)) in fused.iter().zip(&reference).enumerate() {
+                    if candle_uses_avx2 {
+                        assert_eq!(
+                            fused, reference,
+                            "{dtype:?} rows={rows} row {row} diverged from Candle's AVX2 kernel"
+                        );
+                    }
+                    for (fused, reference) in fused.iter().zip(reference) {
+                        let diff = (fused - reference).abs();
+                        worst = worst.max(diff);
+                        assert!(
+                            diff <= 1e-3,
+                            "{dtype:?} rows={rows} row {row}: {fused} vs {reference}"
+                        );
+                    }
+                }
+            }
+        }
+        if !candle_uses_avx2 {
+            eprintln!("candle used its scalar vec_dot; worst reordering difference {worst:.3e}");
+        }
+    }
+
+    /// A single row must keep taking Candle's matvec: the fused kernels are a
+    /// multi-row optimization and the one-row decode path is out of scope.
+    #[test]
+    fn one_row_input_is_left_on_the_candle_path() {
+        let matrix = deterministic_matrix(GgmlDType::Q4K, 32, 512);
+        let input = deterministic_input(1, 512);
+        let dispatched = matrix.forward(&input).unwrap().to_vec2::<f32>().unwrap();
+        let candle = matrix
+            .forward_via(&input, MultiRowPath::Candle, RowSpread::Pool)
+            .unwrap()
+            .to_vec2::<f32>()
+            .unwrap();
+        assert_eq!(dispatched, candle);
+    }
+
+    /// Where the output rows are computed must not be visible in them.
+    ///
+    /// Each output row reads the whole input and writes only its own slice of
+    /// the result, so spreading the rows across the pool and computing them all
+    /// on the calling thread are the same arithmetic in a different order of
+    /// *execution*, not of summation. The MoE relies on that to run its experts
+    /// in parallel without changing a decoded token, so it is asserted rather
+    /// than argued — at row counts either side of the tile boundary, and on the
+    /// row-major result so a transpose slip would show as well.
+    #[test]
+    fn row_spread_does_not_change_the_result() {
+        for dtype in [GgmlDType::Q4K, GgmlDType::Q6K, GgmlDType::Q8_0] {
+            let matrix = deterministic_matrix(dtype, 96, 512);
+            for rows in [2, 8, 15, 16, 17, 33] {
+                let input = deterministic_input(rows, 512);
+                let values = input.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+                let pool = matrix.forward_rows(&values, rows, RowSpread::Pool).unwrap();
+                let caller = matrix
+                    .forward_rows(&values, rows, RowSpread::Caller)
+                    .unwrap();
+                assert_eq!(pool, caller, "{dtype:?} rows={rows} depended on the spread");
+                // And both are what `forward` returns, so the flat entry point
+                // is not a second implementation of the same product.
+                let dispatched = matrix
+                    .forward(&input)
+                    .unwrap()
+                    .flatten_all()
+                    .unwrap()
+                    .to_vec1::<f32>()
+                    .unwrap();
+                assert_eq!(pool, dispatched, "{dtype:?} rows={rows} flat vs tensor");
+            }
+        }
+    }
+
+    /// Column counts that are not a whole number of blocks cannot be
+    /// represented by these formats; the loader must reject them rather than
+    /// letting a kernel read a partial block.
+    #[test]
+    fn ragged_column_counts_are_rejected_before_reaching_a_kernel() {
+        let weights = Tensor::from_vec(vec![0.5f32; 2 * 300], (2, 300), &Device::Cpu).unwrap();
+        assert!(
+            QTensor::quantize(&weights, GgmlDType::Q4K).is_err(),
+            "a 300-column Q4K matrix is not representable and must not quantize"
+        );
+    }
 
     #[test]
     fn direct_matrix_matches_its_dequantized_reference() {
@@ -1018,5 +1892,69 @@ mod tests {
         assert!(!stats.fully_resident);
         assert_eq!(stats.misses, 2);
         assert_eq!(stats.entries, 2);
+    }
+
+    #[test]
+    fn fuses_resident_expert_pairs_without_changing_bytes_or_outputs() {
+        let device = Device::Cpu;
+        let first_values: Vec<f32> = (0..2 * 256)
+            .map(|index| (index as f32 % 23. - 11.) / 8.)
+            .collect();
+        let second_values: Vec<f32> = (0..2 * 256)
+            .map(|index| (index as f32 % 19. - 9.) / 7.)
+            .collect();
+        let first = QTensor::quantize(
+            &Tensor::from_vec(first_values, (2, 1, 256), &device).unwrap(),
+            GgmlDType::Q4K,
+        )
+        .unwrap();
+        let second = QTensor::quantize(
+            &Tensor::from_vec(second_values, (2, 1, 256), &device).unwrap(),
+            GgmlDType::Q4K,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("expert-pair.gguf");
+        let mut file = File::create(&path).unwrap();
+        gguf_file::write(&mut file, &[], &[("first", &first), ("second", &second)]).unwrap();
+        drop(file);
+
+        let checkpoint = GgufCheckpoint::open(path).unwrap();
+        checkpoint.configure_expert_cache(1024 * 1024).unwrap();
+        let first = checkpoint.expert_tensor("first").unwrap();
+        let second = checkpoint.expert_tensor("second").unwrap();
+        for expert in 0..2 {
+            first.warm(expert).unwrap();
+            second.warm(expert).unwrap();
+        }
+        let before = checkpoint.expert_cache_stats().unwrap();
+        assert_eq!(before.entries, 4);
+        let input = Tensor::ones((1, 256), DType::F32, &device).unwrap();
+        let mut expected = first.load(1).unwrap().forward(&input).unwrap();
+        expected = Tensor::cat(
+            &[expected, second.load(1).unwrap().forward(&input).unwrap()],
+            1,
+        )
+        .unwrap();
+
+        let fused_bytes = checkpoint
+            .fuse_cached_expert_pair("first", "second")
+            .unwrap();
+        let after = checkpoint.expert_cache_stats().unwrap();
+        assert_eq!(after.entries, 2);
+        assert_eq!(after.resident_bytes, before.resident_bytes);
+        assert_eq!(after.bytes_loaded, before.bytes_loaded);
+        assert_eq!(fused_bytes, before.resident_bytes);
+        let actual = checkpoint
+            .expert_pair("first", "second")
+            .unwrap()
+            .load(1)
+            .unwrap()
+            .forward(&input)
+            .unwrap();
+        assert_eq!(
+            actual.to_vec2::<f32>().unwrap(),
+            expected.to_vec2::<f32>().unwrap()
+        );
     }
 }

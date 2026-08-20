@@ -7,8 +7,8 @@ use crate::{GgufCheckpoint, LayerType, Qwen3NextConfig};
 
 use super::{
     QuantizedAttentionLayer, QuantizedAttentionState, QuantizedAttentionTimings,
-    QuantizedDeltaLayer, QuantizedDeltaState, QuantizedDeltaTimings, QuantizedMoeLayer,
-    QuantizedMoeTimings, Route,
+    QuantizedDeltaLayer, QuantizedDeltaSnapshots, QuantizedDeltaState, QuantizedDeltaTimings,
+    QuantizedMoeLayer, QuantizedMoeTimings, Route,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -103,11 +103,23 @@ impl<'a> QuantizedLinearLayer<'a> {
         xs: &Tensor,
         state: &mut QuantizedDeltaState,
     ) -> Result<QuantizedLayerOutput> {
+        self.forward_with_snapshots(xs, state, None, false)
+    }
+
+    pub fn forward_with_snapshots(
+        &self,
+        xs: &Tensor,
+        state: &mut QuantizedDeltaState,
+        snapshots: Option<&mut QuantizedDeltaSnapshots>,
+        nontemporal: bool,
+    ) -> Result<QuantizedLayerOutput> {
         let wall_started = Instant::now();
         let norm_started = Instant::now();
         let normalized = gguf_rms_norm(xs, &self.input_norm, self.eps)?;
         let mut normalization = norm_started.elapsed();
-        let (mixed, delta) = self.delta.forward(&normalized, state)?;
+        let (mixed, delta) =
+            self.delta
+                .forward_with_snapshots(&normalized, state, snapshots, nontemporal)?;
         let hidden = (xs.to_dtype(DType::F32)? + mixed)?;
         let norm_started = Instant::now();
         let normalized = gguf_rms_norm(&hidden, &self.post_attention_norm, self.eps)?;
@@ -145,9 +157,12 @@ impl<'a> QuantizedFullLayer<'a> {
         config: &Qwen3NextConfig,
         layer: usize,
     ) -> Result<Self> {
+        let is_trunk_full = layer < config.num_hidden_layers
+            && config.layer_type(layer) == LayerType::FullAttention;
+        let is_mtp_full = layer == config.num_hidden_layers && config.mtp_num_hidden_layers == 1;
         ensure!(
-            config.layer_type(layer) == LayerType::FullAttention,
-            "layer {layer} is not a full-attention layer"
+            is_trunk_full || is_mtp_full,
+            "layer {layer} is not a supported full-attention or MTP layer"
         );
         let prefix = format!("blk.{layer}");
         let input_norm = checkpoint.load_f32_vector(&format!("{prefix}.attn_norm.weight"))?;

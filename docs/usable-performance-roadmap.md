@@ -383,14 +383,21 @@ DeltaNet layer. The exact sustained stream reached a new best 5.87 token/s at
 47,260 MiB RSS. A controlled 8-Candle/4-Rayon thread run did not improve total
 decode, so 4/4 remains the sustained-throughput default on this host.
 
+Routed and shared MoE gate/up projections are now fused by the same
+byte-preserving row concatenation. Sequential full warmup converts its resident
+cache entries in place, retaining 43.5 GiB while reducing entries and runtime
+lookups by one third. Routed expert compute fell 6.7%, the complete MoE stage
+fell 5.5%, and exact sustained decode reached 5.99 token/s.
+
 The next three bounded changes should be:
 
 1. Record a warm repeated variance band for the short cases in the same
    persistent process.
 2. Validate multiple templated user/assistant turns, then add the official tool
    description/call subset needed by an agent harness.
-3. Use schema-2 timing to evaluate fused expert compute and batched long-prompt
-   prefill only where they improve real agent workloads or memory headroom.
+3. Use schema-2 timing to evaluate routed-output accumulation and batched
+   long-prompt prefill only where they improve real agent workloads or memory
+   headroom.
 
 Expert I/O is removed from the recommended pinned decode path. The critical
 path now moves to variance qualification and the tool-capable

@@ -74,8 +74,7 @@ CARGO_TARGET_DIR=target-native \
 RUSTFLAGS='-C target-cpu=native' \
 cargo build --release --bin gguf_bench
 
-CANDLE_NUM_THREADS=4 \
-RAYON_NUM_THREADS=4 \
+INFERQ_NUM_THREADS=4 \
 ./target-native/release/gguf_bench \
   --model /data/projects/localllm/models/Qwen3-Coder-Next-UD-Q4_K_M.gguf \
   --tokenizer-model /data/projects/localllm/models/Qwen3-Coder-Next-SafeTensors \
@@ -85,13 +84,23 @@ RAYON_NUM_THREADS=4 \
   --output artifacts/gguf-pinned-suite.jsonl
 ```
 
+`INFERQ_NUM_THREADS` sizes candle's own CPU thread pools and inferq's
+multi-row dense-path rayon pool consistently from one value; setting
+`CANDLE_NUM_THREADS`/`RAYON_NUM_THREADS` directly still works (equal values
+take effect as before; unequal values log a warning and `CANDLE_NUM_THREADS`
+wins), and either pair still applies when `INFERQ_NUM_THREADS` is unset.
+
 The output path is created with no-overwrite semantics. Quantized schema
-version 2 embeds the source revision, compile-time AVX2/FMA status, effective
+version 3 embeds the source revision, compile-time AVX2/FMA status, effective
 Candle/Rayon thread counts, host and storage metadata, local GGUF identity,
 combined load telemetry, the shared warmup report, rendered prompt and token
 IDs, greedy correctness status, TTFT/decode rates, expert-cache activity, RSS,
 faults, and physical I/O counters. Timing attribution includes disjoint model
 stages plus nested attention, DeltaNet, and MoE operations and all 48 layers.
+Routed-expert compute is further split into fused gate/up projection,
+activation, down projection, and route-weighted accumulation. These four
+suboperations overlap the enclosing routed-expert compute value and must not be
+added to it.
 The separate target directory prevents the canonical generic validation build
 from overwriting the native benchmark binary.
 
@@ -134,15 +143,15 @@ identical work over contiguous value rows reduced recurrence to 1.42 seconds.
 Pre-resolved numeric expert handles and a fully-resident cache state also
 remove per-token tensor-name allocation and unnecessary LRU maintenance.
 
-On the same 23-input/128-output workload, with the same four native threads and
-all 216,000 expert requests hitting cache:
+On the same 23-input/128-output workload with the same four native threads:
 
-| Revision | TTFT | Decode | Physical reads | RSS |
-| --- | ---: | ---: | ---: | ---: |
-| Initial native suite | 4.51 s | 3.74 tok/s | 0 MiB | 47,319 MiB |
-| Contiguous DeltaNet + resident cache | 3.15 s | 5.62 tok/s | 0 MiB | 47,263 MiB |
-| Reusable DeltaNet scratch | 3.25 s | 5.77 tok/s | 0 MiB | 47,271 MiB |
-| Flat convolution + fused QKV/gate | 3.30 s | 5.87 tok/s | 0 MiB | 47,260 MiB |
+| Revision | TTFT | Decode | Cache hits | Physical reads | RSS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Initial native suite | 4.51 s | 3.74 tok/s | 216,000 | 0 MiB | 47,319 MiB |
+| Contiguous DeltaNet + resident cache | 3.15 s | 5.62 tok/s | 216,000 | 0 MiB | 47,263 MiB |
+| Reusable DeltaNet scratch | 3.25 s | 5.77 tok/s | 216,000 | 0 MiB | 47,271 MiB |
+| Flat convolution + fused QKV/gate | 3.30 s | 5.87 tok/s | 216,000 | 0 MiB | 47,260 MiB |
+| Fused routed/shared expert gate-up | 3.20 s | 5.99 tok/s | 144,000 | 0 MiB | 47,328 MiB |
 
 All 128 generated token IDs matched the initial artifact exactly. The accepted
 change improves sustained decode by 50.2%; an algebraically equivalent version
@@ -176,3 +185,67 @@ A separate 8-Candle/4-Rayon-thread run was rejected as the sustained default.
 It improved DeltaNet projections by 3.7% and LM head by 6.1%, but slowed MoE by
 2.6% and total decode by 0.7% versus the 4/4 control. Four Candle threads remain
 the documented sustained setting on this four-core/eight-thread host.
+
+Routed and shared expert gate/up matrices have the same shape and quantization.
+Full warmup still reads all 144 GGUF tensors sequentially, then replaces each
+resident gate/up pair with one byte-preserving row-concatenated entry. Resident
+expert bytes stay at 43.5 GiB while entries fall from 73,728 to 49,152. Runtime
+cache requests fall from 216,000 to 144,000 and each expert uses one gate/up
+kernel launch instead of two. All 128 IDs matched; MoE fell from 8.46 to 8.00
+seconds, routed compute from 6.30 to 5.87 seconds, and total decode from 21.65
+to 21.21 seconds (5.99 token/s).
+
+### Routed-expert projection profile
+
+A three-repetition fully resident control established a `6.0206 token/s` mean
+with a `5.9978`--`6.0409 token/s` range and `0.294%` coefficient of variation.
+Mean decode wall time was `21.094 s`; all three 128-token sequences matched the
+accepted artifact exactly. Use this variance band when judging small changes on
+the i7-6700 host.
+
+Schema 3 split the `5.835 s` routed-expert compute region as follows:
+
+| Routed-expert operation | Decode time | Share of routed compute |
+| --- | ---: | ---: |
+| Fused gate/up quantized projection | 3.454 s | 59.2% |
+| Down quantized projection | 2.029 s | 34.8% |
+| SiLU and gate/up product | 0.231 s | 4.0% |
+| Route-weighted accumulation | 0.112 s | 1.9% |
+| Timer remainder | 0.009 s | 0.2% |
+
+The two compressed projections therefore account for 94.0% of routed-expert
+compute. Fusing only route-weighted accumulation has an end-to-end ceiling near
+0.5% and is below the threshold for invasive work.
+
+An exact selected-expert prototype reused Candle's Q4_K/Q5_K dot products but
+scheduled all ten experts through Rayon so gate/up could share one input
+quantization and both projections could share a dispatch. Its outputs and all
+128 generated IDs were bit-identical. Fine-grained scheduling decoded at
+`5.754 token/s`; a coarser 40-task layout reached only `5.827 token/s`. In the
+latter run routed-expert compute rose to `6.168 s` and total MoE time to
+`8.389 s`. Both versions were rejected and removed.
+
+The next credible exact MoE improvement must work inside Candle's persistent
+quantized-matmul worker pool (or a model-specific replacement), not wrap the
+existing kernels in a second scheduler. A selected-matrix API there could
+share input quantization and barriers without giving up the worker pool's
+lower dispatch cost. Larger gains still require fewer weight bytes per token,
+which means a different execution quantization or an explicitly approximate
+reduction in active experts.
+
+That paragraph turned out to name the missing piece exactly. The rejected
+prototype scheduled the experts through Rayon while each expert's matmul was
+still Candle's, so it *was* a second scheduler wrapped around candle's own
+`BarrierPool` and it lost. Doing the same scheduling with a model-specific
+replacement for the inner kernel — `src/qgemm.rs`, which runs entirely on the
+calling thread — wins: MoE compute in a 256-row prefill pass fell from 12.21 to
+6.12 ms/token and prefill from 26.4 to 32.9 tok/s. Decode is untouched, still
+one row and still token-major.
+
+That change also moved what the MoE's timing fields mean, in the grouped
+(multi-row) path only. `expert_compute` is the wall time of the whole parallel
+region, loads included, which is what the pass actually spent. `expert_load`,
+`expert_gate_up`, `expert_activation` and `expert_down` are summed across the
+workers and are therefore thread time: they add up to roughly the thread count
+times `expert_compute`, and must not be read as a share of it. The token-major
+path is unchanged and all six remain serial wall time there.

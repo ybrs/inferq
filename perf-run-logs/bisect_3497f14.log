@@ -1,0 +1,120 @@
+=== 3497f14(HEAD) rep1 (--no-thinking DROPPED to match older commits; --speculative-mtp 0 kept) ===
+model loaded in 1.797s (fnv1a64:c9cb348f1d86017c, BF16+F32+Q4K+Q5K+Q6K+Q8_0)
+starting full expert warmup in GGUF file order; Ctrl-C cancels
+full warmup: 3/123 tensors, 0.5/19.0 GiB
+full warmup: 6/123 tensors, 1.0/19.0 GiB
+full warmup: 9/123 tensors, 1.5/19.0 GiB
+full warmup: 12/123 tensors, 1.9/19.0 GiB
+full warmup: 15/123 tensors, 2.4/19.0 GiB
+full warmup: 18/123 tensors, 2.9/19.0 GiB
+full warmup: 21/123 tensors, 3.3/19.0 GiB
+full warmup: 24/123 tensors, 3.8/19.0 GiB
+full warmup: 27/123 tensors, 4.2/19.0 GiB
+full warmup: 30/123 tensors, 4.6/19.0 GiB
+full warmup: 33/123 tensors, 5.1/19.0 GiB
+full warmup: 36/123 tensors, 5.5/19.0 GiB
+full warmup: 39/123 tensors, 5.9/19.0 GiB
+full warmup: 42/123 tensors, 6.4/19.0 GiB
+full warmup: 45/123 tensors, 6.8/19.0 GiB
+full warmup: 48/123 tensors, 7.3/19.0 GiB
+full warmup: 51/123 tensors, 7.8/19.0 GiB
+full warmup: 54/123 tensors, 8.2/19.0 GiB
+full warmup: 57/123 tensors, 8.6/19.0 GiB
+full warmup: 60/123 tensors, 9.1/19.0 GiB
+full warmup: 63/123 tensors, 9.5/19.0 GiB
+full warmup: 66/123 tensors, 9.9/19.0 GiB
+full warmup: 69/123 tensors, 10.4/19.0 GiB
+full warmup: 72/123 tensors, 10.8/19.0 GiB
+full warmup: 75/123 tensors, 11.3/19.0 GiB
+full warmup: 78/123 tensors, 11.7/19.0 GiB
+full warmup: 81/123 tensors, 12.2/19.0 GiB
+full warmup: 84/123 tensors, 12.6/19.0 GiB
+full warmup: 87/123 tensors, 13.1/19.0 GiB
+full warmup: 90/123 tensors, 13.5/19.0 GiB
+full warmup: 93/123 tensors, 13.9/19.0 GiB
+full warmup: 96/123 tensors, 14.4/19.0 GiB
+full warmup: 99/123 tensors, 14.8/19.0 GiB
+full warmup: 102/123 tensors, 15.2/19.0 GiB
+full warmup: 105/123 tensors, 15.7/19.0 GiB
+full warmup: 108/123 tensors, 16.2/19.0 GiB
+full warmup: 111/123 tensors, 16.7/19.0 GiB
+full warmup: 114/123 tensors, 17.2/19.0 GiB
+full warmup: 117/123 tensors, 17.7/19.0 GiB
+full warmup: 120/123 tensors, 18.2/19.0 GiB
+full warmup: 123/123 tensors, 19.0/19.0 GiB
+full expert warmup complete (PinnedExpertCache): 19.0 GiB in 12.595s (1541.5 MiB/s), 0.0 GiB physical reads; 19.0 GiB resident in 20992 cache entries
+Here's a thinking process:
+
+1.  **Understand User Request:**
+   - **Language:** Rust
+   - **Task:** Parse a semver string into (major, minor, patch)
+   - **Requirement:** Include unit tests
+   - **Input Format:** Semver string (e.g., "1.2.3", "0.1.0", "10.20.30")
+   - **Output Format:** Tuple `(u32, u32, u32)` or similar
+   - **Error Handling:** Should handle invalid formats gracefully (return `Result
+prompt token ids: [248045, 846, 198, 7734, 264, 32671, 709, 421, 68434, 264, 5067, 415, 886, 1083, 318, 35299, 11, 8652, 11, 10582, 8, 440, 4821, 6813, 13, 248046, 198, 248045, 74455, 198, 248068, 198]
+generated token ids: [8160, 579, 264, 7047, 1817, 25, 271, 16, 13, 220, 2972, 15771, 2598, 2570, 5952, 64700, 198, 256, 471, 2972, 13410, 64700, 32671, 198, 256, 471, 2972, 6065, 64700, 14347, 264, 5067, 415, 886, 1083, 318, 35299, 11, 8652, 11, 10582, 8, 198, 256, 471, 2972, 73211, 64700, 28763, 4821, 6813, 198, 256, 471, 2972, 2425, 14606, 64700, 13840, 415, 886, 318, 68, 1257, 2487, 328, 16, 13, 17, 13, 18, 487, 328, 15, 13, 16, 13, 15, 487, 328, 16, 15, 13, 17, 15, 13, 18, 15, 871, 198, 256, 471, 2972, 4935, 14606, 64700, 23846, 47029, 84, 18, 17, 11, 560, 18, 17, 11, 560, 18, 17, 44646, 466, 4283, 198, 256, 471, 2972, 1401, 53844, 64700, 11910, 3579, 8060, 19251, 75810, 318, 671, 1510, 2009]
+input: 32 tokens evaluated in 2.297s (13.93 tok/s); decode: 127 passes in 15.460s (8.21 tok/s); context: 160 tokens
+expert cache: 87906/87906 hits (100.0%); loaded 0.0 MiB of GGUF ranges; resident 19416.0/24000.0 MiB in 20992 entries (fully resident: true); 0 evictions
+process: physical reads 0.0 MiB; faults 48607 minor / 0 major; RSS 21548.5 MiB, peak 21572.9 MiB
+--- end rep1 ---
+=== 3497f14(HEAD) rep2 (--no-thinking DROPPED to match older commits; --speculative-mtp 0 kept) ===
+model loaded in 1.807s (fnv1a64:c9cb348f1d86017c, BF16+F32+Q4K+Q5K+Q6K+Q8_0)
+starting full expert warmup in GGUF file order; Ctrl-C cancels
+full warmup: 3/123 tensors, 0.5/19.0 GiB
+full warmup: 6/123 tensors, 1.0/19.0 GiB
+full warmup: 9/123 tensors, 1.5/19.0 GiB
+full warmup: 12/123 tensors, 1.9/19.0 GiB
+full warmup: 15/123 tensors, 2.4/19.0 GiB
+full warmup: 18/123 tensors, 2.9/19.0 GiB
+full warmup: 21/123 tensors, 3.3/19.0 GiB
+full warmup: 24/123 tensors, 3.8/19.0 GiB
+full warmup: 27/123 tensors, 4.2/19.0 GiB
+full warmup: 30/123 tensors, 4.6/19.0 GiB
+full warmup: 33/123 tensors, 5.1/19.0 GiB
+full warmup: 36/123 tensors, 5.5/19.0 GiB
+full warmup: 39/123 tensors, 5.9/19.0 GiB
+full warmup: 42/123 tensors, 6.4/19.0 GiB
+full warmup: 45/123 tensors, 6.8/19.0 GiB
+full warmup: 48/123 tensors, 7.3/19.0 GiB
+full warmup: 51/123 tensors, 7.8/19.0 GiB
+full warmup: 54/123 tensors, 8.2/19.0 GiB
+full warmup: 57/123 tensors, 8.6/19.0 GiB
+full warmup: 60/123 tensors, 9.1/19.0 GiB
+full warmup: 63/123 tensors, 9.5/19.0 GiB
+full warmup: 66/123 tensors, 9.9/19.0 GiB
+full warmup: 69/123 tensors, 10.4/19.0 GiB
+full warmup: 72/123 tensors, 10.8/19.0 GiB
+full warmup: 75/123 tensors, 11.3/19.0 GiB
+full warmup: 78/123 tensors, 11.7/19.0 GiB
+full warmup: 81/123 tensors, 12.2/19.0 GiB
+full warmup: 84/123 tensors, 12.6/19.0 GiB
+full warmup: 87/123 tensors, 13.1/19.0 GiB
+full warmup: 90/123 tensors, 13.5/19.0 GiB
+full warmup: 93/123 tensors, 13.9/19.0 GiB
+full warmup: 96/123 tensors, 14.4/19.0 GiB
+full warmup: 99/123 tensors, 14.8/19.0 GiB
+full warmup: 102/123 tensors, 15.2/19.0 GiB
+full warmup: 105/123 tensors, 15.7/19.0 GiB
+full warmup: 108/123 tensors, 16.2/19.0 GiB
+full warmup: 111/123 tensors, 16.7/19.0 GiB
+full warmup: 114/123 tensors, 17.2/19.0 GiB
+full warmup: 117/123 tensors, 17.7/19.0 GiB
+full warmup: 120/123 tensors, 18.2/19.0 GiB
+full warmup: 123/123 tensors, 19.0/19.0 GiB
+full expert warmup complete (PinnedExpertCache): 19.0 GiB in 12.430s (1562.0 MiB/s), 0.0 GiB physical reads; 19.0 GiB resident in 20992 cache entries
+Here's a thinking process:
+
+1.  **Understand User Request:**
+   - **Language:** Rust
+   - **Task:** Parse a semver string into (major, minor, patch)
+   - **Requirement:** Include unit tests
+   - **Input Format:** Semver string (e.g., "1.2.3", "0.1.0", "10.20.30")
+   - **Output Format:** Tuple `(u32, u32, u32)` or similar
+   - **Error Handling:** Should handle invalid formats gracefully (return `Result
+prompt token ids: [248045, 846, 198, 7734, 264, 32671, 709, 421, 68434, 264, 5067, 415, 886, 1083, 318, 35299, 11, 8652, 11, 10582, 8, 440, 4821, 6813, 13, 248046, 198, 248045, 74455, 198, 248068, 198]
+generated token ids: [8160, 579, 264, 7047, 1817, 25, 271, 16, 13, 220, 2972, 15771, 2598, 2570, 5952, 64700, 198, 256, 471, 2972, 13410, 64700, 32671, 198, 256, 471, 2972, 6065, 64700, 14347, 264, 5067, 415, 886, 1083, 318, 35299, 11, 8652, 11, 10582, 8, 198, 256, 471, 2972, 73211, 64700, 28763, 4821, 6813, 198, 256, 471, 2972, 2425, 14606, 64700, 13840, 415, 886, 318, 68, 1257, 2487, 328, 16, 13, 17, 13, 18, 487, 328, 15, 13, 16, 13, 15, 487, 328, 16, 15, 13, 17, 15, 13, 18, 15, 871, 198, 256, 471, 2972, 4935, 14606, 64700, 23846, 47029, 84, 18, 17, 11, 560, 18, 17, 11, 560, 18, 17, 44646, 466, 4283, 198, 256, 471, 2972, 1401, 53844, 64700, 11910, 3579, 8060, 19251, 75810, 318, 671, 1510, 2009]
+input: 32 tokens evaluated in 2.289s (13.98 tok/s); decode: 127 passes in 15.514s (8.19 tok/s); context: 160 tokens
+expert cache: 87906/87906 hits (100.0%); loaded 0.0 MiB of GGUF ranges; resident 19416.0/24000.0 MiB in 20992 entries (fully resident: true); 0 evictions
+process: physical reads 0.0 MiB; faults 48615 minor / 0 major; RSS 21546.2 MiB, peak 21570.5 MiB
+--- end rep2 ---

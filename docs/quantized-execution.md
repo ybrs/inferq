@@ -6,6 +6,81 @@ or F32 representation. `QuantizedMatrix::forward` accepts F32 activations and
 calls the block matmul directly; its public API intentionally has no
 whole-matrix dequantization method.
 
+## Multi-row kernels
+
+`QuantizedMatrix::forward` routes two or more input rows on CPU, for matrices of
+at least 4 MiB, to a fused multi-row kernel in `src/qgemm.rs`. One row keeps
+Candle's matvec: no weight byte is reused there, so there is nothing to fuse.
+A pass wider than 16 rows is tiled into 16-row groups rather than handed over
+whole; the kernel's per-row cost is lowest around that width.
+
+`forward_spread(xs, RowSpread)` and `forward_rows(values, rows, RowSpread)` say
+where the output rows are computed. `RowSpread::Pool` splits them across the
+global rayon pool and is what `forward` uses. `RowSpread::Caller` computes them
+all on the calling thread, for a caller that is already inside a parallel
+iterator and holds one of a batch of independent matrices — the MoE's expert
+loop, and nothing else today. Every output row reads the whole input and writes
+only its own slice of the result, so the choice cannot change a value;
+`row_spread_does_not_change_the_result` asserts that rather than arguing it.
+
+Under `RowSpread::Caller` the size threshold and the two-row minimum are both
+skipped and the fused kernels always run. That is not a tuning preference. The
+Candle fallback is `apply_op1_no_bwd`, whose CPU quantized matmul runs on
+candle's `BarrierPool` — a process-wide singleton (see `src/threading.rs`), so
+six experts entering it at once queue for the same workers instead of getting
+six matmuls. The fused kernels touch only the calling thread and have no such
+shared resource.
+
+The fused kernel exists because a per-row dot product re-runs the *block
+decode* — nibble unpacking and scale extraction — once per input row, and that
+decode is roughly half the per-row work. Measured on the qualified host, the
+existing per-row path was compute-bound from M=4 upward: per-row time stayed
+flat as M grew (a bandwidth-bound kernel's would fall ~8x from M=2 to M=16) and
+each pass ran 3-4x above its weight-traffic floor. The fused kernel decodes each
+weight block once and applies it to every row of a register tile, measuring
+1.58x at M=8 on a Q4K dense projection.
+
+Tile width is 8 rows, chosen by measurement across 2/4/8/12/16. Beyond 8 the
+per-row accumulators stop fitting the 16 architectural ymm registers alongside
+the decoded weight state, and the spill costs more than the saved decode. A
+16-row pass therefore decodes each block twice and runs 8-10% worse per row than
+an 8-row pass.
+
+Candle keeps its block fields `pub(crate)`, so `qgemm` re-declares the GGUF
+on-disk block layouts as `repr(C)` mirrors, each pinned by a compile-time size
+assertion against Candle's own type. Accumulation order matches Candle's
+`vec_dot`: the per-block integer sums are associative and the f32 accumulators
+advance once per block in the same sequence, so results are bit-identical to
+Candle's AVX2 kernel. Candle compiles that kernel only when the build sets
+`target_feature = "avx2"`; against its scalar fallback the kernels agree to
+about 1e-6, which is reordering noise. Build with `-C target-cpu=native`.
+
+Q4K, Q6K and Q8_0 have fused kernels. Q5K stays on the per-row path: it carries
+0.3% of Qwen3.6-35B-A3B's bytes.
+
+Routed expert matrices are 576-840 KiB, below the 4 MiB threshold, so a decode
+pass still meets them on Candle's loop. A *prefill* pass does not: its MoE runs
+the experts in parallel and therefore under `RowSpread::Caller`, where the
+threshold does not apply.
+
+The threshold's original justification — that at the 2-3 row groups MoE routing
+produces, both multi-row paths are slower than Candle's loop, because the fixed
+per-call cost cannot be amortized by a matrix that small
+(`multirow-report-702d043633e0.md`) — was measured on one expert at a time.
+Measured on 64 experts as one batch, which is what a layer meets, it holds only
+while each matmul splits its own output rows across the pool. Timing one
+expert repeatedly leaves it resident in L3 and charges the fused kernel for
+fork/join latency it would not pay if the experts were the parallel unit;
+`gguf_matmul_bench --expert-batch N` times the batch instead. See the table in
+the commit that introduced the flag.
+
+`QuantizedMatrix::forward_via(xs, MultiRowPath, RowSpread)` pins one
+implementation regardless of dispatch; it exists for `gguf_matmul_bench` and the
+differential tests, and production code should call `forward`, `forward_spread`
+or `forward_rows`. `MultiRowPath::Fused` is one wide call and
+`MultiRowPath::FusedTiled` is what dispatch runs above 16 rows; they are not the
+same cost.
+
 Fused expert tensors use the GGUF shape `[experts, rows, columns]`.
 `load_expert_matrix` seeks directly to one expert and reads only that matrix's
 compressed range. On the local Q4_K_M checkpoint this reduces a gate/up expert
@@ -302,3 +377,65 @@ rows. This retains the compressed representation and identical per-row dot
 products while sharing one quantized kernel launch. Combined with the flat
 convolution, sustained decode measured `5.87 token/s` with the same 128 IDs,
 zero inference reads, and `47,260 MiB` RSS.
+
+## Which KV scan a pass takes
+
+The full-attention layers have two exact scans and pick one per pass.
+
+`per_head_scan` gives each `(token, query head)` its own work item, walking the
+whole cache for its own KV head. `blocked_scan` gives each `(token, KV head)`
+one item carrying all the query heads that share it, so every key and value row
+is read once for the group instead of once per query head. The blocked scan
+holds its scores as `[position][group]` and accumulates transposed as
+`[column][group]`, which is what lets a position block and a column block each
+be one contiguous chunk a core can own, and what makes the group's weights one
+vector.
+
+They compute the same numbers in the same order — the same dot of the same two
+vectors per score, each softmax reduced over its positions in increasing order,
+each output element accumulated over its positions in increasing order — so
+they are bit-identical, and two tests assert that rather than argue it, one at
+small shapes and one at this checkpoint's own head geometry at the depth where
+the choice flips.
+
+The choice is `KV_BLOCKING_BYTES`: a pass takes the blocked scan once the KV
+its layers hold reaches 16 MiB, and the per-head scan below that. The reason is
+that the per-head scan's re-reads are concurrent, so a last-level cache that
+holds the layer's KV serves all of them and there is no traffic to save, while
+the blocked scan still pays for three parallel regions, a score buffer and a
+transpose. See the measurements in
+[openai-server.md](openai-server.md#decode-against-context-depth). This is a
+tuning constant for a class of host, not a property of the checkpoint, and it
+cannot change a result.
+
+## Where a DeltaNet recurrence step runs
+
+The gated delta rule is serial over tokens and independent over heads: value
+head `h` reads its own slice of the query, key, value, decay and beta, and
+reads and writes only its own `linear_key_head_dim x linear_value_head_dim`
+block of the recurrent state and its own row of the output. Nothing crosses a
+head, so which core computes a head cannot move a bit, and
+`spreading_the_heads_over_cores_does_not_move_a_bit` asserts the two spreads
+equal rather than close.
+
+`HeadSpread` names the choice at the call site rather than in a build flag.
+`HeadSpread::Pool` splits the heads across the global rayon pool;
+`HeadSpread::Caller` runs every head on the calling thread. The step runs once
+per row, so a pass of `n` rows wakes the pool `n` times per layer and the
+waking is paid per row; what falls with the row count is the cost of each
+waking, because consecutive rows call back in before the workers sleep.
+`HEAD_SPREAD_MIN_ROWS` is where the two measured equal, which is four rows —
+so a one-row decode pass and the two- or three-row verification pass behind a
+speculative decode both stay on the calling thread, and prefill goes through
+the pool. Measured on the qualified host, DeltaNet recurrence over sixteen
+decode passes at 64 context was `0.126 s` on the calling thread and `0.161 s`
+through the pool; over a 256-row prefill pass it was `5.16 ms` per token on the
+calling thread and `2.80 ms` through it.
+
+The same exact row fusion now applies to routed and shared MoE gate/up
+projections. Full pinning preserves sequential GGUF reads, then converts the
+resident gate/up cache entries in memory. The cache still owns `43.5 GiB`, but
+contains 49,152 combined-gate/up and down entries instead of 73,728 separate
+matrices. The exact sustained run made 144,000/144,000 cache hits, reduced MoE
+from `8.46 s` to `8.00 s`, and decoded at `5.99 token/s` with zero physical
+inference reads and `47,328 MiB` RSS.

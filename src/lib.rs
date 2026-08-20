@@ -3,24 +3,39 @@
 pub mod config;
 pub mod gguf;
 pub mod loader;
+pub mod ngram;
 pub mod profile;
+pub mod prompt_cache;
+pub mod qgemm;
 pub mod qwen;
 pub mod residency;
 pub mod runtime;
 pub mod sampling;
+pub mod server;
+pub mod speculative;
+pub mod threading;
 pub mod tokenizer;
+pub mod tool_calls;
 pub mod trace;
 
 pub use config::{LayerType, Qwen3NextConfig};
 pub use gguf::{
-    ExpertCacheStats, GgufCheckpoint, GgufExpertTensor, GgufModelIdentity, GgufSummary,
-    GgufTensorInfo, QuantizedEmbedding, QuantizedMatrix, inspect_gguf,
+    ExpertCacheStats, GgufCheckpoint, GgufExpertPair, GgufExpertTensor, GgufModelIdentity,
+    GgufSummary, GgufTensorInfo, MultiRowPath, QuantizedEmbedding, QuantizedMatrix, RowSpread,
+    inspect_gguf,
 };
 pub use loader::{Checkpoint, ModelSummary, TensorInfo};
+pub use prompt_cache::{PromptCache, PromptCacheConfig, PromptCacheStats};
 pub use residency::{
     FullExpertWarmupMode, FullExpertWarmupProgress, FullExpertWarmupReport, warm_all_experts,
 };
 pub use runtime::{
-    GenerationMetrics, GenerationOptions, GenerationResult, QuantizedGenerationMetrics,
-    QuantizedGenerationResult, QuantizedRuntime, Runtime,
+    GenerationMetrics, GenerationOptions, GenerationResult, NgramMatchLengthStats,
+    PartialRunMetrics, QuantizedDraftObservation, QuantizedGenerationMetrics,
+    QuantizedGenerationResult, QuantizedNgramMetrics, QuantizedRuntime,
+    QuantizedSpeculativeMetrics, Runtime, SessionImage, ThinkingMetrics,
+};
+pub use speculative::{
+    ArmConfig, ArmController, ArmStats, PolicyStepRecord, QuantizedPolicyMetrics, SpanCursor,
+    SpeculativeMode, StepArm,
 };

@@ -1,0 +1,61 @@
+model loaded in 1.776s (fnv1a64:c9cb348f1d86017c, BF16+F32+Q4K+Q5K+Q6K+Q8_0)
+starting full expert warmup in GGUF file order; Ctrl-C cancels
+full warmup: 3/123 tensors, 0.5/19.0 GiB
+full warmup: 6/123 tensors, 1.0/19.0 GiB
+full warmup: 9/123 tensors, 1.5/19.0 GiB
+full warmup: 12/123 tensors, 1.9/19.0 GiB
+full warmup: 15/123 tensors, 2.4/19.0 GiB
+full warmup: 18/123 tensors, 2.9/19.0 GiB
+full warmup: 21/123 tensors, 3.3/19.0 GiB
+full warmup: 24/123 tensors, 3.8/19.0 GiB
+full warmup: 27/123 tensors, 4.2/19.0 GiB
+full warmup: 30/123 tensors, 4.6/19.0 GiB
+full warmup: 33/123 tensors, 5.1/19.0 GiB
+full warmup: 36/123 tensors, 5.5/19.0 GiB
+full warmup: 39/123 tensors, 5.9/19.0 GiB
+full warmup: 42/123 tensors, 6.4/19.0 GiB
+full warmup: 45/123 tensors, 6.8/19.0 GiB
+full warmup: 48/123 tensors, 7.3/19.0 GiB
+full warmup: 51/123 tensors, 7.8/19.0 GiB
+full warmup: 54/123 tensors, 8.2/19.0 GiB
+full warmup: 57/123 tensors, 8.6/19.0 GiB
+full warmup: 60/123 tensors, 9.1/19.0 GiB
+full warmup: 63/123 tensors, 9.5/19.0 GiB
+full warmup: 66/123 tensors, 9.9/19.0 GiB
+full warmup: 69/123 tensors, 10.4/19.0 GiB
+full warmup: 72/123 tensors, 10.8/19.0 GiB
+full warmup: 75/123 tensors, 11.3/19.0 GiB
+full warmup: 78/123 tensors, 11.7/19.0 GiB
+full warmup: 81/123 tensors, 12.2/19.0 GiB
+full warmup: 84/123 tensors, 12.6/19.0 GiB
+full warmup: 87/123 tensors, 13.1/19.0 GiB
+full warmup: 90/123 tensors, 13.5/19.0 GiB
+full warmup: 93/123 tensors, 13.9/19.0 GiB
+full warmup: 96/123 tensors, 14.4/19.0 GiB
+full warmup: 99/123 tensors, 14.8/19.0 GiB
+full warmup: 102/123 tensors, 15.2/19.0 GiB
+full warmup: 105/123 tensors, 15.7/19.0 GiB
+full warmup: 108/123 tensors, 16.2/19.0 GiB
+full warmup: 111/123 tensors, 16.7/19.0 GiB
+full warmup: 114/123 tensors, 17.2/19.0 GiB
+full warmup: 117/123 tensors, 17.7/19.0 GiB
+full warmup: 120/123 tensors, 18.2/19.0 GiB
+full warmup: 123/123 tensors, 19.0/19.0 GiB
+full expert warmup complete (PinnedExpertCache): 19.0 GiB in 13.043s (1488.6 MiB/s), 0.0 GiB physical reads; 19.0 GiB resident in 20992 cache entries
+```rust
+/// Parses a semver string into (major, minor, patch) tuple.
+/// 
+/// # Examples
+/// 
+/// ```
+/// let (major, minor, patch) = parse_semver("1.2.3").unwrap();
+/// assert_eq!((major, minor, patch), (1, 2, 3));
+/// ```
+pub fn parse_semver(s: &str) -> Result<(u32, u32, u32), String> {
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len()
+prompt token ids: [248045, 846, 198, 7734, 264, 32671, 709, 421, 68434, 264, 5067, 415, 886, 1083, 318, 35299, 11, 8652, 11, 10582, 8, 440, 4821, 6813, 13, 248046, 198, 248045, 74455, 198, 248068, 271, 248069, 271]
+generated token ids: [71093, 34602, 198, 2490, 70932, 264, 5067, 415, 886, 1083, 318, 35299, 11, 8652, 11, 10582, 8, 13992, 13, 198, 2490, 695, 2490, 653, 24508, 198, 2490, 695, 2490, 52451, 198, 2490, 1042, 318, 35299, 11, 8652, 11, 10582, 8, 283, 4563, 29450, 415, 437, 16, 13, 17, 13, 18, 1764, 15000, 2061, 198, 2490, 1992, 10398, 0, 1148, 35299, 11, 8652, 11, 10582, 681, 318, 16, 11, 220, 17, 11, 220, 18, 5722, 198, 2490, 52451, 198, 9299, 5003, 4563, 29450, 415, 1104, 25, 594, 485, 8, 1411, 5536, 27767, 84, 18, 17, 11, 560, 18, 17, 11, 560, 18, 17, 681, 894, 29, 313, 198, 262, 1042, 5306, 25, 10985, 50490, 485, 29, 283, 274, 5121, 4151, 1760, 16873, 2061, 198, 262, 413, 5306, 18817, 363]
+input: 34 tokens evaluated in 2.443s (13.92 tok/s); decode: 127 passes in 15.528s (8.18 tok/s); context: 162 tokens
+expert cache: 88038/88038 hits (100.0%); loaded 0.0 MiB of GGUF ranges; resident 19416.0/24000.0 MiB in 20992 entries (fully resident: true); 0 evictions
+process: physical reads 0.0 MiB; faults 48980 minor / 0 major; RSS 21548.0 MiB, peak 21577.2 MiB
