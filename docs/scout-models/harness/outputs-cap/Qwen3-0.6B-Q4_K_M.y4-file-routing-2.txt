@@ -1,0 +1,8 @@
+[elapsed 0.7s, completion_tokens 28, prompt_tokens 149]
+```json
+[
+  "src/tool_calls.rs",
+  "src/sampling.rs",
+  "src/tool_calls.rs"
+]
+```

@@ -1,0 +1,6 @@
+Translate the Dutch text below into English. Output only the translation.
+
+Ticket #4471 (klant: Vandenberg Logistiek)
+- 08:42 klant: "Sinds vanochtend krijgen we bij het opvragen van zendingen een foutmelding 503. Het gaat om ongeveer 1 op de 5 verzoeken. Wij hebben aan onze kant niets gewijzigd."
+- 09:05 support: interne notitie — de gateway is om 07:50 UTC opnieuw opgestart na een configuratiewijziging. Zendingnummer ZND-88213 faalt reproduceerbaar.
+- 09:20 klant: "Onze testomgeving met dezelfde sleutel werkt wel. Kunnen jullie eventueel vandaag nog terugkoppelen? Dit is voor ons behoorlijk urgent."

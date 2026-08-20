@@ -1,0 +1,5 @@
+[elapsed 3.8s, completion_tokens 141, prompt_tokens 221]
+Ticket #4471 (customer: Vandenberg Logistics)  
+- 08:42 customer: "Since the morning, we receive a 503 error when processing incoming messages. It is about 1 out of 5 requests. We have not changed anything."  
+- 09:05 support: internal note — the gateway is restarted at 07:50 UTC after a configuration change. Sending number ZND-88213 reproduces.  
+- 09:20 customer: "Our test environment with the same key works well. Can you please try to return to the system tomorrow? This is for us quite urgent."

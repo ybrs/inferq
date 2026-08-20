@@ -1,0 +1,14 @@
+[elapsed 13.3s, completion_tokens 119, prompt_tokens 122]
+flowchart TD
+    A[Every night] --> B[Pull raw orders export]
+    A --> C[Pull returns export]
+    B --> D[Validate orders and returns]
+    C --> D
+    D --> E{Validation passes?}
+    E -- Yes --> F[Load orders into warehouse]
+    E -- No --> G[Handle validation failure]
+    F --> H[Load returns into warehouse]
+    H --> I[Rebuild daily summary table]
+    I --> J[Send summary email]
+    G --> K[Notify stakeholders of failure]
+    K --> A

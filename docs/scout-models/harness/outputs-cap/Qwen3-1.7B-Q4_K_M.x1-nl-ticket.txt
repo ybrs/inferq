@@ -1,0 +1,5 @@
+[elapsed 8.7s, completion_tokens 141, prompt_tokens 221]
+Ticket #4471 (customer: Vandenberg Logistiek)
+- 08:42 customer: "Since yesterday morning, we receive a error message 503 when requesting shipments. It's about roughly 1 out of every 5 requests. We have made no changes on our side."
+- 09:05 support: internal note — the gateway was restarted at 07:50 UTC after a configuration change. The shipment number ZND-88213 fails repeatedly.
+- 09:20 customer: "Our test environment with the same key works fine. Can you possibly reply today? This is quite urgent for us."

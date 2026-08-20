@@ -1,0 +1,32 @@
+[elapsed 12.8s, completion_tokens 224, prompt_tokens 158]
+```python
+import matplotlib.pyplot as plt
+
+# Hardcoded data
+models = ["granite-3b", "qwen-1.7b", "qwen-0.6b"]
+prefill_tokens = [60.9, 121.5, 356.3]
+decode_tokens = [9.8, 19.1, 49.8]
+
+# Create grouped bar chart
+fig, ax = plt.subplots()
+
+# Set y-axis to log scale
+ax.set_yscale('log')
+
+# Create bars
+bars = ax.bar(models, prefill_tokens, label='Prefill Tokens/s', width=0.3)
+bars2 = ax.bar(models, decode_tokens, label='Decode Tokens/s', bottom=prefill_tokens, width=0.3)
+
+# Add labels and title
+ax.set_xlabel('Model')
+ax.set_ylabel('Tokens/s')
+ax.set_title('Model Performance')
+
+# Add legend
+ax.legend()
+
+# Save the plot
+plt.savefig(f"{args[0]}")
+
+# Do not call plt.show()
+```

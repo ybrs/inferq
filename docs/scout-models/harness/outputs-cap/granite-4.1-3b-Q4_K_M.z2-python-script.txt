@@ -1,0 +1,35 @@
+[elapsed 25.9s, completion_tokens 249, prompt_tokens 119]
+```python
+import sys
+import csv
+from collections import defaultdict
+
+if len(sys.argv) != 2:
+    sys.stderr.write("Usage: python script.py <csv_file>\n")
+    sys.exit(1)
+
+csv_file = sys.argv[1]
+
+try:
+    with open(csv_file, newline='') as f:
+        reader = csv.DictReader(f)
+        if 'status' not in reader.fieldnames:
+            sys.stderr.write("Error: CSV file must contain a 'status' column.\n")
+            sys.exit(1)
+
+        status_data = defaultdict(lambda: {'count': 0, 'total': 0.0})
+
+        for row in reader:
+            status = row['status']
+            status_data[status]['count'] += 1
+            status_data[status]['total'] += float(row['amount'])
+
+    for status in sorted(status_data.keys()):
+        count = status_data[status]['count']
+        total = f"{status_data[status]['total']:.2f}"
+        print(f"{status}: {count} orders, {total} total")
+
+except Exception as e:
+    sys.stderr.write(f"An error occurred: {e}\n")
+    sys.exit(1)
+```

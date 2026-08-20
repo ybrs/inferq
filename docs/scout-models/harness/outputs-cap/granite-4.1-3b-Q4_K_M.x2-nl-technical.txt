@@ -1,0 +1,2 @@
+[elapsed 12.6s, completion_tokens 97, prompt_tokens 181]
+The throughput of the decode path is not limited by computational power but by memory bandwidth. On this machine, we achieve approximately 19 to 21 GB/s in practice, while the streaming benchmark reports 31.8 GB/s. Consequently, the measured speed is roughly 35 percent lower than an estimate based on file size. Quantization under four bits yields hardly any gain, as the unpacking of weights consumes time that the cores without VNNI instructions do not have available.

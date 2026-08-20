@@ -1,0 +1,2 @@
+[elapsed 4.7s, completion_tokens 46, prompt_tokens 346]
+This file is for emitting reference tokens and logits from a CausalLM model for use in a Rust CLI tool. If the model or tokenizer is incorrect, the output would be wrong, leading to incorrect token IDs and logits.

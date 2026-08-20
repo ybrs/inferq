@@ -1,0 +1,8 @@
+Translate the Dutch text below into English. Output only the translation.
+
+Het rapport is nog niet actueel, dus die cijfers kloppen waarschijnlijk niet meer.
+De leverancier was nogal brutaal over de vertraging en beweerde dat wij het
+contract verkeerd hadden gelezen. We kunnen eventueel volgende week een nieuwe
+offerte opvragen, maar dan moeten we wel eerst de begroting herzien. Overigens
+heeft de magazijnmeester het defecte onderdeel al vervangen; dat scheelt een
+hoop gedoe.

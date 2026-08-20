@@ -1,0 +1,2 @@
+[elapsed 2.8s, completion_tokens 103, prompt_tokens 189]
+The decoder of the decoding path is not limited by computational power but by the memory bandwidth. In practice, we obtain approximately 19–21 GB/s, while the streaming benchmark reports 31.8 GB/s. Therefore, the measured speed drops by about 35 percentage points compared to a prediction based on the file size. Quantization under four bits results in little gain, as the weight packing takes a significant amount of time, which the cores without VNNI instructions do not have.

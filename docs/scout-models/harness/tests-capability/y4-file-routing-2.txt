@@ -1,0 +1,18 @@
+You are picking which files to open. Below is a file listing from a CPU inference engine written in Rust. Choose the 3 files most likely to contain the answer to the question. Output ONLY a JSON array of 3 file paths, most likely first, no prose.
+
+src/config.rs
+src/gguf.rs
+src/loader.rs
+src/ngram.rs
+src/profile.rs
+src/qgemm.rs
+src/runtime.rs
+src/sampling.rs
+src/speculative.rs
+src/tokenizer.rs
+src/tool_calls.rs
+src/trace.rs
+
+Question: A tool call emitted by the model comes back with mangled JSON arguments. Where do I look?
+
+JSON:

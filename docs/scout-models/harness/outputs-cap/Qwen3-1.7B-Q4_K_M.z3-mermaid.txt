@@ -1,0 +1,9 @@
+[elapsed 4.5s, completion_tokens 67, prompt_tokens 126]
+flowchart TD
+    a.Pull raw orders export
+    b.Pull returns export
+    c.Validate both files
+    d.If validation passes, load orders into warehouse
+    e.If validation passes, load returns into warehouse
+    f.When both loads are done, rebuild daily summary table
+    g.After that, send summary email

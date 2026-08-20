@@ -1,0 +1,42 @@
+[elapsed 14.4s, completion_tokens 247, prompt_tokens 123]
+import csv
+import sys
+
+def main():
+    if len(sys.argv) != 2:
+        print("Usage: python script.py <csv_file>")
+        sys.exit(1)
+
+    csv_file = sys.argv[1]
+    try:
+        with open(csv_file, 'r') as f:
+            reader = csv.DictReader(f)
+            data = list(reader)
+    except FileNotFoundError:
+        print("File not found.")
+        sys.exit(1)
+    except csv.Error as e:
+        print(f"CSV error: {e}")
+        sys.exit(1)
+
+    statuses = set()
+    total_amounts = {}
+
+    for row in data:
+        status = row['status']
+        if status not in statuses:
+            statuses.add(status)
+            total_amounts[status] = 0.0
+
+        total_amounts[status] += float(row['amount'])
+
+    if not statuses:
+        print("No distinct status found.")
+        sys.exit(1)
+
+    for status in sorted(statuses):
+        total = total_amounts[status]
+        print(f"{status}: {total:.2f} orders, {total:.2f} total")
+
+if __name__ == "__main__":
+    main()
