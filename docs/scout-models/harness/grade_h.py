@@ -56,7 +56,9 @@ def h2(txt):
     # attribution + no invented resolution
     # lexical check, so accept the common paraphrases: "customer reported",
     # "the customer, Bolt Industries, reported", "according to the customer"
-    attributed = re.search(r"customer[^.]{0,30}?(claim|say|said|state|report|assert|note)\w*"
+    # [^.:)] so the ticket header "Ticket #9102 (customer: Bolt Industries) states"
+    # does not count as attributing the claim to the customer
+    attributed = re.search(r"customer[^.:)]{0,30}?(claim|say|said|state|report|assert|note)\w*"
                            r"|according to the customer|customer['’]s claim", low)
     if attributed: s += 1; n.append("attributes the customer's claim")
     else: n.append("does not attribute claims")

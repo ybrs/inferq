@@ -45,12 +45,12 @@ Faithfulness suite (`/24`, see `report.md` for what h1–h3 test):
 | granite-4.1-3b IQ2_M | 6/6 | 6/8 | 8/10 | 20/24 |
 | Qwen3-1.7B Q2_K | 6/6 | 5/8 | 6/10 | 17/24 |
 | granite-4.1-3b Q2_K_XL | 6/6 | 5/8 | 4/10 | 15/24 |
-| Qwen3-0.6B Q4_K_M | 0/6 | 5/8 | 2/10 | 7/24 |
+| Qwen3-0.6B Q4_K_M | 0/6 | 4/8 | 2/10 | 6/24 |
 | Qwen3-1.7B IQ1_S | 2/6 | 1/8 | 0/10 | 3/24 |
 
-<sub>Scored with the widened h2 patterns described in
-[`guards.md`](guards.md) — one point higher per row than first published, same
-outputs, same order.</sub>
+<sub>Scored with the corrected h2 patterns described in
+[`guards.md`](guards.md) — a point higher than first published for every row but
+Qwen3-0.6B, which is unchanged. Same outputs, same order.</sub>
 
 The failure modes matter more than the totals:
 
@@ -74,7 +74,7 @@ That result was re-run properly — one shared system prompt, unchanged user
 prompts, saved outputs, and control probes whose answers *are* present — and it
 half survives. The refusal trade is avoidable: a guard that also says "if the
 answer is present, answer it" lifts Q2_K_XL from 15/24 to **21/24** with no
-control loss, and lifts the 0.6B from 7/24 to 16/24. What does not change is the
+control loss, and lifts the 0.6B from 6/24 to 15/24. What does not change is the
 conclusion for this file: guarded, the low quant still turns "Kevin is out until
 the 14th" into a task, and it is the build most easily confused by a richer
 prompt — adding a worked example *lowers* its score to 19/24 and leaks the

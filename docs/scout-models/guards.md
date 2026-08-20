@@ -37,7 +37,7 @@ Faithfulness (`/24`) under three guard placements. Speed is decode t/s from
 | granite-4.1-3b Q2_K_XL | 13.0 | 15 | **21** | 19 | 19 |
 | Qwen3.5-2B Q4_K_XL | 14.9 | 16 | 13 | 17 | 19 |
 | Qwen3-1.7B Q4_K_M | 19.1 | 16 | 16 | 19 | **22** |
-| Qwen3-0.6B Q4_K_M | 49.8 | 7 | 16 | 17 | **24** |
+| Qwen3-0.6B Q4_K_M | 49.8 | 6 | 15 | 17 | **23** |
 
 Controls (`/10`), same runs — this is the column that says whether a score is
 real:
@@ -56,6 +56,9 @@ real:
 went from inventing `TLS 1.2 and TLS 1.3` on the absent-fact probe to refusing
 it correctly, and its summary score on the *task* suite went 2/7 → 7/7: unguarded
 it blamed a customer-side change the ticket explicitly denies, guarded it stopped.
+It does not get all the way there — its guarded summary still flattens the
+customer's "we deployed nothing today" into a statement of fact rather than a
+claim, which is the one point it drops on `h2`.
 No model lost control points to the shared rules — the earlier "guards only
 install a refusal" result did not reproduce.
 
@@ -115,7 +118,7 @@ regression (21/23 either way). If a scout call is latency-bound, that is a
 defensible choice in a way it was not before; the two points it still drops are
 both on summary attribution, not on extraction.
 
-**Do not read the 0.6B's 24/24 as competence.** Three probes is a small suite
+**Do not read the 0.6B's 23/24 as competence.** Three probes is a small suite
 and it is now tuned for them. The same model scores 17/23 on the task suite
 (guarded; 14/23 unguarded), writes a Python script that fails on the fixture, and
 drops an entire task in control `c2`. It stopped falling into these three traps.
@@ -147,7 +150,13 @@ Scoring the guarded runs surfaced two lexical gaps in `grade_h.py`'s
 contradiction check. It only accepted `customer says/claims/reports`, so
 "the customer, Bolt Industries, **reported**" scored as unattributed, and it only
 accepted "root cause not identified", so "root cause **still unidentified**"
-scored as dropped. Both patterns are widened. Every table in `report.md` and
+scored as dropped. Both patterns are widened.
+
+Widening the attribution pattern immediately introduced a false positive worth
+recording: it matched the ticket's own header, `Ticket #9102 (customer: Bolt
+Industries) states that…`, and handed Qwen3-0.6B a point for attribution it had
+not done — it wrote the customer's "we deployed nothing today" as plain fact.
+The pattern now refuses to cross a `:` or `)`. Only the 0.6B's rows moved. Every table in `report.md` and
 `alternates.md` has been rescored: most rows gain a point, granite-4.1-3b and
 granite-4.0-h-micro reach 24/24, and no ranking moved. The model outputs on disk
 are unchanged — only the scoring of them.
