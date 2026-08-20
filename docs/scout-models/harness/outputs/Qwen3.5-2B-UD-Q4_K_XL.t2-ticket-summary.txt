@@ -1,0 +1,2 @@
+[elapsed 8.5s, completion_tokens 86, prompt_tokens 223]
+The customer reports that webhook deliveries to their endpoint are failing since 06:30 UTC, with a sample delivery ID of dlv_9f3k2. Support identified the root cause as a TLS handshake timeout occurring after 10 seconds on all attempts to the customer endpoint. This issue affects all delivery attempts to the customer's endpoint, whereas no errors were observed on the egress proxy for other customers.

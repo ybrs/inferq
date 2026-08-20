@@ -1,0 +1,29 @@
+[elapsed 11.3s, completion_tokens 204, prompt_tokens 101]
+import sys
+import csv
+
+def main():
+    if len(sys.argv) != 2:
+        print("Usage: python script.py <csv_file_path>", file=sys.stderr)
+        return 1
+
+    csv_file = sys.argv[1]
+    try:
+        with open(csv_file, 'r') as f:
+            reader = csv.DictReader(f)
+            statuses = {}
+            for row in reader:
+                status = row.get('status')
+                if status:
+                    statuses[status] = statuses.get(status, 0) + 1
+            for status, count in sorted(statuses.items(), key=lambda x: -x[1]):
+                print(f"{status}: {count}")
+    except FileNotFoundError:
+        print(f"File {csv_file} not found.", file=sys.stderr)
+        return 1
+    except csv.Error as e:
+        print(f"CSV error: {e}", file=sys.stderr)
+        return 1
+
+if __name__ == "__main__":
+    main()

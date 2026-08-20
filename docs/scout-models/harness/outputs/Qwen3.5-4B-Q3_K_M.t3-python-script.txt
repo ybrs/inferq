@@ -1,0 +1,26 @@
+[elapsed 28.3s, completion_tokens 219, prompt_tokens 101]
+import csv
+import sys
+
+if len(sys.argv) != 2:
+    print("Usage: python script.py <csv_file>", file=sys.stderr)
+    sys.exit(1)
+
+file_path = sys.argv[1]
+counts = {}
+
+try:
+    with open(file_path, newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames is None or 'status' not in reader.fieldnames:
+            print("Error: 'status' column not found", file=sys.stderr)
+            sys.exit(1)
+        for row in reader:
+            status = row['status']
+            counts[status] = counts.get(status, 0) + 1
+except FileNotFoundError:
+    print(f"Error: File '{file_path}' not found", file=sys.stderr)
+    sys.exit(1)
+
+for status, count in sorted(counts.items(), key=lambda x: x[1], reverse=True):
+    print(f"{status}: {count}")

@@ -1,0 +1,6 @@
+You are a task organizer. Extract action items from the message below into JSON. Output ONLY a JSON array, no prose, no markdown fences. Each item: {"title": string, "assignee": string or null, "due": string or null, "priority": "low"|"medium"|"high"}.
+
+Message:
+"Hey team — before Friday's release we absolutely must fix the login redirect loop (Sarah, this is yours). Also someone should update the changelog, no rush. Dan: please rotate the staging DB credentials by Wednesday, security flagged it as high risk. And at some point we want to look into dark mode, but that's for later."
+
+JSON:

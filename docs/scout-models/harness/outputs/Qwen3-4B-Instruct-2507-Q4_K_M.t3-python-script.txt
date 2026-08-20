@@ -1,0 +1,35 @@
+[elapsed 28.2s, completion_tokens 227, prompt_tokens 97]
+```python
+import sys
+import csv
+
+def main():
+    if len(sys.argv) != 2:
+        sys.exit(1)
+    
+    file_path = sys.argv[1]
+    
+    try:
+        with open(file_path, 'r', newline='', encoding='utf-8') as file:
+            reader = csv.DictReader(file)
+            status_count = {}
+            
+            for row in reader:
+                if 'status' not in row:
+                    sys.stderr.write("Error: missing 'status' column\n")
+                    sys.exit(1)
+                status = row['status']
+                status_count[status] = status_count.get(status, 0) + 1
+            
+            # Sort by count descending and print
+            sorted_status_count = sorted(status_count.items(), key=lambda x: x[1], reverse=True)
+            for status, count in sorted_status_count:
+                print(f"{status}: {count}")
+                
+    except FileNotFoundError:
+        sys.stderr.write(f"Error: file '{file_path}' not found\n")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
+```

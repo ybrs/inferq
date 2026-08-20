@@ -1,0 +1,4 @@
+[elapsed 6.2s, completion_tokens 97, prompt_tokens 200]
+- Customer: Bolt Industries reported that their API started returning 500s at 10:00 UTC, and they deployed nothing today.  
+- Support noted that the deployment log shows release v4.812 was rolled out at 09:58 UTC, and the error rate is 4% for POST /v2/invoices.  
+- The customer claims the issue started after deployment, but support does not confirm a root cause yet.

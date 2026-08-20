@@ -1,0 +1,9 @@
+Summarize the ticket below in at most 3 sentences for an engineer. Attribute claims to whoever made them. Do not resolve contradictions you cannot verify from the ticket, and do not state a root cause unless the ticket states one.
+
+Ticket #9102 (customer: Bolt Industries)
+- 11:02 customer: "Your API started returning 500s at 10:00 UTC. We deployed nothing today."
+- 11:15 support: internal note — our deploy log shows release v4.812 rolled out at 09:58 UTC.
+- 11:20 customer: "Our staging environment on the same API version works fine."
+- 11:31 support: internal note — error rate is 4% overall, limited to POST /v2/invoices; other endpoints normal. Root cause not yet identified.
+
+Summary:

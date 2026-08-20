@@ -1,0 +1,2 @@
+[elapsed 2.5s, completion_tokens 5, prompt_tokens 205]
+NOT IN TICKET

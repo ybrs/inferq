@@ -1,0 +1,2 @@
+[elapsed 13.8s, completion_tokens 69, prompt_tokens 223]
+Webhook deliveries to https://hooks.acme.example/orders are failing with a 100% failure rate since 06:30 UTC. Internal logs indicate a TLS handshake timeout after 10 seconds on all attempts, with retries exhausted after 5 attempts. No errors were observed on the egress proxy for other customers.

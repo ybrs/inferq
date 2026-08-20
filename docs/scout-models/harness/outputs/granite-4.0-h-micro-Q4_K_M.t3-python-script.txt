@@ -1,0 +1,33 @@
+[elapsed 23.6s, completion_tokens 227, prompt_tokens 119]
+import sys
+import csv
+from collections import Counter
+
+def main():
+    if len(sys.argv) != 2:
+        sys.stderr.write('Usage: python script.py <csv_file_path>\n')
+        sys.exit(1)
+
+    csv_file_path = sys.argv[1]
+    status_counter = Counter()
+
+    try:
+        with open(csv_file_path, newline='') as csvfile:
+            reader = csv.DictReader(csvfile)
+            if 'status' not in reader.fieldnames:
+                sys.stderr.write('Error: "status" column not found in CSV file.\n')
+                sys.exit(1)
+
+            for row in reader:
+                status = row['status']
+                status_counter[status] += 1
+
+        sorted_status_counter = sorted(status_counter.items(), key=lambda x: x[1], reverse=True)
+        for status, count in sorted_status_counter:
+            print(f'{status}: {count}')
+    except FileNotFoundError:
+        sys.stderr.write(f'Error: File not found: {csv_file_path}\n')
+        sys.exit(1)
+
+if __name__ == '__main__':
+    main()

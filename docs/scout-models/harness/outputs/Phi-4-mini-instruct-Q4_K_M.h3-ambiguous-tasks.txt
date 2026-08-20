@@ -1,0 +1,5 @@
+[elapsed 16.2s, completion_tokens 130, prompt_tokens 140]
+[{"title": "Fix invoice export", "assignee": "null", "due": "null", "blocked_by": "legal sign off on data retention question"},
+ {"title": "Update Postgres version", "assignee": "null", "due": "null", "blocked_by": "null"},
+ {"title": "Take migration script", "assignee": "Emily", "due": "after invoice export is fixed", "blocked_by": "null"},
+ {"title": "Kevin out until the 14th", "assignee": "null", "due": "null", "blocked_by": "null"}]

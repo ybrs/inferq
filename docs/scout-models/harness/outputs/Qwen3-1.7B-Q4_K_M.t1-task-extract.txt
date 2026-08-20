@@ -1,0 +1,7 @@
+[elapsed 6.8s, completion_tokens 113, prompt_tokens 151]
+[
+  {"title": "Fix login redirect loop", "assignee": "Sarah", "due": "Friday", "priority": "high"},
+  {"title": "Update changelog", "assignee": null, "due": null, "priority": "low"},
+  {"title": "Rotate staging DB credentials", "assignee": "Dan", "due": "Wednesday", "priority": "high"},
+  {"title": "Explore dark mode", "assignee": null, "due": null, "priority": "low"}
+]

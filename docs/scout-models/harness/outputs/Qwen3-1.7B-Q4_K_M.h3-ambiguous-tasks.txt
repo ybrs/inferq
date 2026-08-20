@@ -1,0 +1,6 @@
+[elapsed 5.4s, completion_tokens 86, prompt_tokens 152]
+[
+  {"title": "Fix invoice export", "assignee": "Emily", "due": null, "blocked_by": null},
+  {"title": "Bump Postgres version", "assignee": null, "due": null, "blocked_by": null},
+  {"title": "Wait for legal sign-off", "assignee": null, "due": null, "blocked_by": null}
+]

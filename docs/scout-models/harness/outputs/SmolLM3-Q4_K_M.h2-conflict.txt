@@ -1,0 +1,3 @@
+[elapsed 8.7s, completion_tokens 75, prompt_tokens 238]
+
+Customer Bolt Industries reported API failures starting at 10:00 UTC, despite no recent deployments. Support confirmed a release v4.812 was deployed at 09:58 UTC, but the customer's staging environment on the same version worked fine. The error rate is 4% overall, limited to POST /v2/invoices, with no root cause yet identified.

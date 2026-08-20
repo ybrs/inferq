@@ -1,0 +1,2 @@
+[elapsed 7.8s, completion_tokens 86, prompt_tokens 206]
+Bolt Industries reported a 500 error rate starting at 10:00 UTC after no deployments were made, while their staging environment remains unaffected. Support confirmed that the release v4.812 was deployed at 09:58 UTC, and the issue is currently limited to the POST /v2/invoices endpoint. The ticket explicitly states that the root cause has not yet been identified.

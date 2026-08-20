@@ -1,0 +1,2 @@
+[elapsed 13.1s, completion_tokens 98, prompt_tokens 220]
+The customer from Acme Corp is experiencing webhook delivery failures to https://hooks.acme.example/orders since 06:30 UTC, with 100% failure according to the dashboard. The support team has identified that the TLS handshake times out after 10 seconds on all attempts to the customer's endpoint, with retries exhausted after 5 attempts, and no errors were observed on the support's egress proxy for other customers. The cause of the issue is unknown based on the provided information.

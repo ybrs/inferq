@@ -1,0 +1,2 @@
+[elapsed 12.7s, completion_tokens 86, prompt_tokens 193]
+Acme Corp's webhook deliveries to https://hooks.acme.example/orders have been failing since 06:30 UTC, with a 100% failure rate reported on the dashboard. A sample delivery ID provided (dlv_9f3k2) shows a TLS handshake timeout after 10 seconds on all attempts, with retries exhausted after 5 attempts. No errors were detected on the egress proxy for other customers.

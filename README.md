@@ -31,6 +31,7 @@ Performance is not the primary objective in Phase 1. Correctness and observabili
 * `docs/speculative-decoding.md` – Qwen3.6 auxiliary MTP execution, correctness gates, benchmark results, and the optimization path required for a speedup.
 * `docs/openai-server.md` – the OpenAI-compatible HTTP server: supported request surface, the single inference slot behind it, and authentication.
 * `docs/prompt-cache.md` – persistent prefix caching: what a cached state contains, how boundaries are chosen, and what makes a restored prefix exact.
+* `docs/scout-models/` – evaluation of small CPU models for a scout role beside the main engine: measured speed, a faithfulness suite that catches fabricated task assignees, and the benchmark harness.
 * `qwen-cpu-inference-target-architecture.md` – Long-term target architecture, design principles, language split Rust/Python/C++, and the 14-phase roadmap toward workload-aware specialization.
 
 ## Development focus
