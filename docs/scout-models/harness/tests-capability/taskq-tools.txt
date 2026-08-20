@@ -1,0 +1,46 @@
+add_comment — Leave a comment on a task. This is how progress and findings are recorded.
+agent_connections — The connection log: every attempt to connect, accepted or refused.
+assign_task — Say who a task is for; omit assignee to clear it. Not the same as claiming it.
+claim_task — Take a task so another agent will not pick it up, moving it to in_progress.
+create_document — Create an adr/prd/technical_design/proposal from a body or a repo file.
+create_project — Create a project. repo_root is the checkout its documents live in.
+create_pull_request — Push the current branch and open a pull request, returning its URL.
+create_task — Create a task, optionally as a subtask of parent.
+delete_comment — Delete one comment. Nothing cascades; restore_comment brings it back.
+delete_document — Delete one document. Nothing cascades; restore_document brings it back.
+delete_task — Delete a task together with its subtasks and their comments.
+get_document — Show one document with its body (or repo file reference) and relations.
+get_handoff — A project's current handoff, and the tasks it points at.
+get_project — Show one project (by name or id) and its top-level tasks.
+get_task — Show one task with its subtasks, relations, comments, and recent events.
+git_push — Push the project's current branch, setting upstream on first push.
+git_push_all — Push every branch of the project's repo to its remote.
+git_status — The git state of every repo in a project: branch, tracking, working-tree changes.
+link_nodes — Record a relation: blocked_by, requires, documented_by, or references.
+list_agents — List the tq agents that have ever connected, most recently seen first.
+list_comments — List a task's comments, oldest first.
+list_deleted — List what has been deleted: the trash, most recently deleted first.
+list_documents — List documents, optionally by project or type.
+list_events — Read the append-only event history, newest first.
+list_projects — List every project with its task count.
+list_tasks — List tasks as a flat array; nest them yourself via parent_id. Filters by status, parent, assignee.
+pr_status — The pull request for the current branch: state, review decision, merge status, and URL.
+project_status — A project's status: what is in progress, recently closed, and next up.
+release_task — Release a task's claim, leaving its status alone.
+restart_agent — Restart one connected agent, named by id or by unambiguous name.
+restart_server — Restart the taskq frontends so code changes on the host take effect.
+restore_comment — Restore a deleted comment.
+restore_document — Restore a deleted document.
+restore_task — Restore a deleted task, undoing exactly what its own delete hid.
+search_taskq — Find tasks, comments, and documents by describing them. Use this when the user refers to work by what it is about instead of by id.
+server_status — Show the running taskq serve: pids, port, uptime and restart count.
+set_handoff — Replace a project's handoff with where things stand right now.
+set_task_status — Move a task to todo/in_progress/blocked/done/cancelled. Takes an optional comment explaining the transition.
+set_task_summary — Set a task's short summary; omit summary to clear it.
+task_queue — What to pick up next: unclaimed todo tasks, highest priority first.
+task_summaries — Open tasks with their summaries, highest priority first.
+task_to_issue — Open a GitHub issue for a task and record the issue number+URL on it.
+unlink_nodes — Remove a relation previously recorded by link_nodes.
+update_document — Update a document. Setting body clears file_path and vice versa.
+update_project — Update a project's description, repo_root or parent.
+update_task — Update a task's fields (title, description, priority, severity, branch, parent, project). Omitted fields are left alone.
