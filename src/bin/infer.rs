@@ -72,6 +72,12 @@ fn main() -> Result<()> {
             },
             stop_tokens: args.stop_token,
             add_special_tokens: false,
+            speculative_mtp_draft_tokens: 0,
+            speculative_mtp_min_margin: None,
+            speculative_ngram_draft_tokens: 0,
+            ngram_min_match: qwen_engine::runtime::DEFAULT_NGRAM_MIN_MATCH,
+            thinking_budget: None,
+            ..GenerationOptions::default()
         },
     )?;
     print!("{}", result.text);

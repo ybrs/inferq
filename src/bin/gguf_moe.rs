@@ -39,6 +39,10 @@ struct TimingReport {
     top_k_seconds: f64,
     expert_load_seconds: f64,
     expert_compute_seconds: f64,
+    expert_gate_up_seconds: f64,
+    expert_activation_seconds: f64,
+    expert_down_seconds: f64,
+    expert_accumulation_seconds: f64,
     shared_expert_seconds: f64,
 }
 
@@ -115,6 +119,11 @@ fn main() -> Result<()> {
                 top_k_seconds: total_timings.top_k.as_secs_f64() * scale,
                 expert_load_seconds: total_timings.expert_load.as_secs_f64() * scale,
                 expert_compute_seconds: total_timings.expert_compute.as_secs_f64() * scale,
+                expert_gate_up_seconds: total_timings.expert_gate_up.as_secs_f64() * scale,
+                expert_activation_seconds: total_timings.expert_activation.as_secs_f64() * scale,
+                expert_down_seconds: total_timings.expert_down.as_secs_f64() * scale,
+                expert_accumulation_seconds: total_timings.expert_accumulation.as_secs_f64()
+                    * scale,
                 shared_expert_seconds: total_timings.shared_expert.as_secs_f64() * scale,
             },
             output_l2_norm: values

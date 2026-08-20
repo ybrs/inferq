@@ -1,0 +1,33 @@
+Answer in three parts, in order, and keep every part brief.
+
+Part 1. Rewrite this Rust function so that every failure path carries error
+context. Keep the signature returning `Result<(u32, u32, u32), String>` and
+build the messages with `format!`; do not introduce any new types.
+
+```rust
+/// Parses a semver string into (major, minor, patch) tuple.
+pub fn parse_semver(s: &str) -> Result<(u32, u32, u32), String> {
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() != 3 {
+        return Err("invalid semver string".to_string());
+    }
+    let major = parts[0].parse::<u32>().map_err(|_| "invalid major version".to_string())?;
+    let minor = parts[1].parse::<u32>().map_err(|_| "invalid minor version".to_string())?;
+    let patch = parts[2].parse::<u32>().map_err(|_| "invalid patch version".to_string())?;
+    Ok((major, minor, patch))
+}
+```
+
+Part 2. In exactly three sentences of prose, explain why the added error
+context improves debuggability.
+
+Part 3. Write 10 unit tests, one per failure path, every one of them with the
+same structure:
+
+```rust
+#[test]
+fn rejects_NAME() {
+    let error = parse_semver("INPUT").unwrap_err();
+    assert!(error.contains("SUBSTRING"));
+}
+```

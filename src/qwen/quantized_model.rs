@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use candle_core::{DType, Device, Tensor};
 use serde::Serialize;
 
@@ -11,8 +11,9 @@ use crate::{
 };
 
 use super::{
-    QuantizedAttentionState, QuantizedDeltaState, QuantizedFullLayer, QuantizedLayerTimings,
-    QuantizedLinearLayer, quantized_layer::gguf_rms_norm,
+    QuantizedAttentionImage, QuantizedAttentionState, QuantizedDeltaCheckpoint,
+    QuantizedDeltaSnapshots, QuantizedDeltaState, QuantizedFullLayer, QuantizedLayerTimings,
+    QuantizedLinearLayer, QuantizedMtpHead, quantized_layer::gguf_rms_norm,
 };
 
 enum DecoderLayer<'a> {
@@ -27,9 +28,278 @@ enum DecoderState {
 }
 
 #[derive(Debug, Clone)]
+enum DecoderCheckpoint {
+    Full { position: usize },
+    Linear(QuantizedDeltaCheckpoint),
+}
+
+#[derive(Debug, Clone)]
+pub struct QuantizedModelCheckpoint {
+    layers: Vec<DecoderCheckpoint>,
+    position: usize,
+}
+
+/// One layer's complete state, KV rows included.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LayerStateImage {
+    Full(QuantizedAttentionImage),
+    Linear(QuantizedDeltaCheckpoint),
+}
+
+impl LayerStateImage {
+    pub fn bytes(&self) -> usize {
+        match self {
+            Self::Full(image) => image.bytes(),
+            Self::Linear(image) => image.bytes(),
+        }
+    }
+}
+
+/// A self-contained copy of a sequence's model state.
+///
+/// [`QuantizedModelCheckpoint`] exists to roll a live state back and therefore
+/// stores only what truncation cannot recover. An image is the whole thing, so
+/// it can be written to disk and restored into a state that never saw the
+/// tokens that produced it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuantizedStateImage {
+    pub layers: Vec<LayerStateImage>,
+    pub position: usize,
+}
+
+impl QuantizedStateImage {
+    pub fn bytes(&self) -> usize {
+        self.layers.iter().map(LayerStateImage::bytes).sum()
+    }
+
+    /// Check the image against itself: every full-attention layer must hold
+    /// exactly the sequence position the image claims.
+    pub fn validate(&self) -> Result<()> {
+        for (index, layer) in self.layers.iter().enumerate() {
+            if let LayerStateImage::Full(image) = layer {
+                image.validate()?;
+                ensure!(
+                    image.positions == self.position,
+                    "layer {index} holds {} positions but the image is at position {}",
+                    image.positions,
+                    self.position
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Reusable per-row rollback snapshots for one multi-row verification pass.
+///
+/// Full-attention layers need no storage: their KV cache is append-only and
+/// rolls back with `truncate`. Only the linear layers' recurrent state is
+/// copied, one slot per row boundary the pass crosses.
+#[derive(Debug, Clone, Default)]
+pub struct QuantizedStateSnapshots {
+    linear_layers: Vec<QuantizedDeltaSnapshots>,
+    /// `state.position` immediately before the pass began.
+    position: usize,
+    rows: usize,
+    nontemporal: bool,
+}
+
+impl QuantizedStateSnapshots {
+    /// Prepare the arena for a pass of `rows` rows starting at `state`.
+    ///
+    /// Buffers are allocated on the first pass that needs them and reused
+    /// afterwards; a later pass with fewer rows keeps the larger allocation.
+    pub fn begin_pass(&mut self, state: &QuantizedModelState, rows: usize) {
+        let linear = state
+            .layers
+            .iter()
+            .filter(|layer| matches!(layer, DecoderState::Linear(_)))
+            .count();
+        if self.linear_layers.len() != linear {
+            self.linear_layers
+                .resize_with(linear, QuantizedDeltaSnapshots::default);
+        }
+        let mut index = 0;
+        for layer in &state.layers {
+            if let DecoderState::Linear(delta) = layer {
+                self.linear_layers[index].reserve(rows, delta.conv_len(), delta.recurrent_len());
+                index += 1;
+            }
+        }
+        self.position = state.position;
+        self.rows = rows;
+    }
+
+    /// Use streaming stores for the snapshot copy where the CPU supports them.
+    pub fn set_nontemporal(&mut self, nontemporal: bool) {
+        self.nontemporal = nontemporal;
+    }
+
+    pub fn nontemporal(&self) -> bool {
+        self.nontemporal
+    }
+
+    pub fn position(&self) -> usize {
+        self.position
+    }
+
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// Bytes copied per stored row across every linear layer.
+    pub fn bytes_per_row(&self) -> usize {
+        self.linear_layers
+            .iter()
+            .map(QuantizedDeltaSnapshots::bytes_per_row)
+            .sum()
+    }
+
+    fn layer_mut(&mut self, linear_index: usize) -> Option<&mut QuantizedDeltaSnapshots> {
+        self.linear_layers.get_mut(linear_index)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct QuantizedModelState {
     layers: Vec<DecoderState>,
     pub position: usize,
+}
+
+impl QuantizedModelState {
+    /// Roll the state back to the boundary after `committed_rows` rows of the
+    /// pass that produced `snapshots`.
+    ///
+    /// This costs one state copy per linear layer plus a KV-cache truncation
+    /// per full-attention layer; it never replays a forward pass. Passing
+    /// `committed_rows == snapshots.rows()` is rejected because a fully
+    /// accepted pass has no snapshot to roll back to and needs none.
+    pub fn rollback(
+        &mut self,
+        snapshots: &QuantizedStateSnapshots,
+        committed_rows: usize,
+    ) -> Result<()> {
+        ensure!(
+            committed_rows < snapshots.rows || snapshots.rows == 0,
+            "cannot roll back to {committed_rows} of {} committed rows",
+            snapshots.rows
+        );
+        let position = snapshots.position + committed_rows;
+        let mut linear = 0;
+        for (index, layer) in self.layers.iter_mut().enumerate() {
+            match layer {
+                DecoderState::Full(state) => state.truncate(position)?,
+                DecoderState::Linear(state) => {
+                    let saved = snapshots
+                        .linear_layers
+                        .get(linear)
+                        .with_context(|| format!("snapshot arena is missing layer {index}"))?;
+                    saved.restore_into(committed_rows, state)?;
+                    linear += 1;
+                }
+            }
+        }
+        self.position = position;
+        Ok(())
+    }
+
+    /// Copy the whole state, KV rows included, so it can outlive the session.
+    pub fn image(&self) -> QuantizedStateImage {
+        QuantizedStateImage {
+            layers: self
+                .layers
+                .iter()
+                .map(|layer| match layer {
+                    DecoderState::Full(state) => LayerStateImage::Full(state.image()),
+                    DecoderState::Linear(state) => LayerStateImage::Linear(state.image()),
+                })
+                .collect(),
+            position: self.position,
+        }
+    }
+
+    /// Replace this state with an image, which may have been produced by an
+    /// earlier process. The layer sequence and every tensor length must match
+    /// the loaded model exactly; nothing here is coerced.
+    pub fn restore_image(&mut self, image: &QuantizedStateImage) -> Result<()> {
+        ensure!(
+            self.layers.len() == image.layers.len(),
+            "state image has {} layers but the model has {}",
+            image.layers.len(),
+            self.layers.len()
+        );
+        image.validate()?;
+        for (index, (state, saved)) in self.layers.iter_mut().zip(&image.layers).enumerate() {
+            match (state, saved) {
+                (DecoderState::Full(state), LayerStateImage::Full(image)) => {
+                    state.restore_image(image)?
+                }
+                (DecoderState::Linear(state), LayerStateImage::Linear(image)) => {
+                    state.restore(image)?
+                }
+                _ => anyhow::bail!("state image layer {index} is the wrong layer type"),
+            }
+        }
+        self.position = image.position;
+        Ok(())
+    }
+
+    pub fn checkpoint(&self) -> QuantizedModelCheckpoint {
+        QuantizedModelCheckpoint {
+            layers: self
+                .layers
+                .iter()
+                .map(|layer| match layer {
+                    DecoderState::Full(state) => DecoderCheckpoint::Full {
+                        position: state.positions,
+                    },
+                    DecoderState::Linear(state) => DecoderCheckpoint::Linear(state.checkpoint()),
+                })
+                .collect(),
+            position: self.position,
+        }
+    }
+
+    pub fn restore(&mut self, checkpoint: &QuantizedModelCheckpoint) -> Result<()> {
+        ensure!(
+            self.layers.len() == checkpoint.layers.len(),
+            "model checkpoint belongs to a different model"
+        );
+        for (index, (state, saved)) in self.layers.iter_mut().zip(&checkpoint.layers).enumerate() {
+            match (state, saved) {
+                (DecoderState::Full(state), DecoderCheckpoint::Full { position }) => {
+                    state.truncate(*position)?;
+                }
+                (DecoderState::Linear(state), DecoderCheckpoint::Linear(saved)) => {
+                    state.restore(saved)?;
+                }
+                _ => anyhow::bail!("checkpoint state type does not match layer {index}"),
+            }
+        }
+        self.position = checkpoint.position;
+        Ok(())
+    }
+}
+
+/// Which rows of a pass get logits.
+///
+/// The LM head is the most expensive per-row operation in the model -- a
+/// 248,320-wide vocabulary against a 397.9 MiB Q6_K matrix -- and a prefill
+/// pass reads only the last row of it, because that is the one it samples
+/// from. Rows are independent, so computing fewer changes no value that is
+/// read; verification is the case that genuinely needs all of them, since it
+/// checks a drafted token against every position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogitRows {
+    #[default]
+    All,
+    Last,
+}
+
+pub struct QuantizedForwardOutput {
+    pub logits: Tensor,
+    pub normalized_hidden: Tensor,
+    pub timings: QuantizedForwardTimings,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -90,10 +360,16 @@ impl QuantizedForwardTimings {
                 total.deltanet_gated_norm_seconds += layer.delta.gated_norm.as_secs_f64();
                 total.deltanet_output_projection_seconds +=
                     layer.delta.output_projection.as_secs_f64();
+                total.deltanet_snapshot_seconds += layer.delta.snapshot.as_secs_f64();
                 total.moe_router_seconds += layer.moe.router.as_secs_f64();
                 total.moe_top_k_seconds += layer.moe.top_k.as_secs_f64();
                 total.moe_expert_lookup_seconds += layer.moe.expert_load.as_secs_f64();
                 total.moe_expert_compute_seconds += layer.moe.expert_compute.as_secs_f64();
+                total.moe_expert_gate_up_seconds += layer.moe.expert_gate_up.as_secs_f64();
+                total.moe_expert_activation_seconds += layer.moe.expert_activation.as_secs_f64();
+                total.moe_expert_down_seconds += layer.moe.expert_down.as_secs_f64();
+                total.moe_expert_accumulation_seconds +=
+                    layer.moe.expert_accumulation.as_secs_f64();
                 total.moe_shared_expert_seconds += layer.moe.shared_expert.as_secs_f64();
                 total
             },
@@ -157,10 +433,15 @@ pub struct QuantizedOperationTimingReport {
     pub deltanet_recurrence_seconds: f64,
     pub deltanet_gated_norm_seconds: f64,
     pub deltanet_output_projection_seconds: f64,
+    pub deltanet_snapshot_seconds: f64,
     pub moe_router_seconds: f64,
     pub moe_top_k_seconds: f64,
     pub moe_expert_lookup_seconds: f64,
     pub moe_expert_compute_seconds: f64,
+    pub moe_expert_gate_up_seconds: f64,
+    pub moe_expert_activation_seconds: f64,
+    pub moe_expert_down_seconds: f64,
+    pub moe_expert_accumulation_seconds: f64,
     pub moe_shared_expert_seconds: f64,
 }
 
@@ -174,6 +455,11 @@ pub struct QuantizedLayerTimingReport {
     pub deltanet_seconds: f64,
     pub moe_seconds: f64,
     pub unattributed_seconds: f64,
+    pub moe_token_expert_assignments: usize,
+    pub moe_unique_experts_selected: usize,
+    pub moe_duplicate_assignment_rate: f64,
+    pub moe_average_rows_per_selected_expert: f64,
+    pub moe_max_rows_per_expert: usize,
 }
 
 impl From<&QuantizedLayerTimings> for QuantizedLayerTimingReport {
@@ -189,6 +475,14 @@ impl From<&QuantizedLayerTimings> for QuantizedLayerTimingReport {
             deltanet_seconds: timings.delta.wall.as_secs_f64(),
             moe_seconds: timings.moe.wall.as_secs_f64(),
             unattributed_seconds: timings.wall.saturating_sub(accounted).as_secs_f64(),
+            moe_token_expert_assignments: timings.moe.routing.token_expert_assignments,
+            moe_unique_experts_selected: timings.moe.routing.unique_experts_selected,
+            moe_duplicate_assignment_rate: timings.moe.routing.duplicate_assignment_rate(),
+            moe_average_rows_per_selected_expert: timings
+                .moe
+                .routing
+                .average_rows_per_selected_expert(),
+            moe_max_rows_per_expert: timings.moe.routing.max_rows_per_expert,
         }
     }
 }
@@ -200,6 +494,7 @@ pub struct QuantizedModel<'a> {
     layers: Vec<DecoderLayer<'a>>,
     final_norm: Tensor,
     lm_head: QuantizedMatrix,
+    mtp: Option<QuantizedMtpHead<'a>>,
 }
 
 impl std::fmt::Debug for QuantizedModel<'_> {
@@ -247,6 +542,16 @@ impl<'a> QuantizedModel<'a> {
             "invalid LM head shape {:?}",
             lm_head.shape()
         );
+        let mtp = if config.mtp_num_hidden_layers == 1 {
+            Some(QuantizedMtpHead::load(
+                checkpoint,
+                &config,
+                embedding.clone(),
+                lm_head.clone(),
+            )?)
+        } else {
+            None
+        };
         Ok(Self {
             checkpoint,
             config,
@@ -254,6 +559,7 @@ impl<'a> QuantizedModel<'a> {
             layers,
             final_norm,
             lm_head,
+            mtp,
         })
     }
 
@@ -263,6 +569,10 @@ impl<'a> QuantizedModel<'a> {
 
     pub fn expert_cache_stats(&self) -> Result<ExpertCacheStats> {
         self.checkpoint.expert_cache_stats()
+    }
+
+    pub fn mtp(&self) -> Option<&QuantizedMtpHead<'a>> {
+        self.mtp.as_ref()
     }
 
     pub fn new_state(&self) -> QuantizedModelState {
@@ -285,15 +595,70 @@ impl<'a> QuantizedModel<'a> {
         token_ids: &[u32],
         state: &mut QuantizedModelState,
     ) -> Result<(Tensor, QuantizedForwardTimings)> {
-        self.forward_with_trace(token_ids, state, None)
+        let output = self.forward_detailed_with_trace(token_ids, state, None)?;
+        Ok((output.logits, output.timings))
     }
 
     pub fn forward_with_trace(
         &self,
         token_ids: &[u32],
         state: &mut QuantizedModelState,
-        mut trace: Option<&mut dyn RoutingTrace>,
+        trace: Option<&mut dyn RoutingTrace>,
     ) -> Result<(Tensor, QuantizedForwardTimings)> {
+        let output = self.forward_detailed_with_trace(token_ids, state, trace)?;
+        Ok((output.logits, output.timings))
+    }
+
+    pub fn forward_detailed(
+        &self,
+        token_ids: &[u32],
+        state: &mut QuantizedModelState,
+    ) -> Result<QuantizedForwardOutput> {
+        self.forward_detailed_with_trace(token_ids, state, None)
+    }
+
+    /// Run a multi-row pass that records a rollback snapshot at every row
+    /// boundary. Rolling back to any of them afterwards costs a state copy
+    /// rather than a replayed forward pass.
+    pub fn forward_detailed_with_snapshots(
+        &self,
+        token_ids: &[u32],
+        state: &mut QuantizedModelState,
+        snapshots: &mut QuantizedStateSnapshots,
+    ) -> Result<QuantizedForwardOutput> {
+        snapshots.begin_pass(state, token_ids.len());
+        self.forward_inner(token_ids, state, None, Some(snapshots), LogitRows::All)
+    }
+
+    pub fn forward_detailed_with_trace(
+        &self,
+        token_ids: &[u32],
+        state: &mut QuantizedModelState,
+        trace: Option<&mut dyn RoutingTrace>,
+    ) -> Result<QuantizedForwardOutput> {
+        self.forward_inner(token_ids, state, trace, None, LogitRows::All)
+    }
+
+    /// As [`Self::forward_detailed_with_trace`], but computing logits only for
+    /// the rows the caller will read. See [`LogitRows`].
+    pub fn forward_detailed_logits(
+        &self,
+        token_ids: &[u32],
+        state: &mut QuantizedModelState,
+        trace: Option<&mut dyn RoutingTrace>,
+        logits: LogitRows,
+    ) -> Result<QuantizedForwardOutput> {
+        self.forward_inner(token_ids, state, trace, None, logits)
+    }
+
+    fn forward_inner(
+        &self,
+        token_ids: &[u32],
+        state: &mut QuantizedModelState,
+        mut trace: Option<&mut dyn RoutingTrace>,
+        mut snapshots: Option<&mut QuantizedStateSnapshots>,
+        logit_rows: LogitRows,
+    ) -> Result<QuantizedForwardOutput> {
         ensure!(!token_ids.is_empty(), "forward requires at least one token");
         ensure!(
             state.layers.len() == self.layers.len(),
@@ -310,6 +675,7 @@ impl<'a> QuantizedModel<'a> {
         let mut hidden = self.embedding.forward(&ids)?.to_dtype(DType::F32)?;
         timings.embedding = embedding_started.elapsed();
         let position = state.position;
+        let mut linear_index = 0;
         for (index, (layer, layer_state)) in
             self.layers.iter().zip(state.layers.iter_mut()).enumerate()
         {
@@ -319,7 +685,16 @@ impl<'a> QuantizedModel<'a> {
                     layer.forward(&hidden, position, layer_state)?
                 }
                 (DecoderLayer::Linear(layer), DecoderState::Linear(layer_state)) => {
-                    layer.forward(&hidden, layer_state)?
+                    let sink = snapshots.as_deref_mut();
+                    let nontemporal = sink.as_ref().is_some_and(|sink| sink.nontemporal);
+                    let output = layer.forward_with_snapshots(
+                        &hidden,
+                        layer_state,
+                        sink.and_then(|sink| sink.layer_mut(linear_index)),
+                        nontemporal,
+                    )?;
+                    linear_index += 1;
+                    output
                 }
                 _ => anyhow::bail!("state type does not match layer {index}"),
             };
@@ -357,11 +732,23 @@ impl<'a> QuantizedModel<'a> {
         hidden = gguf_rms_norm(&hidden, &self.final_norm, self.config.rms_norm_eps)?;
         timings.final_norm = norm_started.elapsed();
         let lm_started = Instant::now();
-        let logits = self.lm_head.forward(&hidden)?;
+        // Only the rows that will be read. `hidden` is returned whole either
+        // way, so the MTP arm and the hidden-state carry are unaffected.
+        let logits = match logit_rows {
+            LogitRows::All => self.lm_head.forward(&hidden)?,
+            LogitRows::Last => {
+                self.lm_head
+                    .forward(&hidden.narrow(0, token_ids.len() - 1, 1)?)?
+            }
+        };
         timings.lm_head = lm_started.elapsed();
         state.position += token_ids.len();
         timings.wall = wall_started.elapsed();
-        Ok((logits, timings))
+        Ok(QuantizedForwardOutput {
+            logits,
+            normalized_hidden: hidden,
+            timings,
+        })
     }
 }
 
@@ -387,6 +774,10 @@ mod tests {
                 wall: Duration::from_millis(55),
                 expert_load: Duration::from_millis(3),
                 expert_compute: Duration::from_millis(40),
+                expert_gate_up: Duration::from_millis(17),
+                expert_activation: Duration::from_millis(2),
+                expert_down: Duration::from_millis(18),
+                expert_accumulation: Duration::from_millis(3),
                 ..Default::default()
             },
             ..Default::default()
@@ -409,6 +800,16 @@ mod tests {
         assert_eq!(report.stages.moe_seconds, 0.055);
         assert_eq!(report.nested_operations.moe_expert_lookup_seconds, 0.003);
         assert_eq!(report.nested_operations.moe_expert_compute_seconds, 0.040);
+        assert_eq!(report.nested_operations.moe_expert_gate_up_seconds, 0.017);
+        assert_eq!(
+            report.nested_operations.moe_expert_activation_seconds,
+            0.002
+        );
+        assert_eq!(report.nested_operations.moe_expert_down_seconds, 0.018);
+        assert_eq!(
+            report.nested_operations.moe_expert_accumulation_seconds,
+            0.003
+        );
         assert_eq!(report.nested_operations.deltanet_recurrence_seconds, 0.005);
     }
 

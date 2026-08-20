@@ -50,6 +50,13 @@ performance decisions.
 - `src/config.rs`: checkpoint configuration and invariant validation.
 - `src/loader.rs`: checkpoint discovery, tensor enumeration, and shape checks.
 - `src/runtime.rs`: prefill/decode session state, generation, timings, and traces.
+- `src/server/`: the OpenAI-compatible HTTP surface and the single-slot engine
+  thread that owns the runtime. Model execution stays out of it.
+- `src/prompt_cache/`: persistent prefix state, its on-disk format, and the
+  boundary policy. Reuse must never change what a request decodes.
+- `src/tool_calls.rs`: the checkpoint's tool-call syntax, parsed and rendered.
+  Prompt rendering lives in `src/tokenizer.rs` and is tested against the
+  checkpoint's own `chat_template`, not against what looks reasonable.
 - `src/bin/`: thin command-line adapters; business logic stays in the library.
 - `tests/`: integration and regression tests.
 - `python/`: reference comparison and trace-analysis utilities only.
@@ -61,12 +68,20 @@ Run `./scripts/validate.sh` before handing off a change. During iteration, run t
 narrowest relevant test first. The canonical sequence is:
 
 ```bash
+export CARGO_TARGET_DIR=target-native RUSTFLAGS='-C target-cpu=native'
 cargo fmt --check
 cargo check --all-targets
 cargo test --all-targets
 cargo clippy --all-targets -- -D warnings
 cargo build --release --bins
 ```
+
+Build for this host, not for baseline x86-64. The one-row and multi-row
+quantized kernels only reach the same summation order when FMA is available;
+without it a speculative run can commit a token target-only decoding would not
+have. Opening a checkpoint refuses outright on such a build rather than
+returning quietly wrong numbers, so a stock `cargo test` fails on any test that
+loads one.
 
 Tests requiring the full checkpoint or llama.cpp reference artifacts must be
 opt-in and skip with a clear message when their inputs are absent. Unit tests
@@ -76,8 +91,27 @@ must remain small and offline.
 
 - Do not commit model weights, generated logits, routing traces, benchmark
   output, or other large artifacts.
-- Do not add GPU, server, batching, custom SIMD, or broad architecture support
-  during Phase 1 unless the task explicitly changes scope.
+- Do not add GPU, batching, or broad architecture support unless the task
+  explicitly changes scope. An OpenAI-compatible server is in scope
+  (`src/server/`, `docs/openai-server.md`), but it stays a queue in front of
+  one sequence: no batching, no concurrent decoding, and no model execution
+  inside the server module.
+- Hand-written SIMD is in scope now that Phase 1 is behind us. Prefer the
+  shape that lets the compiler vectorize — independent lane accumulators over
+  `chunks_exact`, contiguous slices rather than indexed access — and reach for
+  `core::arch` intrinsics only when a measurement says the safe form left
+  something on the table. Either way the claim is the measurement, not the
+  instruction count: record the before and after on the same host.
+- Vectorizing a reduction reorders its summation, so it moves the last bits
+  and can move a token. That is allowed, but it is a numerical change and not
+  a free one: say so in the commit, and show that the paths which must agree
+  with each other still do — speculative decoding against plain decode above
+  all, since it is defined as producing the same tokens. What must never
+  change silently is the agreement between paths; the absolute output may.
+- Reusing cached state is an optimization, never a semantic change. A restored
+  prefix must decode exactly like the same prefix prefilled in place, and an
+  entry that cannot be proven to belong to the loaded checkpoint and the exact
+  token prefix must be rejected rather than adapted.
 - Benchmark results are meaningful only when the command, model revision,
   quantization/dtype, thread count, and host are recorded.
 - Update the execution-path documentation when model semantics, tensor names,

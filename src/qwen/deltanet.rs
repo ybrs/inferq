@@ -1,5 +1,6 @@
 use anyhow::{Result, ensure};
 use candle_core::{DType, Tensor};
+use rayon::prelude::*;
 
 use crate::{Checkpoint, Qwen3NextConfig};
 
@@ -53,7 +54,70 @@ fn l2_normalize_slice(x: &mut [f32]) {
     }
 }
 
+/// Fewest rows in a pass for the recurrence to be worth the thread pool.
+///
+/// The step runs once per row, so a pass of `n` rows wakes the pool `n` times
+/// per layer and the waking is paid per row, not per pass. What falls with the
+/// row count is the cost of each waking: consecutive rows call back into the
+/// pool immediately, so only the first finds the workers asleep. Measured on
+/// the qualified host — DeltaNet recurrence, milliseconds per token, over
+/// 96 tokens prefilled at each width:
+///
+/// | rows | 1 | 2 | 3 | 4 | 6 | 8 | 12 | 16 | 32 |
+/// | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+/// | calling thread | 19.93 | 8.15 | 6.95 | 6.65 | 6.13 | 5.99 | 5.71 | 5.67 | 5.37 |
+/// | thread pool | — | 11.77 | 8.01 | 6.15 | 5.53 | 4.97 | 4.13 | 3.96 | 3.36 |
+///
+/// Four is where it turns. That matters beyond prefill because it is also the
+/// width of a speculative verification pass: with an MTP draft accepted about
+/// four times in five, most verifications are two or three rows, and spreading
+/// those cost 4% of decode on the end-to-end agent turn — twice, before this
+/// threshold was measured rather than assumed.
+const HEAD_SPREAD_MIN_ROWS: usize = 4;
+
+/// Where one recurrence step's heads are computed.
+///
+/// Measured on the qualified host, DeltaNet recurrence over sixteen decode
+/// passes at 64 context: 0.126 s on the calling thread, 0.161 s through the
+/// pool. Over a 256-row prefill pass, per token: 5.16 ms on the calling
+/// thread, 2.79 ms through the pool. See `HEAD_SPREAD_MIN_ROWS` for where
+/// between those two the choice turns.
+///
+/// Which one runs cannot change a value — see `recurrent_delta_step` — so this
+/// is a scheduling choice and nothing else.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum HeadSpread {
+    /// Spread the heads across the global rayon pool. For a prefill pass.
+    Pool,
+    /// Run every head on the calling thread. For a one-row decode pass and for
+    /// the narrow verification pass speculation runs behind it.
+    Caller,
+}
+
+impl HeadSpread {
+    /// What a pass of `rows` rows should use.
+    pub(crate) fn for_rows(rows: usize) -> Self {
+        if rows >= HEAD_SPREAD_MIN_ROWS {
+            Self::Pool
+        } else {
+            Self::Caller
+        }
+    }
+}
+
 /// Scalar recurrent Gated Delta Rule. State layout is `[head, key, value]`.
+///
+/// The heads share nothing. Head `h` reads its own `key_dim` slice of the
+/// query and key, its own `value_dim` slice of the value, one decay and one
+/// beta, and it reads and writes only its own `key_dim * value_dim` block of
+/// the state and its own `value_dim` output row. Running the heads on
+/// separate cores therefore leaves every reduction in exactly the order it
+/// had when they ran one after another, which is what lets a wide
+/// verification pass and a one-row decode still agree bit for bit.
+///
+/// This is the one part of a DeltaNet layer that is serial over tokens, so
+/// during a wide pass it was also the one part running on a single core while
+/// the other five sat idle.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn recurrent_delta_step(
     q: &[f32],
@@ -64,49 +128,90 @@ pub(crate) fn recurrent_delta_step(
     heads: usize,
     key_dim: usize,
     value_dim: usize,
+    spread: HeadSpread,
     state: &mut [f32],
     out: &mut [f32],
 ) {
+    debug_assert_eq!(state.len(), heads * key_dim * value_dim);
+    debug_assert_eq!(out.len(), heads * value_dim);
     let q_scale = (key_dim as f32).sqrt().recip();
-    for h in 0..heads {
-        let state_base = h * key_dim * value_dim;
+    let head = |h: usize, state: &mut [f32], output: &mut [f32]| {
         let q_base = h * key_dim;
         let v_base = h * value_dim;
-        let decay = g[h].exp();
-        for cell in &mut state[state_base..state_base + key_dim * value_dim] {
-            *cell *= decay;
-        }
+        delta_head_step(
+            &q[q_base..q_base + key_dim],
+            &k[q_base..q_base + key_dim],
+            &v[v_base..v_base + value_dim],
+            g[h],
+            beta[h],
+            key_dim,
+            value_dim,
+            q_scale,
+            state,
+            output,
+        );
+    };
+    match spread {
+        HeadSpread::Pool => state
+            .par_chunks_mut(key_dim * value_dim)
+            .zip(out.par_chunks_mut(value_dim))
+            .enumerate()
+            .for_each(|(h, (state, output))| head(h, state, output)),
+        HeadSpread::Caller => state
+            .chunks_mut(key_dim * value_dim)
+            .zip(out.chunks_mut(value_dim))
+            .enumerate()
+            .for_each(|(h, (state, output))| head(h, state, output)),
+    }
+}
 
-        // State is row-major `[key, value]`. Traverse complete value rows so
-        // the hot recurrence is contiguous and can be vectorized on CPU.
-        let output = &mut out[v_base..v_base + value_dim];
-        output.fill(0.);
-        for i in 0..key_dim {
-            let row = &state[state_base + i * value_dim..state_base + (i + 1) * value_dim];
-            let key = k[q_base + i];
-            for (prediction, &cell) in output.iter_mut().zip(row) {
-                *prediction += cell * key;
-            }
+/// One head of the gated delta rule, against that head's own state block.
+#[allow(clippy::too_many_arguments)]
+fn delta_head_step(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    g: f32,
+    beta: f32,
+    key_dim: usize,
+    value_dim: usize,
+    q_scale: f32,
+    state: &mut [f32],
+    output: &mut [f32],
+) {
+    let decay = g.exp();
+    for cell in state.iter_mut() {
+        *cell *= decay;
+    }
+
+    // State is row-major `[key, value]`. Traverse complete value rows so
+    // the hot recurrence is contiguous and can be vectorized on CPU.
+    output.fill(0.);
+    for i in 0..key_dim {
+        let row = &state[i * value_dim..(i + 1) * value_dim];
+        let key = k[i];
+        for (prediction, &cell) in output.iter_mut().zip(row) {
+            *prediction += cell * key;
         }
-        for (delta, &target) in output.iter_mut().zip(&v[v_base..v_base + value_dim]) {
-            *delta = (target - *delta) * beta[h];
+    }
+    for (delta, &target) in output.iter_mut().zip(v) {
+        *delta = (target - *delta) * beta;
+    }
+    for i in 0..key_dim {
+        let row = &mut state[i * value_dim..(i + 1) * value_dim];
+        let key = k[i];
+        for (cell, &delta) in row.iter_mut().zip(output.iter()) {
+            *cell += key * delta;
         }
-        for i in 0..key_dim {
-            let row = &mut state[state_base + i * value_dim..state_base + (i + 1) * value_dim];
-            let key = k[q_base + i];
-            for (cell, &delta) in row.iter_mut().zip(output.iter()) {
-                *cell += key * delta;
-            }
-        }
-        output.fill(0.);
-        for i in 0..key_dim {
-            let row = &state[state_base + i * value_dim..state_base + (i + 1) * value_dim];
-            for (value, &cell) in output.iter_mut().zip(row) {
-                // Preserve the scalar reference's multiplication order. The
-                // alternate `cell * (query * scale)` changes greedy output on
-                // a near-tied logit despite being algebraically equivalent.
-                *value += cell * q[q_base + i] * q_scale;
-            }
+    }
+    output.fill(0.);
+    for i in 0..key_dim {
+        let row = &state[i * value_dim..(i + 1) * value_dim];
+        for (value, &cell) in output.iter_mut().zip(row) {
+            // Preserve the scalar reference's multiplication order. The
+            // alternate `cell * (query * scale)` changes greedy output on
+            // a near-tied logit despite being algebraically equivalent.
+            *value += cell * q[i] * q_scale;
         }
     }
 }
@@ -233,6 +338,7 @@ pub(crate) fn forward(
             nv,
             kd,
             vd,
+            HeadSpread::for_rows(seq),
             &mut state.recurrent,
             out,
         );
@@ -319,6 +425,7 @@ mod tests {
             1,
             2,
             2,
+            HeadSpread::Pool,
             &mut state,
             &mut out,
         );
@@ -333,6 +440,7 @@ mod tests {
             1,
             2,
             2,
+            HeadSpread::Pool,
             &mut state,
             &mut out,
         );
@@ -381,6 +489,7 @@ mod tests {
             heads,
             key_dim,
             value_dim,
+            HeadSpread::Pool,
             &mut actual_state,
             &mut actual,
         );
@@ -390,5 +499,51 @@ mod tests {
         for (actual, expected) in actual_state.iter().zip(&expected_state) {
             assert!((actual - expected).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn spreading_the_heads_over_cores_does_not_move_a_bit() {
+        // The heads are the unit of parallelism, so the property that has to
+        // hold is stronger than "close": running them concurrently must
+        // reproduce the serial result exactly, or a wide verification pass
+        // could commit a token a one-row decode would not have.
+        let heads = 7;
+        let key_dim = 16;
+        let value_dim = 12;
+        let series = |count: usize, seed: f32| -> Vec<f32> {
+            (0..count)
+                .map(|index| ((index as f32 * seed).sin() * 1.7 + 0.3) / 2.3)
+                .collect()
+        };
+        let q = series(heads * key_dim, 0.31);
+        let k = series(heads * key_dim, 0.77);
+        let v = series(heads * value_dim, 1.13);
+        let g = series(heads, 0.41);
+        let beta = series(heads, 0.93);
+        let initial = series(heads * key_dim * value_dim, 0.017);
+
+        let mut states = [initial.clone(), initial];
+        let mut outputs = [vec![0.; heads * value_dim], vec![0.; heads * value_dim]];
+        for (spread, (state, out)) in [HeadSpread::Caller, HeadSpread::Pool]
+            .into_iter()
+            .zip(states.iter_mut().zip(outputs.iter_mut()))
+        {
+            recurrent_delta_step(
+                &q, &k, &v, &g, &beta, heads, key_dim, value_dim, spread, state, out,
+            );
+        }
+
+        assert_eq!(outputs[1], outputs[0]);
+        assert_eq!(states[1], states[0]);
+    }
+
+    #[test]
+    fn only_a_wider_pass_pays_for_the_pool() {
+        // A one-row decode and the two- or three-row verification pass behind
+        // a speculative decode both stay on the calling thread.
+        assert_eq!(HeadSpread::for_rows(1), HeadSpread::Caller);
+        assert_eq!(HeadSpread::for_rows(3), HeadSpread::Caller);
+        assert_eq!(HeadSpread::for_rows(4), HeadSpread::Pool);
+        assert_eq!(HeadSpread::for_rows(512), HeadSpread::Pool);
     }
 }

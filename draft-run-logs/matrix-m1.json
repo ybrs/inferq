@@ -1,0 +1,5 @@
+[
+  {"name": "target-only", "speculative": "off"},
+  {"name": "auto-K32768", "speculative": "auto", "mtp_draft_vocab": 32768},
+  {"name": "ngram-only", "speculative": "ngram", "prompts": ["W1","W2","W3"]}
+]

@@ -5,7 +5,7 @@ use clap::Parser;
 use qwen_engine::{Checkpoint, GgufCheckpoint, inspect_gguf};
 
 #[derive(Debug, Parser)]
-#[command(about = "Validate and inspect a Qwen3-Coder-Next checkpoint")]
+#[command(about = "Validate and inspect a supported Qwen3-Next-family checkpoint")]
 struct Args {
     #[arg(long)]
     model: PathBuf,

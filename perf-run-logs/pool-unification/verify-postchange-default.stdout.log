@@ -1,0 +1,12 @@
+inferq: threading: resolved 6 threads (source: detected physical core count); global rayon pool: built
+expert warmup: 12/123 tensors (1.9/19.0 GiB)
+expert warmup: 24/123 tensors (3.8/19.0 GiB)
+expert warmup: 36/123 tensors (5.5/19.0 GiB)
+expert warmup: 48/123 tensors (7.3/19.0 GiB)
+expert warmup: 60/123 tensors (9.1/19.0 GiB)
+expert warmup: 72/123 tensors (10.8/19.0 GiB)
+expert warmup: 84/123 tensors (12.6/19.0 GiB)
+expert warmup: 96/123 tensors (14.4/19.0 GiB)
+expert warmup: 108/123 tensors (16.2/19.0 GiB)
+expert warmup: 120/123 tensors (18.2/19.0 GiB)
+expert warmup: 123/123 tensors (19.0/19.0 GiB)

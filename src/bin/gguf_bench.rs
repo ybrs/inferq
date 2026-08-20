@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail, ensure};
 use clap::{ArgAction, Parser};
 use qwen_engine::{
     ExpertCacheStats, FullExpertWarmupMode, GenerationOptions, GgufCheckpoint, GgufModelIdentity,
-    QuantizedRuntime,
+    QuantizedRuntime, SpeculativeMode,
     profile::{BuildInfo, HostInfo, ProcessDelta, ProcessSnapshot, SourceInfo},
     qwen::QuantizedForwardTimingReport,
     tokenizer::ModelTokenizer,
@@ -17,12 +17,12 @@ use qwen_engine::{
 };
 use serde::{Deserialize, Serialize};
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 6;
 
 #[derive(Debug, Parser)]
 #[command(about = "Persistent multi-case benchmark for quantized Qwen inference")]
 struct Args {
-    /// Qwen3-Coder-Next GGUF file.
+    /// Supported Qwen3-Next or Qwen3.5/3.6 MoE GGUF file.
     #[arg(long, required_unless_present = "validate_prompts_only")]
     model: Option<PathBuf>,
     /// Hugging Face model directory supplying config.json and tokenizer files.
@@ -47,6 +47,34 @@ struct Args {
     /// Create a JSONL artifact instead of writing records to stdout.
     #[arg(long)]
     output: Option<PathBuf>,
+    /// Which draft sources decoding may use. `auto` is the unified policy.
+    #[arg(long, value_enum, default_value_t = Speculative::Off)]
+    speculative: Speculative,
+    /// Deprecated alias for `--speculative mtp` with a depth cap of N.
+    #[arg(long, default_value_t = 0)]
+    speculative_mtp: usize,
+    /// Skip MTP proposals below this raw top-1/top-2 logit margin.
+    #[arg(long, value_name = "MARGIN")]
+    speculative_mtp_min_margin: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Speculative {
+    Off,
+    Auto,
+    Ngram,
+    Mtp,
+}
+
+impl From<Speculative> for SpeculativeMode {
+    fn from(value: Speculative) -> Self {
+        match value {
+            Speculative::Off => Self::Off,
+            Speculative::Auto => Self::Auto,
+            Speculative::Ngram => Self::Ngram,
+            Speculative::Mtp => Self::Mtp,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -141,6 +169,33 @@ struct TimingInfo {
 }
 
 #[derive(Debug, Serialize)]
+struct SpeculativeInfo {
+    max_draft_tokens: usize,
+    drafted_tokens: usize,
+    accepted_tokens: usize,
+    acceptance_rate: f64,
+    verification_passes: usize,
+    verification_tokens: usize,
+    rollback_replays: usize,
+    replayed_tokens: usize,
+    draft_seconds: f64,
+    verification_seconds: f64,
+    resync_seconds: f64,
+    checkpoint_seconds: f64,
+    restore_seconds: f64,
+    replay_seconds: f64,
+    gated_tokens: usize,
+    draft_observations: Vec<DraftObservationInfo>,
+}
+
+#[derive(Debug, Serialize)]
+struct DraftObservationInfo {
+    logit_margin: f32,
+    accepted: bool,
+    gated: bool,
+}
+
+#[derive(Debug, Serialize)]
 struct Record<'a> {
     schema_version: u32,
     timestamp_unix_ms: u128,
@@ -158,6 +213,7 @@ struct Record<'a> {
     expert_cache: ExpertCacheStats,
     process: ProcessDelta,
     timings: TimingInfo,
+    speculative: SpeculativeInfo,
 }
 
 fn prepare_prompts(args: &Args, tokenizer: &ModelTokenizer) -> Result<Vec<PreparedPrompt>> {
@@ -214,6 +270,7 @@ fn prepare_prompts(args: &Args, tokenizer: &ModelTokenizer) -> Result<Vec<Prepar
 }
 
 fn main() -> Result<()> {
+    qwen_engine::threading::init();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -223,6 +280,19 @@ fn main() -> Result<()> {
         .init();
     let args = Args::parse();
     ensure!(args.repetitions > 0, "--repetitions must be at least one");
+    // The deprecated alias selects the single-arm mode and that arm's ceiling.
+    let mut mode = SpeculativeMode::from(args.speculative);
+    if args.speculative_mtp > 0 {
+        ensure!(
+            mode == SpeculativeMode::Off || mode == SpeculativeMode::Mtp,
+            "--speculative-mtp is a deprecated alias for --speculative mtp"
+        );
+        mode = SpeculativeMode::Mtp;
+    }
+    ensure!(
+        args.speculative_mtp_min_margin.is_none() || args.speculative_mtp > 0,
+        "--speculative-mtp-min-margin requires --speculative-mtp"
+    );
     let tokenizer = ModelTokenizer::from_model_dir(&args.tokenizer_model)?;
     let prompts = prepare_prompts(&args, &tokenizer)?;
     for prompt in &prompts {
@@ -341,6 +411,9 @@ fn main() -> Result<()> {
             runtime.reset();
             let options = GenerationOptions {
                 max_new_tokens: prompt.definition.max_new_tokens,
+                speculative_mode: mode,
+                speculative_mtp_draft_tokens: args.speculative_mtp,
+                speculative_mtp_min_margin: args.speculative_mtp_min_margin,
                 ..GenerationOptions::default()
             };
             eprintln!(
@@ -422,6 +495,42 @@ fn main() -> Result<()> {
                 timings: TimingInfo {
                     prefill: result.metrics.prefill_profile.report(),
                     decode: result.metrics.decode_profile.report(),
+                },
+                speculative: SpeculativeInfo {
+                    max_draft_tokens: result.metrics.speculative.max_draft_tokens,
+                    drafted_tokens: result.metrics.speculative.drafted_tokens,
+                    accepted_tokens: result.metrics.speculative.accepted_tokens,
+                    acceptance_rate: result.metrics.speculative.acceptance_rate(),
+                    verification_passes: result.metrics.speculative.verification_passes,
+                    verification_tokens: result.metrics.speculative.verification_tokens,
+                    rollback_replays: result.metrics.speculative.rollback_replays,
+                    replayed_tokens: result.metrics.speculative.replayed_tokens,
+                    draft_seconds: result.metrics.speculative.draft_wall_time.as_secs_f64(),
+                    verification_seconds: result
+                        .metrics
+                        .speculative
+                        .verification_wall_time
+                        .as_secs_f64(),
+                    resync_seconds: result.metrics.speculative.resync_wall_time.as_secs_f64(),
+                    checkpoint_seconds: result
+                        .metrics
+                        .speculative
+                        .checkpoint_wall_time
+                        .as_secs_f64(),
+                    restore_seconds: result.metrics.speculative.restore_wall_time.as_secs_f64(),
+                    replay_seconds: result.metrics.speculative.replay_wall_time.as_secs_f64(),
+                    gated_tokens: result.metrics.speculative.gated_tokens,
+                    draft_observations: result
+                        .metrics
+                        .speculative
+                        .draft_observations
+                        .iter()
+                        .map(|observation| DraftObservationInfo {
+                            logit_margin: observation.logit_margin,
+                            accepted: observation.accepted,
+                            gated: observation.gated,
+                        })
+                        .collect(),
                 },
             };
             serde_json::to_writer(&mut output, &record)?;

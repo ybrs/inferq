@@ -7,3 +7,13 @@
 benchmark-results/
 reference-artifacts/
 __pycache__/
+ngram-run-logs/*.log
+ngram-run-logs/*.summary
+policy-run-logs/*.log
+policy-run-logs/*.summary
+draft-run-logs/*.log
+draft-run-logs/*.summary
+kernel-run-logs/*.json
+kernel-run-logs/*.log
+expert-run-logs/*.json
+expert-run-logs/*.log

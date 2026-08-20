@@ -26,6 +26,22 @@ state. `Runtime::decode` accepts exactly one previously sampled token and
 updates that state. Greedy decoding is selected with temperature zero; seeded
 temperature, top-k, top-p, and min-p sampling are also available.
 
+For Qwen3.6 models that declare one auxiliary MTP layer, the quantized runtime
+also has an opt-in speculative path. It feeds the previous target hidden state
+and current token embedding through the auxiliary predictor, drafts up to the
+requested number of greedy tokens, verifies them in one target-model batch,
+accepts the matching prefix, and restores/replays target recurrent state after
+a rejection. The MTP KV cache is then synchronized from authoritative target
+hidden states; already-authoritative accepted-prefix state is retained.
+Ordinary generation does not execute this layer. Qwen chat turns may retain
+unbounded model-controlled thinking, render a closed thinking prefix with
+`--no-thinking`, or use `--thinking-budget N`. A forced tokenizer-derived
+`</think>\n\n` sequence is evaluated through both target and MTP state before
+answer generation continues, and the counter is new for every assistant turn.
+See
+[speculative-decoding.md](speculative-decoding.md) for the exact data flow,
+current restrictions, correctness evidence, and measured performance.
+
 The scalar Delta Rule, causal convolution, attention loop, and expert selection
 are intentionally readable reference implementations. Candle supplies tensor
 storage, dtype conversion, and matrix multiplication. Because Candle CPU does
@@ -33,6 +49,18 @@ not provide BF16 matmul, projections promote inputs and weights to F32 for the
 operation and cast outputs back to the checkpoint dtype. Routing
 traces are optional JSONL and contain the absolute token index, token ID, layer,
 expert IDs, normalized route weights, and optionally full router logits.
+In the fully resident GGUF path, compatible routed and shared expert gate/up
+matrices are row-concatenated without dequantization. Their row results remain
+identical while one compressed kernel launch produces both projections.
+For any multi-row pass — a verification batch or a whole prefill — routed work
+is grouped by expert: all rows assigned to one expert execute gate/up and down
+together, while final weighted accumulation retains original per-token route
+order. The experts themselves run in parallel and each expert's two matmuls run
+whole on one thread, which is why they take the fused kernel rather than
+Candle's: candle's quantized matmul shares one process-wide worker pool that
+several experts cannot enter at once. Large (at least 4 MiB)
+Q4_K/Q5_K/Q6_K/Q8_0 dense matrices use the same fused path from the pool side.
+A K=1 pass is token-major and retains its established kernels throughout.
 
 ## End-to-end validation
 
@@ -70,7 +98,17 @@ cargo run --release --bin routing_trace -- --model /models/Qwen3-Coder-Next \
   --prompt "Fix this test" --output routing.jsonl
 
 cargo run --release --bin bench -- --model /models/Qwen3-Coder-Next
+
+cargo run --release --bin serve -- \
+  --model /models/qwen3.6/Qwen_Qwen3.6-35B-A3B-Q4_K_M.gguf \
+  --tokenizer-model /models/qwen3.6 --port 8080 --api-key "$INFERQ_API_KEY"
 ```
+
+`serve` exposes the quantized runtime over the OpenAI chat-completions API. It
+queues requests in front of the same single sequence rather than batching them;
+see [openai-server.md](openai-server.md). With `--prompt-cache-dir` it also
+persists sequence state at token boundaries, so a prompt an earlier run already
+prefilled is restored from disk; see [prompt-cache.md](prompt-cache.md).
 
 The profiling artifact schema, stable micro-cases, cache-state contract, and
 `perf stat` wrapper are documented in [profiling.md](profiling.md).

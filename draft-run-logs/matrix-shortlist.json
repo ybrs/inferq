@@ -1,0 +1,13 @@
+[
+  {"name": "target-only", "speculative": "off"},
+  {"name": "auto-full-head", "speculative": "auto", "mtp_draft_vocab": 0},
+  {"name": "auto-K32768", "speculative": "auto", "mtp_draft_vocab": 32768},
+  {"name": "auto-K8192", "speculative": "auto", "mtp_draft_vocab": 8192, "prompts": ["W1","W2","W3"]},
+  {"name": "auto-K16384", "speculative": "auto", "mtp_draft_vocab": 16384, "prompts": ["W1","W2","W3"]},
+  {"name": "auto-K65536", "speculative": "auto", "mtp_draft_vocab": 65536, "prompts": ["W1","W2","W3"]},
+  {"name": "mtp-full-head", "speculative": "mtp", "mtp_draft_vocab": 0, "prompts": ["W1","W2","W3"]},
+  {"name": "mtp-K32768", "speculative": "mtp", "mtp_draft_vocab": 32768, "prompts": ["W1","W2","W3"]},
+  {"name": "auto-K32768-c0.5", "speculative": "auto", "mtp_draft_vocab": 32768, "mtp_min_confidence": 0.5, "prompts": ["W1","W2","W3"]},
+  {"name": "auto-K32768-c0.6", "speculative": "auto", "mtp_draft_vocab": 32768, "mtp_min_confidence": 0.6, "prompts": ["W1","W2","W3"]},
+  {"name": "auto-K32768-c0.8", "speculative": "auto", "mtp_draft_vocab": 32768, "mtp_min_confidence": 0.8, "prompts": ["W1","W2","W3"]}
+]

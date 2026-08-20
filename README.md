@@ -24,6 +24,10 @@ Performance is not the primary objective in Phase 1. Correctness and observabili
 * `docs/profiling.md` – versioned profiling artifacts, stable micro-cases, and hardware-counter capture.
 * `docs/quantized-execution.md` – direct compressed GGUF projections and selected-expert range loading.
 * `docs/usable-performance-roadmap.md` – measured baseline and the critical path from the reference engine to usable CPU performance.
+* `docs/qwen36-35b-a3b.md` – Qwen3.6-35B-A3B compatibility, Q4/Q8 reproduction commands, and measured architecture/performance comparison.
+* `docs/speculative-decoding.md` – Qwen3.6 auxiliary MTP execution, correctness gates, benchmark results, and the optimization path required for a speedup.
+* `docs/openai-server.md` – the OpenAI-compatible HTTP server: supported request surface, the single inference slot behind it, and authentication.
+* `docs/prompt-cache.md` – persistent prefix caching: what a cached state contains, how boundaries are chosen, and what makes a restored prefix exact.
 * `qwen-cpu-inference-target-architecture.md` – Long-term target architecture, design principles, language split Rust/Python/C++, and the 14-phase roadmap toward workload-aware specialization.
 
 ## Development focus
@@ -49,6 +53,34 @@ stored in this repository.
 
 The measured post-Phase-1 optimization sequence is documented in the
 [roadmap to usable performance](docs/usable-performance-roadmap.md).
+
+The optimized GGUF path also supports text-only Qwen3.6-35B-A3B. On the same
+i7-6700 host, its fully resident Q4_K_M artifact reached 8.12 decode tok/s at
+20.26 GiB RSS; Q8_0 reached 6.27 tok/s at 34.72 GiB RSS. See the
+[Qwen3.6 Q4/Q8 comparison](docs/qwen36-35b-a3b.md) for exact artifacts,
+commands, compatibility details, and methodology.
+
+Greedy speculative decoding is opt-in through `--speculative`, and every mode
+emits the exact token sequence ordinary greedy decoding would: proposals are
+verified by the same multi-row target pass and committed only where the
+target's own choice matches. There are two draft sources — prompt lookup over
+the tokens already in context, and Qwen3.6's bundled MTP predictor — and
+`--speculative auto` runs both behind one adaptive policy that picks per decode
+step: free literal evidence where the index has it, an MTP draft where that arm
+is currently earning its cost, and otherwise exactly the pass an unspeculated
+run would make. `--speculative ngram` and `--speculative mtp` restrict it to one
+arm; `off` is the default.
+
+It stays off by default because no configuration yet wins everywhere. The
+policy is the only one measured that wins on both copy-heavy work (1.2x) and
+structurally repetitive work (1.1x), where each single arm loses badly on the
+other, but prose still regresses: the MTP block costs ~25 ms per drafted token
+on this host, which puts its break-even acceptance at 0.68-0.74. Use
+`--thinking-budget N` to retain reasoning with a per-turn hard limit, or
+`--no-thinking` to render Qwen's closed thinking prefix. See
+[Speculative decoding](docs/speculative-decoding.md) for the policy, the
+controllers, commands and restrictions, and
+`policy-report-702d043633e0.md` for the measurements.
 
 ## Installation on a new server
 
@@ -103,7 +135,8 @@ host-native copy for inference so validation cannot overwrite it:
 ```bash
 CARGO_TARGET_DIR=target-native \
 RUSTFLAGS='-C target-cpu=native' \
-cargo build --release --bin gguf_infer --bin gguf_bench
+cargo build --release \
+  --bin gguf_infer --bin gguf_bench --bin gguf_verify_bench
 ```
 
 Do not copy `target-native` from a different server: `target-cpu=native` may
@@ -156,8 +189,7 @@ INFERQ_MODEL_ROOT=/data/models/qwen3-coder-next
 INFERQ_TOKENIZER_DIR="${INFERQ_MODEL_ROOT}/tokenizer"
 INFERQ_GGUF="${INFERQ_MODEL_ROOT}/Qwen3-Coder-Next-UD-Q4_K_M.gguf"
 
-CANDLE_NUM_THREADS=4 \
-RAYON_NUM_THREADS=4 \
+INFERQ_NUM_THREADS=4 \
 ./target-native/release/gguf_infer \
   --model "${INFERQ_GGUF}" \
   --tokenizer-model "${INFERQ_TOKENIZER_DIR}" \
@@ -180,8 +212,7 @@ INFERQ_MODEL_ROOT=/data/models/qwen3-coder-next
 INFERQ_TOKENIZER_DIR="${INFERQ_MODEL_ROOT}/tokenizer"
 INFERQ_GGUF="${INFERQ_MODEL_ROOT}/Qwen3-Coder-Next-UD-Q4_K_M.gguf"
 
-CANDLE_NUM_THREADS=4 \
-RAYON_NUM_THREADS=4 \
+INFERQ_NUM_THREADS=4 \
 ./target-native/release/gguf_infer \
   --model "${INFERQ_GGUF}" \
   --tokenizer-model "${INFERQ_TOKENIZER_DIR}" \
@@ -194,14 +225,79 @@ RAYON_NUM_THREADS=4 \
 
 Enter one user message per line. `/reset` clears the conversation state and
 `/quit` exits. On the original Intel i7-6700 host, the qualified 23-token prompt
-plus 128 generated tokens reached 5.87 decode token/s with 100% expert-cache
-hits, zero physical inference reads, and about 47,260 MiB RSS.
+plus 128 generated tokens reached 5.99 decode token/s with 100% expert-cache
+hits, zero physical inference reads, and about 47,328 MiB RSS.
 
 The four-thread setting reproduces the current benchmark host. On a different
 CPU, compare it with the number of physical cores using `gguf_bench`; more
 threads are not automatically faster because MoE and DeltaNet contend for
-memory bandwidth. See [Reproducible profiling](docs/profiling.md) for the full
-benchmark command and JSONL output contract.
+memory bandwidth. `INFERQ_NUM_THREADS` sizes every CPU thread pool the engine
+touches (candle's own quantized-matvec and general-op pools, and inferq's
+multi-row dense-path rayon pool) consistently in one place; set it once
+instead of pairing `CANDLE_NUM_THREADS`/`RAYON_NUM_THREADS` by hand. The old
+pair still works if both are set to the same value, and still takes effect
+when `INFERQ_NUM_THREADS` is unset. See [Reproducible profiling](docs/profiling.md)
+for the full benchmark command and JSONL output contract.
+
+### 6. Serve the OpenAI-compatible API
+
+Anything that speaks the OpenAI chat-completions API can drive the same
+runtime through `serve`, with the same warmup and thread settings:
+
+```bash
+INFERQ_NUM_THREADS=4 \
+./target-native/release/serve \
+  --model "${INFERQ_GGUF}" \
+  --tokenizer-model "${INFERQ_TOKENIZER_DIR}" \
+  --host 127.0.0.1 \
+  --port 8080 \
+  --api-key "$(openssl rand -hex 24)" \
+  --max-new-tokens 512 \
+  --expert-cache-mib 46000 \
+  --warmup-all-experts
+```
+
+```bash
+curl -s http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer ${INFERQ_API_KEY}" \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"Name three primary colors."}],
+       "max_tokens":64}'
+```
+
+The model loads before the port is bound, so a bad checkpoint fails at startup.
+Requests are stateless and served one at a time, first in, first out; the model
+runs on its own thread and the engine never decodes two requests at once. See
+[the OpenAI server guide](docs/openai-server.md) for the supported request
+fields, streaming, authentication, and what is deliberately not implemented.
+
+Add `--prompt-cache-dir` when an agent will open every task with the same long
+preamble. Prefill cost grows with the square of the prompt, so the preamble that
+takes minutes on the first task is restored from disk on every later one,
+including after a restart:
+
+```bash
+  --prompt-cache-dir ~/.cache/inferq/prompts \
+  --prompt-cache-mib 20480
+```
+
+Entries hold the token ids of cached prompts, so nothing is written without that
+flag. See [the prompt cache guide](docs/prompt-cache.md).
+
+The server also implements function calling in this checkpoint's own
+`<tool_call><function=…>` format, so coding agents that speak the OpenAI API
+can drive it. Its prompt rendering is checked byte for byte against the
+checkpoint's `chat_template`, and a tool call survives the API round trip byte
+for byte as well — an assistant turn sent back is written into the next prompt
+as the bytes the model generated, even by a client that re-serialised the call's
+arguments on the way, which is what keeps a multi-turn agent on the live session
+instead of re-prefilling it.
+
+Thinking is bounded per request. OpenAI's API expresses this as
+`reasoning_effort` rather than a token count, so the server maps each level to
+a budget the operator sets (`--thinking-budget`, `--max-thinking-budget`,
+`--reasoning-budget high=8192`) and reports what it cost in
+`usage.completion_tokens_details.reasoning_tokens`.
 
 ### Troubleshooting
 
