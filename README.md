@@ -1,8 +1,11 @@
 # Qwen3-Coder-Next CPU Inference Engine
 
-A highly experimental, custom inference engine built specifically for **Qwen3-Coder-Next** on CPU.
+A highly experimental, custom inference engine built for **Qwen3-Coder-Next**
+and **Qwen3.6-35B-A3B** on CPU. Qwen3.6-35B-A3B is the configuration the
+OpenAI-compatible server and the agent-workload measurements are qualified
+against; Qwen3-Coder-Next remains the original reference path.
 
-Model reference: https://huggingface.co/Qwen/Qwen3-Coder-Next
+Model references: https://huggingface.co/Qwen/Qwen3-Coder-Next, https://huggingface.co/Qwen/Qwen3.6-35B-A3B
 
 This repo is for learning. The goal is to understand and build a model-specific CPU inference path for Qwen3-Coder-Next, with a focus on correctness, observability, and later specialization for coding-agent workloads.
 
@@ -54,11 +57,20 @@ stored in this repository.
 The measured post-Phase-1 optimization sequence is documented in the
 [roadmap to usable performance](docs/usable-performance-roadmap.md).
 
-The optimized GGUF path also supports text-only Qwen3.6-35B-A3B. On the same
-i7-6700 host, its fully resident Q4_K_M artifact reached 8.12 decode tok/s at
-20.26 GiB RSS; Q8_0 reached 6.27 tok/s at 34.72 GiB RSS. See the
+The optimized GGUF path also supports text-only Qwen3.6-35B-A3B, which is the
+configuration the server and agent-workload measurements are qualified
+against. On the current i7-8700 host at six threads with the experts
+resident, a wide prefill pass reaches 36.2 tok/s at width 256 (36.6 at width
+512); decode measures 7.9 tok/s at 1024 context tokens and 6.8 at 3072
+target-only, and 8–10 tok/s on agentic turns with drafting; and the seven-turn
+pi reference task completes in 175 s with every turn after the first
+continuing the live session. On the older i7-6700 host, the fully resident
+Q4_K_M artifact reached 8.12 decode tok/s at 20.26 GiB RSS; Q8_0 reached
+6.27 tok/s at 34.72 GiB RSS. See the
 [Qwen3.6 Q4/Q8 comparison](docs/qwen36-35b-a3b.md) for exact artifacts,
-commands, compatibility details, and methodology.
+commands, compatibility details, and methodology, and
+[the OpenAI server guide](docs/openai-server.md) for the current
+end-to-end measurements.
 
 Greedy speculative decoding is opt-in through `--speculative`, and every mode
 emits the exact token sequence ordinary greedy decoding would: proposals are
@@ -69,13 +81,15 @@ the tokens already in context, and Qwen3.6's bundled MTP predictor — and
 step: free literal evidence where the index has it, an MTP draft where that arm
 is currently earning its cost, and otherwise exactly the pass an unspeculated
 run would make. `--speculative ngram` and `--speculative mtp` restrict it to one
-arm; `off` is the default.
+arm.
 
-It stays off by default because no configuration yet wins everywhere. The
-policy is the only one measured that wins on both copy-heavy work (1.2x) and
-structurally repetitive work (1.1x), where each single arm loses badly on the
-other, but prose still regresses: the MTP block costs ~25 ms per drafted token
-on this host, which puts its break-even acceptance at 0.68-0.74. Use
+The CLI keeps speculation off by default; the server defaults to `auto` for
+greedy requests, and a sampled request decodes plainly because verification
+is defined against the target's argmax. With the MTP arm gated on the draft
+head's own confidence and drafting against a vocabulary prefix of the LM
+head, the policy measured 1.09–1.31x across all four qualification
+workloads — copy-heavy, prose, self-repetitive and mixed — where each single
+arm still loses somewhere. Use
 `--thinking-budget N` to retain reasoning with a per-turn hard limit, or
 `--no-thinking` to render Qwen's closed thinking prefix. See
 [Speculative decoding](docs/speculative-decoding.md) for the policy, the
@@ -87,7 +101,9 @@ controllers, commands and restrictions, and
 ### Hardware and operating-system requirements
 
 The current runtime targets x86-64 Linux and must be compiled on the server
-where it will run. AVX2 and FMA are strongly recommended. The qualified
+where it will run. AVX2 is strongly recommended and FMA is required: opening
+a checkpoint refuses a build without it, because the one-row and multi-row
+kernels only decode identically under fused multiply-add. The qualified
 high-memory configuration needs:
 
 - at least 64 GiB RAM; sustained inference pins about 43.5 GiB of experts and
