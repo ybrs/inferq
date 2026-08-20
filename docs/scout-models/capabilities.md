@@ -24,7 +24,7 @@ probes need a reader and are discussed below):
 | Model | DAG | script | mermaid | chart | route 1 | route 2 | total |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | granite-4.1-3b Q4_K_M | 10/10 | 8/8 | 6/8 | 3/6 | 4/4 | 3/4 | **34/40** |
-| Qwen3-0.6B Q4_K_M | 8/10 | 4/8 | 0/8 | 3/6 | 4/4 | 3/4 | 22/40 |
+| Qwen3-0.6B Q4_K_M | 8/10 | 4/8 | 0/8 | 4/6 | 4/4 | 3/4 | 23/40 |
 | Qwen3-1.7B Q4_K_M | 0/10 | 4/8 | 2/8 | 3/6 | 3/4 | 4/4 | 16/40 |
 
 ## 1. Dutch → English
@@ -187,5 +187,7 @@ MPL_PYTHON=/path/to/venv/bin/python python3 grade_cap.py outputs-cap
 ```
 
 The chart probe needs an interpreter with matplotlib installed; `grade_cap.py`
-says so explicitly rather than scoring a zero if it is missing. Prompts are in
+says so explicitly rather than scoring a zero if it is missing. Generated code
+runs with its working directory inside a temp dir — the 0.6B's script hardcodes
+`output.png`, and on the first run it wrote that into the harness directory. Prompts are in
 `harness/tests-capability/`, raw answers in `harness/outputs-cap/`.

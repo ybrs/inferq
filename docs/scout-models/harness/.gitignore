@@ -1,2 +1,3 @@
 outputs*/*.server.log
 serve.log
+*.png
