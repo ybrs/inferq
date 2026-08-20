@@ -1,0 +1,647 @@
+<title>Eleven Models, One i7-8700</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Serif:ital,wght@0,400;0,600;1,400&display=swap">
+
+<style>
+  :root {
+    --ground:        #f2f4f4;
+    --surface:       #ffffff;
+    --surface-sunk:  #e8ecec;
+    --ink:           #12191b;
+    --ink-soft:      #47575b;
+    --ink-faint:     #7d8f93;
+    --rule:          #d3dbdb;
+    --rule-strong:   #b3c0c0;
+    --accent:        #0d6f78;
+    --accent-soft:   #d3e8e9;
+    --good:          #1f6f43;
+    --warn:          #8a5a08;
+    --bad:           #9c2c2c;
+    --bad-soft:      #f6e2e1;
+    --good-soft:     #dcecd2;
+    --bar:           #0d6f78;
+    --bar-track:     #dde4e4;
+    --shadow:        0 1px 2px rgba(18,25,27,.06), 0 8px 24px -12px rgba(18,25,27,.18);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:        #0e1416;
+      --surface:       #151d20;
+      --surface-sunk:  #101819;
+      --ink:           #e6eded;
+      --ink-soft:      #a3b4b6;
+      --ink-faint:     #6f8285;
+      --rule:          #253134;
+      --rule-strong:   #35464a;
+      --accent:        #4cc3ca;
+      --accent-soft:   #16383a;
+      --good:          #6fcf97;
+      --warn:          #e0ac5a;
+      --bad:           #ec8a84;
+      --bad-soft:      #3a2020;
+      --good-soft:     #1d3324;
+      --bar:           #3fa8ae;
+      --bar-track:     #1e2a2c;
+      --shadow:        0 1px 2px rgba(0,0,0,.4), 0 10px 30px -14px rgba(0,0,0,.7);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:        #0e1416;
+    --surface:       #151d20;
+    --surface-sunk:  #101819;
+    --ink:           #e6eded;
+    --ink-soft:      #a3b4b6;
+    --ink-faint:     #6f8285;
+    --rule:          #253134;
+    --rule-strong:   #35464a;
+    --accent:        #4cc3ca;
+    --accent-soft:   #16383a;
+    --good:          #6fcf97;
+    --warn:          #e0ac5a;
+    --bad:           #ec8a84;
+    --bad-soft:      #3a2020;
+    --good-soft:     #1d3324;
+    --bar:           #3fa8ae;
+    --bar-track:     #1e2a2c;
+    --shadow:        0 1px 2px rgba(0,0,0,.4), 0 10px 30px -14px rgba(0,0,0,.7);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "IBM Plex Serif", Georgia, serif;
+    font-size: 17px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 62rem;
+    margin: 0 auto;
+    padding: 0 1.5rem 6rem;
+    display: flex;
+    flex-direction: column;
+    gap: 3.25rem;
+  }
+
+  .prose { max-width: 40rem; }
+  .prose p { margin: 0 0 1rem; }
+  .prose p:last-child { margin-bottom: 0; }
+
+  h1, h2, h3, .label, .mono, table, .chip {
+    font-family: "IBM Plex Sans Condensed", "IBM Plex Sans", system-ui, sans-serif;
+  }
+
+  .label {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: .69rem;
+    font-weight: 500;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+
+  /* ---- masthead ---- */
+  header {
+    border-bottom: 2px solid var(--ink);
+    padding: 3.5rem 0 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
+  h1 {
+    font-size: clamp(2.4rem, 6.5vw, 4.1rem);
+    font-weight: 700;
+    line-height: .98;
+    letter-spacing: -.02em;
+    margin: 0;
+    text-wrap: balance;
+  }
+  .standfirst {
+    font-size: 1.16rem;
+    line-height: 1.5;
+    color: var(--ink-soft);
+    max-width: 38rem;
+    margin: 0;
+  }
+  .standfirst strong { color: var(--ink); font-weight: 600; }
+  .specs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .5rem 1.5rem;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: .76rem;
+    color: var(--ink-faint);
+  }
+  .specs span::before { content: "· "; color: var(--rule-strong); }
+  .specs span:first-child::before { content: ""; }
+
+  /* ---- verdict cards ---- */
+  .verdicts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+    gap: 1rem;
+  }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-top: 3px solid var(--rule-strong);
+    border-radius: 2px;
+    padding: 1.25rem 1.25rem 1.4rem;
+    display: flex;
+    flex-direction: column;
+    gap: .55rem;
+    box-shadow: var(--shadow);
+  }
+  .card.pick   { border-top-color: var(--good); }
+  .card.alt    { border-top-color: var(--accent); }
+  .card.avoid  { border-top-color: var(--bad); }
+  .card h3 {
+    margin: 0;
+    font-size: 1.19rem;
+    font-weight: 600;
+    letter-spacing: -.01em;
+    font-family: "IBM Plex Mono", monospace;
+  }
+  .card p { margin: 0; font-size: .93rem; line-height: 1.5; color: var(--ink-soft); }
+  .verdict-tag { font-size: .69rem; letter-spacing: .14em; text-transform: uppercase;
+                 font-family: "IBM Plex Mono", monospace; font-weight: 600; }
+  .pick  .verdict-tag { color: var(--good); }
+  .alt   .verdict-tag { color: var(--accent); }
+  .avoid .verdict-tag { color: var(--bad); }
+
+  /* ---- sections ---- */
+  section { display: flex; flex-direction: column; gap: 1.15rem; }
+  h2 {
+    font-size: 1.72rem;
+    font-weight: 700;
+    letter-spacing: -.015em;
+    margin: 0;
+    text-wrap: balance;
+    display: flex;
+    align-items: baseline;
+    gap: .75rem;
+  }
+  h2::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--rule);
+  }
+
+  /* ---- tables ---- */
+  .scroll { overflow-x: auto; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: .87rem;
+    font-variant-numeric: tabular-nums;
+    min-width: 34rem;
+  }
+  thead th {
+    text-align: right;
+    font-weight: 600;
+    font-size: .68rem;
+    letter-spacing: .11em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    padding: 0 .6rem .5rem;
+    border-bottom: 1px solid var(--rule-strong);
+    white-space: nowrap;
+  }
+  thead th:first-child { text-align: left; }
+  tbody td {
+    padding: .5rem .6rem;
+    border-bottom: 1px solid var(--rule);
+    text-align: right;
+    white-space: nowrap;
+  }
+  tbody td:first-child {
+    text-align: left;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: .81rem;
+    white-space: normal;
+  }
+  tbody tr.hi td { background: var(--accent-soft); }
+  tbody tr.dim td { color: var(--ink-faint); }
+  .num { font-family: "IBM Plex Mono", monospace; }
+  .bar-cell { width: 34%; min-width: 8rem; }
+  .bar {
+    height: .5rem;
+    background: var(--bar-track);
+    border-radius: 1px;
+    position: relative;
+    overflow: hidden;
+  }
+  .bar i {
+    position: absolute;
+    inset: 0 auto 0 0;
+    background: var(--bar);
+    border-radius: 1px;
+  }
+  tr.baseline td {
+    border-bottom: 2px solid var(--ink);
+    font-style: italic;
+    color: var(--ink-soft);
+  }
+  tr.baseline .bar i { background: var(--ink-faint); }
+  caption {
+    caption-side: bottom;
+    text-align: left;
+    padding-top: .8rem;
+    font-size: .8rem;
+    color: var(--ink-faint);
+    font-family: "IBM Plex Serif", serif;
+    font-style: italic;
+  }
+
+  /* ---- the trap ---- */
+  .trap {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+    gap: 1px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .trap > div {
+    background: var(--surface);
+    padding: 1.4rem 1.35rem;
+    display: flex;
+    flex-direction: column;
+    gap: .4rem;
+  }
+  .trap .big {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: clamp(2rem, 5vw, 2.9rem);
+    font-weight: 600;
+    line-height: 1;
+    letter-spacing: -.03em;
+  }
+  .trap .on  .big { color: var(--bad); }
+  .trap .off .big { color: var(--good); }
+  .trap .sub { font-size: .87rem; color: var(--ink-soft); }
+  .trap code {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: .78rem;
+    background: var(--surface-sunk);
+    padding: .12rem .3rem;
+    border-radius: 2px;
+  }
+
+  /* ---- output comparison ---- */
+  .source {
+    background: var(--surface-sunk);
+    border-left: 3px solid var(--rule-strong);
+    padding: 1rem 1.2rem;
+    font-style: italic;
+    font-size: .96rem;
+    color: var(--ink-soft);
+  }
+  .source b { font-style: normal; font-weight: 600; color: var(--ink); }
+  .outputs {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+    gap: 1rem;
+  }
+  .out {
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    background: var(--surface);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .out header {
+    border: 0;
+    padding: .7rem 1rem;
+    background: var(--surface-sunk);
+    border-bottom: 1px solid var(--rule);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: .75rem;
+    flex-direction: row;
+  }
+  .out .name {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: .8rem;
+    font-weight: 600;
+  }
+  .chip {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: .66rem;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    font-weight: 600;
+    padding: .16rem .45rem;
+    border-radius: 2px;
+    white-space: nowrap;
+  }
+  .chip.ok  { background: var(--good-soft); color: var(--good); }
+  .chip.err { background: var(--bad-soft);  color: var(--bad); }
+  .out pre {
+    margin: 0;
+    padding: .9rem 1rem;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: .72rem;
+    line-height: 1.65;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-x: auto;
+  }
+  .out pre .flag { background: var(--bad-soft); color: var(--bad); font-weight: 600;
+                   padding: 0 .18rem; border-radius: 2px; }
+  .out pre .good { color: var(--good); font-weight: 600; }
+  .out .why {
+    padding: .75rem 1rem 1rem;
+    border-top: 1px dashed var(--rule);
+    font-size: .85rem;
+    color: var(--ink-soft);
+    line-height: 1.5;
+  }
+
+  /* ---- notes list ---- */
+  .notes { display: flex; flex-direction: column; gap: 1rem; margin: 0; padding: 0; list-style: none; }
+  .notes li {
+    display: grid;
+    grid-template-columns: minmax(0, 11rem) 1fr;
+    gap: .35rem 1.5rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--rule);
+  }
+  .notes li:last-child { border-bottom: 0; padding-bottom: 0; }
+  .notes .k {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: .8rem;
+    font-weight: 600;
+    color: var(--accent);
+    line-height: 1.5;
+  }
+  .notes .v { font-size: .95rem; color: var(--ink-soft); line-height: 1.55; }
+  .notes .v strong { color: var(--ink); font-weight: 600; }
+
+  /* ---- config block ---- */
+  .config {
+    background: var(--surface-sunk);
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    padding: 1.1rem 1.25rem;
+    overflow-x: auto;
+  }
+  .config pre {
+    margin: 0;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: .78rem;
+    line-height: 1.75;
+    white-space: pre;
+  }
+  .config .c { color: var(--ink-faint); }
+  .config .fl { color: var(--accent); }
+
+  footer {
+    border-top: 1px solid var(--rule);
+    padding-top: 1.25rem;
+    font-size: .82rem;
+    color: var(--ink-faint);
+    font-family: "IBM Plex Mono", monospace;
+    line-height: 1.7;
+  }
+
+  @media (max-width: 34rem) {
+    body { font-size: 16px; }
+    .notes li { grid-template-columns: 1fr; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header>
+    <p class="label">Bench report · 2026-08-20 · taskq #405</p>
+    <h1>Eleven Models,<br>One i7-8700</h1>
+    <p class="standfirst">Looking for a small CPU model to organize tasks, summarize tickets, and write throwaway Python. <strong>The two fastest models fabricate assignees.</strong> The one to run is a 3B that nobody would call exciting.</p>
+    <div class="specs">
+      <span>Intel i7-8700 · 6 cores · AVX2, no VNNI</span>
+      <span>~19–21 GB/s effective</span>
+      <span>llama.cpp a3b1eff</span>
+      <span>Q4 GGUF · 6 threads pinned</span>
+    </div>
+  </header>
+
+  <div class="verdicts">
+    <div class="card pick">
+      <span class="verdict-tag">Run this</span>
+      <h3>granite-4.1-3b</h3>
+      <p>Perfect on both suites — 23/23 tasks, 23/24 on the traps. 11.1 t/s decode, and among the least verbose tested: 217 tokens to answer three hard probes. Apache 2.0, 1.95 GiB.</p>
+    </div>
+    <div class="card alt">
+      <span class="verdict-tag">If you want speed</span>
+      <h3>LFM2-2.6B</h3>
+      <p>13.7 t/s and still perfect on structured extraction. Slightly blunter on summary attribution. Use LFM2 — <em>not</em> LFM2.5, which can't be stopped from thinking.</p>
+    </div>
+    <div class="card avoid">
+      <span class="verdict-tag">Don't</span>
+      <h3>Qwen3-1.7B · Qwen3.5-2B</h3>
+      <p>The fastest things here, and they pass casual tests. Both invented a task owner on realistic standup notes. A fabricated assignee in a tracker costs more than a slow answer.</p>
+    </div>
+  </div>
+
+  <section>
+    <h2>Speed</h2>
+    <div class="prose">
+      <p>Decode is bandwidth-bound, so the file size mostly predicts the rate — but the box streams at ~19–21 GB/s in practice, not the 31.8 GB/s a raw memory benchmark suggests. Every estimate built on "32 ÷ file size" came in about 35% hot.</p>
+      <p>The load-bearing result is the rule at the bottom of the table: <strong>the entire 4B class decodes no faster than the 35B-A3B already running on this host.</strong> Anything at or below that line is paying capability for nothing.</p>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Model (Q4 unless noted)</th>
+            <th>File</th>
+            <th>Prefill</th>
+            <th>Decode</th>
+            <th class="bar-cell">t/s decode</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>Qwen3-1.7B</td><td class="num">1.03</td><td class="num">151.8</td><td class="num">20.64</td><td class="bar-cell"><div class="bar"><i style="width:100%"></i></div></td></tr>
+          <tr><td>Qwen3.5-2B UD-Q4_K_XL</td><td class="num">1.24</td><td class="num">91.1</td><td class="num">14.89</td><td class="bar-cell"><div class="bar"><i style="width:72%"></i></div></td></tr>
+          <tr class="hi"><td>LFM2-2.6B</td><td class="num">1.45</td><td class="num">78.4</td><td class="num">13.69</td><td class="bar-cell"><div class="bar"><i style="width:66%"></i></div></td></tr>
+          <tr class="dim"><td>LFM2.5-2.6B QAD-Q4_0</td><td class="num">1.48</td><td class="num">79.3</td><td class="num">13.41</td><td class="bar-cell"><div class="bar"><i style="width:65%"></i></div></td></tr>
+          <tr><td>SmolLM3-3B</td><td class="num">1.78</td><td class="num">76.1</td><td class="num">12.05</td><td class="bar-cell"><div class="bar"><i style="width:58%"></i></div></td></tr>
+          <tr class="hi"><td>granite-4.1-3b</td><td class="num">1.95</td><td class="num">67.6</td><td class="num">11.08</td><td class="bar-cell"><div class="bar"><i style="width:54%"></i></div></td></tr>
+          <tr class="hi"><td>granite-4.0-h-micro</td><td class="num">1.81</td><td class="num">68.8</td><td class="num">10.64</td><td class="bar-cell"><div class="bar"><i style="width:52%"></i></div></td></tr>
+          <tr class="baseline"><td>Qwen3.6-35B-A3B — what's already running</td><td class="num">—</td><td class="num">~36</td><td class="num">8–10</td><td class="bar-cell"><div class="bar"><i style="width:44%"></i></div></td></tr>
+          <tr><td>Qwen3-4B-Instruct-2507</td><td class="num">2.32</td><td class="num">56.1</td><td class="num">9.31</td><td class="bar-cell"><div class="bar"><i style="width:45%"></i></div></td></tr>
+          <tr><td>gemma-3-4b-it-qat Q4_0</td><td class="num">2.35</td><td class="num">64.3</td><td class="num">9.07</td><td class="bar-cell"><div class="bar"><i style="width:44%"></i></div></td></tr>
+          <tr><td>Phi-4-mini</td><td class="num">2.31</td><td class="num">52.5</td><td class="num">8.83</td><td class="bar-cell"><div class="bar"><i style="width:43%"></i></div></td></tr>
+          <tr><td>Qwen3.5-4B <em>Q3_K_M</em></td><td class="num">2.13</td><td class="num">39.2</td><td class="num">8.82</td><td class="bar-cell"><div class="bar"><i style="width:43%"></i></div></td></tr>
+        </tbody>
+        <caption>llama-bench, pp512 / tg128, 6 threads, taskset 0–5, 2 reps. File size in GiB. Highlighted rows are the recommended models.</caption>
+      </table>
+    </div>
+    <div class="prose">
+      <p>One trap worth naming: Qwen3.5-4B at <span class="num">Q3_K_M</span> is <em>slower</em> than Qwen3-4B at <span class="num">Q4_K_M</span> despite the smaller file. Q3 unpacking costs compute, and an AVX2-only core has none to spare. Don't reach for Q3 quants on this host.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>The flag that matters more than throughput</h2>
+    <div class="prose">
+      <p>The first quality run nearly wrote off Qwen3.5-2B. Asked to pull four action items out of a short message, it spent its entire 1400-token budget inside a <code>&lt;think&gt;</code> block — visibly second-guessing itself, <em>"Wait, check the JSON keys…"</em> — and emitted no answer at all.</p>
+      <p>Same model, same prompt, one parameter:</p>
+    </div>
+    <div class="trap">
+      <div class="on">
+        <p class="label">Thinking on (default)</p>
+        <p class="big">96.7s</p>
+        <p class="sub">1400 tokens burned. <strong>No answer produced.</strong></p>
+      </div>
+      <div class="off">
+        <p class="label">enable_thinking: false</p>
+        <p class="big">9.3s</p>
+        <p class="sub">109 tokens. Correct answer.</p>
+      </div>
+      <div>
+        <p class="label">What to take from it</p>
+        <p class="sub">Judge these models by <strong>tokens emitted per answer</strong>, not benchmark t/s. A 20 t/s model that deliberates for 800 tokens loses badly to a 13 t/s model that answers in 80.</p>
+      </div>
+    </div>
+    <div class="prose">
+      <p>This also disqualified one candidate outright. <strong>LFM2.5-2.6B ignores the flag</strong> — its chat template always thinks — so it took 266 seconds across three tasks and returned nothing for the summary. The older, non-thinking LFM2-2.6B is unaffected and is the speed pick above.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Where the fast models break</h2>
+    <div class="prose">
+      <p>The first faithfulness test was too easy: no model invented a certificate expiry, a firewall, or a DNS cause, and six tied at the top of the task suite. A test everyone passes ranks nothing, so I wrote a harder one — an unowned blocked task, an owner attached to a <em>different</em> task, an item with no date, and a line that looks like a task but isn't.</p>
+    </div>
+    <div class="source">
+      <b>Standup notes given to every model:</b> "The invoice export is still broken — we can't start on it until legal signs off on the data retention question. <b>Emily said she'd take the migration script</b> once the export is fixed. We should also bump the Postgres version at some point. <b>Kevin is out until the 14th.</b>"
+    </div>
+    <div class="outputs">
+      <div class="out">
+        <header>
+          <span class="name">granite-4.1-3b</span>
+          <span class="chip ok">10/10</span>
+        </header>
+        <pre>[{"title":"invoice export is still broken",
+  "assignee":<span class="good">null</span>,
+  "blocked_by":<span class="good">"legal signs off on the
+     data retention question"</span>},
+ {"title":"take the migration script",
+  "assignee":<span class="good">"Emily"</span>},
+ {"title":"bump the Postgres version",
+  "due":<span class="good">null</span>}]</pre>
+        <p class="why">Export left unowned and correctly blocked. Emily attached to the migration script, where the notes actually put her. No task invented for Kevin.</p>
+      </div>
+      <div class="out">
+        <header>
+          <span class="name">Qwen3-1.7B</span>
+          <span class="chip err">4/10</span>
+        </header>
+        <pre>[{"title":"Fix invoice export",
+  "assignee":<span class="flag">"Emily"</span>,
+  "blocked_by":<span class="flag">null</span>},
+ {"title":"Bump Postgres version",
+  "assignee":null},
+ {"title":"Wait for legal sign-off",
+  "assignee":null}]
+<span class="flag">// migration script task: missing</span></pre>
+        <p class="why">Put Emily on the export — she was never assigned to it. Dropped her actual task entirely, and lost the legal blocker by promoting it to a task of its own.</p>
+      </div>
+      <div class="out">
+        <header>
+          <span class="name">Qwen3.5-2B</span>
+          <span class="chip err">4/10</span>
+        </header>
+        <pre>[{"title":"Fix invoice export",
+  "assignee":<span class="flag">"Emily"</span>,
+  "due":<span class="flag">"14th"</span>,
+  "blocked_by":"Legal data
+     retention question"},
+ {"title":"Bump Postgres version",
+  "due":null},
+ {"title":<span class="flag">"Kevin availability"</span>,
+  "assignee":<span class="flag">"Kevin"</span>,
+  "due":<span class="flag">"14th"</span>}]</pre>
+        <p class="why">Same wrong owner, plus a due date dragged in from an unrelated sentence, plus a task conjured from "Kevin is out until the 14th" — a fact, not an action item.</p>
+      </div>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th>Absent fact</th>
+            <th>Contradiction</th>
+            <th>Ambiguous tasks</th>
+            <th>Total</th>
+            <th>Sec</th>
+            <th>Tokens</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="hi"><td>granite-4.0-h-micro</td><td class="num">6/6</td><td class="num">7/8</td><td class="num">10/10</td><td class="num">23/24</td><td class="num">29.1</td><td class="num">211</td></tr>
+          <tr class="hi"><td>granite-4.1-3b</td><td class="num">6/6</td><td class="num">7/8</td><td class="num">10/10</td><td class="num">23/24</td><td class="num">27.6</td><td class="num">217</td></tr>
+          <tr class="hi"><td>LFM2-2.6B</td><td class="num">6/6</td><td class="num">5/8</td><td class="num">10/10</td><td class="num">21/24</td><td class="num">20.9</td><td class="num">218</td></tr>
+          <tr><td>Phi-4-mini</td><td class="num">6/6</td><td class="num">7/8</td><td class="num">8/10</td><td class="num">21/24</td><td class="num">31.2</td><td class="num">216</td></tr>
+          <tr><td>Qwen3-4B-Instruct-2507</td><td class="num">6/6</td><td class="num">6/8</td><td class="num">8/10</td><td class="num">20/24</td><td class="num">37.6</td><td class="num">254</td></tr>
+          <tr><td>SmolLM3-3B</td><td class="num">6/6</td><td class="num">5/8</td><td class="num">8/10</td><td class="num">19/24</td><td class="num">24.7</td><td class="num">204</td></tr>
+          <tr><td>Qwen3-1.7B</td><td class="num">6/6</td><td class="num">6/8</td><td class="num">4/10</td><td class="num">16/24</td><td class="num">13.2</td><td class="num">189</td></tr>
+          <tr><td>Qwen3.5-2B</td><td class="num">6/6</td><td class="num">6/8</td><td class="num">4/10</td><td class="num">16/24</td><td class="num">17.7</td><td class="num">181</td></tr>
+        </tbody>
+        <caption>Every model refused the absent-fact question correctly rather than inventing TLS details — grounded Q&amp;A is not where these models fail. Extraction under ambiguity is. Qwen3-4B and Phi-4-mini also turned Kevin's absence into a task; only the two Granites and LFM2-2.6B came through clean.</caption>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Also worth knowing</h2>
+    <ul class="notes">
+      <li>
+        <span class="k">Binary / BitNet</span>
+        <span class="v">Kernels are fine; quality isn't. bitnet.cpp's AVX2 paths are genuine — its flagship benchmark CPU is itself AVX2-only — so <strong>the earlier Ternary-Bonsai failure was that PrismML fork's scalar fallback, not an ecosystem limit</strong>. But BitNet-2B-4T scores IFEval 53.5, far below every dense model here. Not worth revisiting until someone ships ternary with modern post-training.</span>
+      </li>
+      <li>
+        <span class="k">Long tickets</span>
+        <span class="v">granite-4.0-h-micro is hybrid Mamba2 with constant KV memory, so its rate should hold as threads grow while the dense models sag. It ties granite-4.1-3b on quality and trails it at short context. <strong>Benchmark both at depth 4k/16k before committing</strong> if ticket threads run long.</span>
+      </li>
+      <li>
+        <span class="k">Grader honesty</span>
+        <span class="v">My first grader docked every model for not saying "cause unknown" on the summary test. Re-reading the outputs, they were right and the check was wrong — they reported the observed TLS timeout without asserting a root cause. Fixed before scoring. The "doesn't attribute claims" flag still on the Granites is likewise a regex artifact; granite-4.1's summary attributes properly and preserves <em>"root cause has not yet been identified."</em></span>
+      </li>
+      <li>
+        <span class="k">Honest margin</span>
+        <span class="v">Yes, there's something faster than what's running — but it's <strong>1.2–1.7× decode, not the 3–5×</strong> the file-size math implies. The real win isn't t/s: a 2 GB model answers a ticket in 10–25s instead of 60s and leaves the box free for inferq.</span>
+      </li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Running it</h2>
+    <div class="config">
+<pre><span class="c"># validated config — keep it off inferq's cores</span>
+taskset -c 0-5 /models/llamacpp-main/build/bin/llama-server \
+  <span class="fl">-m</span> /models/small-models/granite-4.1-3b-Q4_K_M.gguf \
+  <span class="fl">-t</span> 6 <span class="fl">-c</span> 8192 <span class="fl">--jinja</span> <span class="fl">--host</span> 127.0.0.1 <span class="fl">--port</span> 8099
+
+<span class="c"># the client MUST send both of these</span>
+"chat_template_kwargs": {"enable_thinking": <span class="fl">false</span>},
+"max_tokens": 512   <span class="c"># so a runaway think loop times out instead of hanging</span></pre>
+    </div>
+  </section>
+
+  <footer>
+    Greedy decoding (temperature 0), so these numbers reproduce on the same build.<br>
+    Harness, prompts, graders and raw model outputs committed at docs/scout-models/ on branch <strong>scout-models</strong>.<br>
+    11 GGUFs in /models/small-models/ · mainline llama.cpp at /models/llamacpp-main (a3b1eff) · taskq #405.
+  </footer>
+
+</div>
