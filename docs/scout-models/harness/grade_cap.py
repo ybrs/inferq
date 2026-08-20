@@ -114,14 +114,14 @@ def z2(txt):  # CSV aggregation script, /8
         s += 2; n.append("compiles")
         cp = os.path.join(d, "f.csv")
         with open(cp, "w", newline="") as f: csv.writer(f).writerows(FIXTURE)
-        try: r = subprocess.run([sys.executable, sp, cp], capture_output=True, timeout=30, text=True)
+        try: r = subprocess.run([sys.executable, sp, cp], capture_output=True, timeout=30, text=True, cwd=d)
         except subprocess.TimeoutExpired: return s, n + ["TIMEOUT"]
         out = [x.strip() for x in r.stdout.strip().split("\n") if x.strip()]
         if out == EXPECT: s += 4; n.append("correct output")
         else: n.append(f"WRONG output: {(r.stderr.strip()[:60] or out)!r}")
         bp = os.path.join(d, "bad.csv")
         with open(bp, "w", newline="") as f: csv.writer(f).writerows([["id","amount"],["1","2.00"]])
-        try: r2 = subprocess.run([sys.executable, sp, bp], capture_output=True, timeout=30, text=True)
+        try: r2 = subprocess.run([sys.executable, sp, bp], capture_output=True, timeout=30, text=True, cwd=d)
         except subprocess.TimeoutExpired: return s, n + ["TIMEOUT on missing-column path"]
         if r2.returncode == 1 and r2.stderr.strip(): s += 2; n.append("missing column -> exit 1 + stderr")
         else: n.append(f"missing-column path BAD (exit {r2.returncode}, stderr={bool(r2.stderr.strip())})")
@@ -138,10 +138,13 @@ def z4(txt):  # matplotlib chart, /6
         png = os.path.join(d, "out.png")
         env = dict(os.environ, MPLBACKEND="Agg")
         py = os.environ.get("MPL_PYTHON", sys.executable)  # a venv with matplotlib installed
-        try: r = subprocess.run([py, sp, png], capture_output=True, timeout=120, text=True, env=env)
+        try: r = subprocess.run([py, sp, png], capture_output=True, timeout=120, text=True, env=env, cwd=d)
         except subprocess.TimeoutExpired: return s, n + ["TIMEOUT"]
+        stray = [x for x in os.listdir(d) if x.endswith(".png") and x != os.path.basename(png)]
         if os.path.exists(png) and open(png, "rb").read(8) == b"\x89PNG\r\n\x1a\n":
             s += 3; n.append(f"renders a PNG ({os.path.getsize(png)} bytes)")
+        elif stray:
+            s += 1; n.append(f"IGNORES THE PATH ARGUMENT: wrote {stray[0]} instead")
         else:
             last = r.stderr.strip().splitlines()[-1][:70] if r.stderr.strip() else "silent"
             if "No module named 'matplotlib'" in last:
