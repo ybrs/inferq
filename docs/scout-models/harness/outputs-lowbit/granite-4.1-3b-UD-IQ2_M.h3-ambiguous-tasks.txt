@@ -1,0 +1,21 @@
+[elapsed 19.6s, completion_tokens 118, prompt_tokens 147]
+[
+  {
+    "title": "Fix invoice export",
+    "assignee": null,
+    "due": null,
+    "blocked_by": "legal signs off on the data retention question"
+  },
+  {
+    "title": "Start on invoice export after legal sign-off",
+    "assignee": "Emily",
+    "due": null,
+    "blocked_by": null
+  },
+  {
+    "title": "Bump Postgres version",
+    "assignee": null,
+    "due": null,
+    "blocked_by": null
+  }
+]

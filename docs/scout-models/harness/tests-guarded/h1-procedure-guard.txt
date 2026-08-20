@@ -1,0 +1,18 @@
+Answer the question using ONLY the ticket below.
+
+Procedure — follow it exactly:
+1. Search the ticket for a sentence that states the answer.
+2. If you find one, quote it, then answer.
+3. If no sentence states the answer, reply exactly: NOT IN TICKET
+
+You must not use knowledge from outside the ticket. Plausible guesses are wrong answers.
+
+Ticket #8841 (customer: Acme Corp, plan: enterprise)
+- 09:14 customer: "Since this morning our webhook deliveries to https://hooks.acme.example/orders are failing. Dashboard shows 100% failure since 06:30 UTC."
+- 09:20 support: asked for a sample delivery ID.
+- 09:31 customer: "dlv_9f3k2. Also we changed nothing on our side."
+- 09:40 support: internal note — delivery logs show TLS handshake timeout after 10s on all attempts. Retries exhausted after 5 attempts.
+
+Question: Which TLS version and cipher suite is the customer's endpoint negotiating?
+
+Answer:

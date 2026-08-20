@@ -1,0 +1,16 @@
+Answer the question using ONLY the ticket. If the ticket does not state the answer, reply exactly: NOT IN TICKET
+
+Example
+Ticket: "- 10:02 customer: login page returns 500."
+Question: What is the customer's account ID?
+Answer: NOT IN TICKET
+
+Now the real one.
+Ticket #8841 (customer: Acme Corp, plan: enterprise)
+- 09:14 customer: "Since this morning our webhook deliveries to https://hooks.acme.example/orders are failing. Dashboard shows 100% failure since 06:30 UTC."
+- 09:20 support: asked for a sample delivery ID.
+- 09:31 customer: "dlv_9f3k2. Also we changed nothing on our side."
+- 09:40 support: internal note — delivery logs show TLS handshake timeout after 10s on all attempts. Retries exhausted after 5 attempts.
+
+Question: Which TLS version and cipher suite is the customer's endpoint negotiating?
+Answer:
