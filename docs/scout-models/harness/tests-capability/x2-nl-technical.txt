@@ -1,0 +1,9 @@
+Translate the Dutch text below into English. Output only the translation.
+
+De doorvoer van het decodeerpad wordt niet begrensd door rekenkracht maar door
+geheugenbandbreedte. Op deze machine halen we in de praktijk ongeveer 19 tot 21
+GB/s, terwijl de streamingbenchmark 31,8 GB/s rapporteert. Daardoor valt de
+gemeten snelheid ruwweg 35 procent lager uit dan een schatting op basis van de
+bestandsgrootte. Kwantisatie onder de vier bits levert bovendien nauwelijks
+winst op, omdat het uitpakken van de gewichten rekentijd kost die de kernen
+zonder VNNI-instructies niet beschikbaar hebben.

@@ -1,0 +1,2 @@
+[elapsed 6.5s, completion_tokens 104, prompt_tokens 189]
+The transmission of the decoding path is not limited by computational power but by memory bandwidth. On this machine, in practice, we achieve approximately 19 to 21 GB/s, while the streaming benchmark reports 31.8 GB/s. Therefore, the measured speed is roughly 35 percent lower than a prediction based on file size. Quantization under four bits provides little or no benefit, because the unrolling of the weights takes time that the cores do not have available without VNNI instructions.

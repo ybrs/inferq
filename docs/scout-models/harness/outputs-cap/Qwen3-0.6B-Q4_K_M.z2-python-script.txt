@@ -1,0 +1,23 @@
+[elapsed 3.9s, completion_tokens 162, prompt_tokens 123]
+```python
+import csv
+
+def main():
+    file_path = sys.argv[1]
+    with open(file_path, 'r') as file:
+        csv_reader = csv.DictReader(file)
+        status_counts = {}
+        total_orders = 0
+        for row in csv_reader:
+            status = row['status']
+            status_counts[status] = status_counts.get(status, 0) + 1
+            total_orders += status_counts[status]
+        if 'status' not in status_counts:
+            print("Error: 'status' column not found in the CSV file")
+            return
+        print(f"{status_counts['status']}: {total_orders:.2f}, {total_orders:.2f}")
+        return
+
+if __name__ == "__main__":
+    main()
+```

@@ -1,0 +1,2 @@
+[elapsed 10.3s, completion_tokens 51, prompt_tokens 341]
+This file is for generating reference tokens/logits for a Rust comparison CLI using a transformer model. If the input arguments are incorrect (e.g., missing required arguments or invalid file paths), the script would break due to parsing errors or file handling issues.

@@ -1,0 +1,30 @@
+[elapsed 35.6s, completion_tokens 339, prompt_tokens 147]
+import sys
+import matplotlib.pyplot as plt
+
+data = {
+    "granite-3b": {"prefill": [60.9, 121.5], "decode": [9.8, 19.1]},
+    "qwen-1.7b": {"prefill": [356.3, 121.5], "decode": [49.8, 19.1]},
+    "qwen-0.6b": {"prefill": [60.9, 356.3], "decode": [9.8, 49.8]},
+}
+
+models = list(data.keys())
+prefill_values = [data[model]["prefill"] for model in models]
+decode_values = [data[model]["decode"] for model in models]
+
+bar_width = 0.35
+index = range(len(models))
+
+plt.figure()
+bars1 = plt.bar(index, pfill_values, bar_width, label='Prefill tokens/s', color='skyblue')
+bars2 = plt.bar(index + bar_width, decode_values, bar_width, label='Decode tokens/s', color='orange')
+
+plt.xlabel('Models')
+plt.ylabel('Tokens/s')
+plt.title('Grouped Bar Chart of Models')
+plt.yticks([10, 20, 30, 40, 50, 60, 70, 80, 90, 100], [10, 20, 30, 40, 50, 60, 70, 80, 90, 100])
+plt.legend()
+plt.ylim(0, 100)
+plt.yscale('log')
+plt.savefig(sys.argv[1])
+plt.close()

@@ -1,0 +1,8 @@
+Draw the workflow below as a Mermaid flowchart. Output ONLY the mermaid code starting with "flowchart TD", no fences, no prose.
+
+Workflow:
+"Every night we pull the raw orders export and the returns export. Once both are
+down we validate them; validation has to see both files. If validation passes we
+load orders into the warehouse and, separately, load returns into the warehouse —
+those two don't depend on each other. When both loads are done we rebuild the
+daily summary table, and after that we send the summary email."

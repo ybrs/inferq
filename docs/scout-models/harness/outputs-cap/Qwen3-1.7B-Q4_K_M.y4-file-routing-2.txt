@@ -1,0 +1,2 @@
+[elapsed 1.2s, completion_tokens 18, prompt_tokens 149]
+["src/tool_calls.rs", "src/trace.rs", "src/runtime.rs"]

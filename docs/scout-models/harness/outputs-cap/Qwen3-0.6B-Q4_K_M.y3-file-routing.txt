@@ -1,0 +1,8 @@
+[elapsed 0.9s, completion_tokens 25, prompt_tokens 142]
+```json
+[
+  "src/config.rs",
+  "src/loader.rs",
+  "src/runtime.rs"
+]
+```

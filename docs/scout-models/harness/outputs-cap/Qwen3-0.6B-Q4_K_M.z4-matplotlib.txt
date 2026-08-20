@@ -1,0 +1,23 @@
+[elapsed 5.0s, completion_tokens 200, prompt_tokens 158]
+```python
+import matplotlib.pyplot as plt
+
+# Data for the grouped bar chart
+models = ["granite-3b", "qwen-1.7b", "qwen-0.6b"]
+tokens_per_model = [60.9, 121.5, 356.3]
+decode_tokens_per_model = [9.8, 19.1, 49.8]
+
+# Create a grouped bar chart
+plt.figure(figsize=(10, 6))
+plt.bar(models, tokens_per_model, label="Prefill Tokens/s", alpha=0.7, capsize=5)
+plt.bar(models, decode_tokens_per_model, label="Decode Tokens/s", alpha=0.7, capsize=5)
+
+# Add a legend
+plt.legend()
+
+# Add a log scale on the y-axis
+plt.yscale('log')
+
+# Save the plot to the specified path
+plt.savefig('output.png')
+```

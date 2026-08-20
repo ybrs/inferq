@@ -1,0 +1,2 @@
+[elapsed 2.3s, completion_tokens 65, prompt_tokens 346]
+This file is for the Rust comparison CLI, which uses Transformers reference tokens and logits to generate output for comparing Rust and C++ code. If this file were wrong, it could cause errors in the Rust comparison CLI, such as incorrect tokenization or model loading, leading to incorrect output or failure to compare code effectively.

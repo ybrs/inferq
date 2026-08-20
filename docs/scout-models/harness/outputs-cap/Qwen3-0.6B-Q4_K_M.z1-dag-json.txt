@@ -1,0 +1,42 @@
+[elapsed 4.9s, completion_tokens 207, prompt_tokens 158]
+```json
+{
+  "nodes": [
+    {
+      "id": "raw_orders_export",
+      "run": "every night"
+    },
+    {
+      "id": "returns_export",
+      "run": "every night"
+    },
+    {
+      "id": "validation",
+      "run": "both files"
+    },
+    {
+      "id": "load_orders",
+      "run": "after validation"
+    },
+    {
+      "id": "load_returns",
+      "run": "after validation"
+    },
+    {
+      "id": "daily_summary",
+      "run": "after both loads"
+    },
+    {
+      "id": "summary_email",
+      "run": "after daily_summary"
+    }
+  ],
+  "edges": [
+    ["raw_orders_export", "validation"],
+    ["validation", "load_orders"],
+    ["load_orders", "load_returns"],
+    ["load_returns", "daily_summary"],
+    ["daily_summary", "summary_email"]
+  ]
+}
+```

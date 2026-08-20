@@ -3,7 +3,8 @@
 # model's own chat template applies. Writes one file per prompt to outputs/.
 #
 # Usage: quality.sh <model-file.gguf> [suite]
-#   suite: "task" (t1-t3, default), "faith" (h1-h3), or "control" (c1-c2)
+#   suite: "task" (t1-t3, default), "faith" (h1-h3), "control" (c1-c2),
+#          or "cap" (translation, code reading, DAG/script, diagram)
 #
 # Env:
 #   SYSTEM=<file>  prepend this file as a system message. The user prompts stay
@@ -15,7 +16,8 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LLAMA_BIN="${LLAMA_BIN:-/models/llamacpp-main/build/bin}"
 MODEL_DIR="${MODEL_DIR:-/models/small-models}"
-TESTS="$HERE/tests"
+TESTS_ENV="${TESTS:-}"
+TESTS="${TESTS_ENV:-$HERE/tests}"
 OUTDIR="${OUTDIR:-$HERE/outputs}"
 PORT="${PORT:-8099}"
 
@@ -27,6 +29,10 @@ case "$SUITE" in
   task)  PROMPTS="t1-task-extract t2-ticket-summary t3-python-script" ;;
   faith) PROMPTS="h1-absent-fact h2-conflict h3-ambiguous-tasks" ;;
   control) PROMPTS="c1-answerable-fact c2-owned-tasks" ;;
+  cap)   TESTS="${TESTS_ENV:-$HERE/tests-capability}"
+         PROMPTS="x1-nl-ticket x2-nl-technical x3-nl-falsefriends
+                  y1-rust-summary y2-python-summary y3-file-routing y4-file-routing-2
+                  z1-dag-json z2-python-script z3-mermaid z4-matplotlib" ;;
   *)     echo "unknown suite: $SUITE" >&2; exit 2 ;;
 esac
 

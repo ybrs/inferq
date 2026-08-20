@@ -1,0 +1,10 @@
+Turn the workflow below into a JSON DAG. Output ONLY a JSON object of the form {"nodes": [{"id": string, "run": string}], "edges": [[from_id, to_id]]}, no prose, no fences. An edge means the first node must finish before the second starts.
+
+Workflow:
+"Every night we pull the raw orders export and the returns export. Once both are
+down we validate them; validation has to see both files. If validation passes we
+load orders into the warehouse and, separately, load returns into the warehouse —
+those two don't depend on each other. When both loads are done we rebuild the
+daily summary table, and after that we send the summary email."
+
+JSON:

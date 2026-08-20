@@ -6,7 +6,8 @@ does not justify loading Qwen3.6-35B-A3B.
 
 Full findings: [`report.md`](report.md). Lower quants and smaller models:
 [`alternates.md`](alternates.md). How far strict prompting moves the numbers:
-[`guards.md`](guards.md).
+[`guards.md`](guards.md). Whether the small models can translate, read code,
+build DAGs or draw diagrams: [`capabilities.md`](capabilities.md).
 
 **Result:** run `granite-4.1-3b-Q4_K_M` — 24/24 on faithfulness with no prompt
 guard at all. The two fastest models (`Qwen3-1.7B`, `Qwen3.5-2B`) fabricate task
@@ -44,6 +45,7 @@ cd harness
 python3 report.py       # scoreboard: speed + task suite
 python3 grade_h.py      # scoreboard: faithfulness suite
 python3 grade_c.py      # scoreboard: control probes (over-refusal check)
+python3 grade_cap.py    # scoreboard: capability probes (DAG, script, diagram)
 ```
 
 The three graders take an outputs directory as their first argument
@@ -87,6 +89,7 @@ Clients must send `"chat_template_kwargs": {"enable_thinking": false}` and a har
 report.md              findings, tables, and the raw outputs that decided it
 alternates.md          low quants and smaller models
 guards.md              prompt guards: what they fix, and what they break
+capabilities.md        translation, code reading, DAGs, diagrams
 harness/
   bench.sh             llama-bench sweep
   quality.sh           one model, one suite (task or faith)
@@ -98,6 +101,7 @@ harness/
   grade_h.py           faithfulness grader
   report.py            speed + task-suite scoreboard
   tests/               the six suite prompts plus the two control probes
+  tests-capability/    the capability probes (translation, code, DAG, diagram)
   tests-guarded/       system guards; -v2 adds the extraction example
   outputs/             raw model responses, one file per model per prompt
   outputs-lowbit/      the same for the low-quant builds

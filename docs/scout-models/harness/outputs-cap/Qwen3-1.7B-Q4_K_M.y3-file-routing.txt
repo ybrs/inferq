@@ -1,0 +1,6 @@
+[elapsed 2.1s, completion_tokens 23, prompt_tokens 142]
+[
+    "src/kv_cache.rs",
+    "src/runtime.rs",
+    "src/config.rs"
+]
