@@ -1,0 +1,6 @@
+Extract action items from the message into JSON. Output ONLY a JSON array, no prose, no fences. Each item: {"title": string, "assignee": string or null, "due": string or null, "blocked_by": string or null}. Use null when the message does not state a value. Never invent an assignee or a date.
+
+Message:
+"Standup notes: Dana is fixing the checkout timeout and she'll have it done by Friday. Marcus owns the S3 bucket cleanup and it's due March 3. The staging redeploy can't go out until the new certificate lands."
+
+JSON:

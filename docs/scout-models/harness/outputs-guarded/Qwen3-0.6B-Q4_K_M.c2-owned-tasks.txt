@@ -1,0 +1,7 @@
+[elapsed 2.2s, completion_tokens 74, prompt_tokens 492]
+```json
+[
+  {"title": "Dana is fixing the checkout timeout", "assignee": "Dana", "due": "Friday", "blocked_by": null},
+  {"title": "Marcus owns the S3 bucket cleanup", "assignee": "Marcus", "due": "March 3", "blocked_by": null}
+]
+```

@@ -1,0 +1,27 @@
+[elapsed 19.3s, completion_tokens 159, prompt_tokens 815]
+[
+  {
+    "title": "Fix the broken invoice export",
+    "assignee": null,
+    "due": null,
+    "blocked_by": "legal signs off on the data retention question"
+  },
+  {
+    "title": "Take the migration script",
+    "assignee": "Emily",
+    "due": null,
+    "blocked_by": null
+  },
+  {
+    "title": "Bump the Postgres version",
+    "assignee": null,
+    "due": "NOT IN TICKET",
+    "blocked_by": null
+  },
+  {
+    "title": "Kevin is out until the 14th",
+    "assignee": null,
+    "due": null,
+    "blocked_by": null
+  }
+]

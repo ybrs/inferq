@@ -1,0 +1,2 @@
+[elapsed 0.9s, completion_tokens 19, prompt_tokens 195]
+The sample delivery ID the customer provided is "dlv_9f3k2".

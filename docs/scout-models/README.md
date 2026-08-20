@@ -4,12 +4,15 @@ Evaluation of small CPU models for a **scout** role next to the main engine:
 organizing tasks, summarizing tickets, and writing throwaway Python — work that
 does not justify loading Qwen3.6-35B-A3B.
 
-Full findings: [`report.md`](report.md). Lower quants, smaller models, and
-whether prompt guards rescue them: [`alternates.md`](alternates.md).
+Full findings: [`report.md`](report.md). Lower quants and smaller models:
+[`alternates.md`](alternates.md). How far strict prompting moves the numbers:
+[`guards.md`](guards.md).
 
-**Result:** run `granite-4.1-3b-Q4_K_M`. The two fastest models
-(`Qwen3-1.7B`, `Qwen3.5-2B`) fabricate task assignees and are not usable for
-anything that writes into a tracker.
+**Result:** run `granite-4.1-3b-Q4_K_M` — 24/24 on faithfulness with no prompt
+guard at all. The two fastest models (`Qwen3-1.7B`, `Qwen3.5-2B`) fabricate task
+assignees out of the box; a strict system prompt plus a worked example in the
+extraction call takes `Qwen3-1.7B` to 22/24 at twice the decode speed, which
+makes it a usable fallback where latency dominates ([`guards.md`](guards.md)).
 
 ## What was evaluated
 
@@ -36,10 +39,15 @@ cd harness
 ./bench.sh              # llama-bench sweep -> bench-results.md
 ./run-quality-all.sh    # task suite,        11 models -> outputs/
 ./run-halluc.sh         # faithfulness suite, 8 models -> outputs/
+./run-guarded.sh        # prompt-guard experiment -> outputs-guarded*/
 
 python3 report.py       # scoreboard: speed + task suite
 python3 grade_h.py      # scoreboard: faithfulness suite
+python3 grade_c.py      # scoreboard: control probes (over-refusal check)
 ```
+
+The three graders take an outputs directory as their first argument
+(`python3 grade_h.py outputs-lowbit`), defaulting to `outputs/`.
 
 Each `quality*.sh` starts a `llama-server`, drives it over
 `/v1/chat/completions` so the model's own chat template applies, and writes one
@@ -77,7 +85,8 @@ Clients must send `"chat_template_kwargs": {"enable_thinking": false}` and a har
 
 ```
 report.md              findings, tables, and the raw outputs that decided it
-alternates.md          low quants and smaller models; what prompt guards fix
+alternates.md          low quants and smaller models
+guards.md              prompt guards: what they fix, and what they break
 harness/
   bench.sh             llama-bench sweep
   quality.sh           one model, one suite (task or faith)
@@ -88,9 +97,10 @@ harness/
   grade.py             task-suite grader
   grade_h.py           faithfulness grader
   report.py            speed + task-suite scoreboard
-  tests/               the six prompts
-  tests-guarded/       guarded variants tried in alternates.md
+  tests/               the six suite prompts plus the two control probes
+  tests-guarded/       system guards; -v2 adds the extraction example
   outputs/             raw model responses, one file per model per prompt
   outputs-lowbit/      the same for the low-quant builds
+  outputs-guarded*/    the prompt-guard runs (see guards.md)
   bench-results.md     raw llama-bench output
 ```

@@ -1,0 +1,5 @@
+[elapsed 3.1s, completion_tokens 99, prompt_tokens 572]
+Ticket #8841 (customer: Acme Corp, plan: enterprise)  
+- The customer reported that webhook deliveries to Acme Corp's orders were failing, with 100% failure since 06:30 UTC.  
+- A sample delivery ID was requested at 09:20.  
+- The support team noted that delivery logs showed a TLS handshake timeout after 10 seconds on all customer endpoints, with retries exhausted after 5 attempts.

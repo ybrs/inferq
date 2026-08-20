@@ -1,0 +1,8 @@
+[elapsed 2.0s, completion_tokens 80, prompt_tokens 137]
+```json
+[
+  {"title": "Dana is fixing the checkout timeout", "assignee": null, "due": null},
+  {"title": "Marcus owns the S3 bucket cleanup", "assignee": null, "due": null},
+  {"title": "The staging redeploy can't go out", "assignee": null, "due": null}
+]
+```

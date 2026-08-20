@@ -3,14 +3,20 @@
 # model's own chat template applies. Writes one file per prompt to outputs/.
 #
 # Usage: quality.sh <model-file.gguf> [suite]
-#   suite: "task" (t1-t3, default) or "faith" (h1-h3)
+#   suite: "task" (t1-t3, default), "faith" (h1-h3), or "control" (c1-c2)
+#
+# Env:
+#   SYSTEM=<file>  prepend this file as a system message. The user prompts stay
+#                  byte-identical to the unguarded run, so scores are directly
+#                  comparable. Used for the prompt-guard experiment.
+#   OUTDIR=<dir>   where to write answers (default outputs/)
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LLAMA_BIN="${LLAMA_BIN:-/models/llamacpp-main/build/bin}"
 MODEL_DIR="${MODEL_DIR:-/models/small-models}"
 TESTS="$HERE/tests"
-OUTDIR="$HERE/outputs"
+OUTDIR="${OUTDIR:-$HERE/outputs}"
 PORT="${PORT:-8099}"
 
 MODEL="$1"
@@ -20,6 +26,7 @@ NAME="${MODEL%.gguf}"
 case "$SUITE" in
   task)  PROMPTS="t1-task-extract t2-ticket-summary t3-python-script" ;;
   faith) PROMPTS="h1-absent-fact h2-conflict h3-ambiguous-tasks" ;;
+  control) PROMPTS="c1-answerable-fact c2-owned-tasks" ;;
   *)     echo "unknown suite: $SUITE" >&2; exit 2 ;;
 esac
 
@@ -39,12 +46,20 @@ curl -s --max-time 2 "http://127.0.0.1:$PORT/health" | grep -q '"ok"' || {
   echo "SERVER-FAILED $MODEL"; exit 1; }
 
 for t in $PROMPTS; do
-  PROMPT=$(python3 -c "import json;print(json.dumps(open('$TESTS/$t.txt').read()))")
-  START=$(python3 -c "import time;print(time.time())")
   # enable_thinking:false is load-bearing — see README. max_tokens caps runaway think loops.
+  BODY=$(SYSTEM="${SYSTEM:-}" python3 -c "
+import json, os, sys
+msgs = []
+sysf = os.environ.get('SYSTEM')
+if sysf:
+    msgs.append({'role': 'system', 'content': open(sysf).read()})
+msgs.append({'role': 'user', 'content': open(sys.argv[1]).read()})
+print(json.dumps({'messages': msgs, 'temperature': 0, 'max_tokens': 1400, 'stream': False,
+                  'chat_template_kwargs': {'enable_thinking': False, 'thinking': False}}))
+" "$TESTS/$t.txt")
+  START=$(python3 -c "import time;print(time.time())")
   RESP=$(curl -s --max-time 600 "http://127.0.0.1:$PORT/v1/chat/completions" \
-    -H 'Content-Type: application/json' \
-    -d "{\"messages\":[{\"role\":\"user\",\"content\":$PROMPT}],\"temperature\":0,\"max_tokens\":1400,\"stream\":false,\"chat_template_kwargs\":{\"enable_thinking\":false,\"thinking\":false}}")
+    -H 'Content-Type: application/json' -d "$BODY")
   END=$(python3 -c "import time;print(time.time())")
   python3 - "$RESP" "$START" "$END" "$OUTDIR/$NAME.$t.txt" <<'PY'
 import json, sys

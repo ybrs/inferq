@@ -14,10 +14,11 @@ llama.cpp `a3b1eff`, Q4 GGUF, 6 threads pinned to cores 0–5, greedy decoding.
 
 | | Model | Why |
 | --- | --- | --- |
-| **Run this** | `granite-4.1-3b` Q4_K_M | 23/23 tasks, 23/24 faithfulness, 11.1 t/s, Apache 2.0, 1.95 GiB |
+| **Run this** | `granite-4.1-3b` Q4_K_M | 23/23 tasks, 24/24 faithfulness, 11.1 t/s, Apache 2.0, 1.95 GiB |
 | Speed alternative | `LFM2-2.6B` Q4_K_M | 13.7 t/s, 23/23 tasks, perfect on the extraction trap; blunter on summary attribution |
 | Long ticket threads | `granite-4.0-h-micro` Q4_K_M | Ties on quality, hybrid Mamba2 with constant KV memory; 10.6 t/s at short context |
 | **Do not use** | `Qwen3-1.7B`, `Qwen3.5-2B` | Fastest here, and both invent a task owner on realistic notes |
+| Latency-bound fallback | `Qwen3-1.7B` **+ prompt guard** | 22/24 at 19 t/s once the extraction call carries a worked example — see [`guards.md`](guards.md) |
 | **Do not use** | `LFM2.5-2.6B` | Ignores `enable_thinking:false`; 242s for three tasks, no summary produced |
 
 ## Speed
@@ -82,14 +83,22 @@ item with no date, and a line that looks like a task but is not (`/10`).
 
 | Model | Absent fact | Contradiction | Ambiguous tasks | Total | sec | tok |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| **granite-4.0-h-micro** | 6/6 | 7/8 | **10/10** | **23/24** | 29.1 | 211 |
-| **granite-4.1-3b** | 6/6 | 7/8 | **10/10** | **23/24** | 27.6 | 217 |
-| **LFM2-2.6B** | 6/6 | 5/8 | **10/10** | 21/24 | 20.9 | 218 |
+| **granite-4.0-h-micro** | 6/6 | **8/8** | **10/10** | **24/24** | 29.1 | 211 |
+| **granite-4.1-3b** | 6/6 | **8/8** | **10/10** | **24/24** | 27.6 | 217 |
+| **LFM2-2.6B** | 6/6 | 7/8 | **10/10** | 23/24 | 20.9 | 218 |
 | Phi-4-mini | 6/6 | 7/8 | 8/10 | 21/24 | 31.2 | 216 |
 | Qwen3-4B-Instruct-2507 | 6/6 | 6/8 | 8/10 | 20/24 | 37.6 | 254 |
-| SmolLM3-3B | 6/6 | 5/8 | 8/10 | 19/24 | 24.7 | 204 |
+| SmolLM3-3B | 6/6 | 6/8 | 8/10 | 20/24 | 24.7 | 204 |
 | Qwen3-1.7B | 6/6 | 6/8 | **4/10** | 16/24 | 13.2 | 189 |
 | Qwen3.5-2B | 6/6 | 6/8 | **4/10** | 16/24 | 17.7 | 181 |
+
+<sub>Contradiction scores are one to two points higher than this table first
+carried: the grader's attribution and root-cause checks are lexical, and missed
+"the customer, Bolt Industries, reported" and "root cause still unidentified".
+Both patterns were widened while running the prompt-guard experiment
+([`guards.md`](guards.md)); the model outputs are unchanged and the ranking did
+not move. The same correction adds a point to most rows in
+[`alternates.md`](alternates.md).</sub>
 
 Every model refused the absent-fact question rather than inventing TLS details.
 **Grounded Q&A is not where these models fail — extraction under ambiguity is.**

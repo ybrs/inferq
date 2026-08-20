@@ -1,0 +1,29 @@
+[elapsed 3.4s, completion_tokens 142, prompt_tokens 151]
+```json
+[
+  {
+    "title": "login redirect loop",
+    "assignee": "Sarah",
+    "due": null,
+    "priority": "high"
+  },
+  {
+    "title": "update changelog",
+    "assignee": null,
+    "due": null,
+    "priority": "medium"
+  },
+  {
+    "title": "rotate staging DB credentials",
+    "assignee": "Dan",
+    "due": "Wednesday",
+    "priority": "high"
+  },
+  {
+    "title": "dark mode",
+    "assignee": null,
+    "due": null,
+    "priority": "medium"
+  }
+]
+```

@@ -4,10 +4,13 @@
 t1: valid JSON array, 4 tasks, correct assignees/priorities, no invented assignee.
 t2: grounded summary — must not invent a cause; TLS/timeout fact present; no hallucinated entities.
 t3: script must be valid Python, run correctly on a fixture CSV, and exit 1 on a missing column.
+
+Usage: grade.py [outputs-dir]   (default: outputs/)
 """
 import csv, json, os, re, subprocess, sys, tempfile, glob
 
-QDIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs")
+HERE = os.path.dirname(os.path.abspath(__file__))
+QDIR = os.path.join(HERE, sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else "outputs")
 
 def strip(txt):
     txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.S)

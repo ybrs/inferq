@@ -1,0 +1,21 @@
+[elapsed 12.7s, completion_tokens 115, prompt_tokens 133]
+[
+  {
+    "title": "fix the checkout timeout",
+    "assignee": "Dana",
+    "due": "Friday",
+    "blocked_by": null
+  },
+  {
+    "title": "S3 bucket cleanup",
+    "assignee": "Marcus",
+    "due": "March 3",
+    "blocked_by": null
+  },
+  {
+    "title": "staging redeploy",
+    "assignee": null,
+    "due": null,
+    "blocked_by": "the new certificate"
+  }
+]

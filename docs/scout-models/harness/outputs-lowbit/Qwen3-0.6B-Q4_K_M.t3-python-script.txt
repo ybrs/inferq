@@ -1,0 +1,24 @@
+[elapsed 3.6s, completion_tokens 163, prompt_tokens 101]
+```python
+import sys
+
+def main():
+    file_path = sys.argv[1]
+    if "status" not in sys.argv[1].split()[1]:
+        print("Usage: python script.py <file_path> <optional_status_column>")
+        sys.exit(1)
+    
+    with open(file_path, 'r') as f:
+        csv_reader = csv.reader(f, delimiter=',')
+        status_counts = {}
+        
+        for row in csv_reader:
+            status = row[1]
+            status_counts[status] = status_counts.get(status, 0) + 1
+        
+        for status, count in sorted(status_counts.items(), key=lambda x: -x[1]):
+            print(f"{status}: {count}")
+            
+if __name__ == "__main__":
+    main()
+```
