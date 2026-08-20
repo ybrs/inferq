@@ -1,0 +1,2 @@
+[elapsed 2.7s, completion_tokens 85, prompt_tokens 555]
+Ticket #9102 (customer: Bolt Industries) states that the API returned 500s at 10:00 UTC, with no deployment made. A support note indicates a release v4.812 was rolled out at 09:58 UTC, and the error rate is 4% for POST /v2/invoices. The root cause is not yet identified.

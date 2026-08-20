@@ -1,0 +1,24 @@
+[elapsed 3.9s, completion_tokens 154, prompt_tokens 456]
+```python
+import sys
+
+def main():
+    csv_path = sys.argv[1]
+    if "status" not in sys.argv[1]:
+        print("ERROR: Missing 'status' column in CSV file")
+        sys.exit(1)
+
+    with open(csv_path, 'r') as file:
+        csv_reader = csv.reader(file)
+        status_counts = {}
+
+        for row in csv_reader:
+            status = row[0]
+            status_counts[status] = status_counts.get(status, 0) + 1
+
+        for status, count in sorted(status_counts.items(), key=lambda x: (-x[1], x[0])):
+            print(f"{status}: {count}")
+
+if __name__ == "__main__":
+    main()
+```

@@ -41,12 +41,16 @@ Faithfulness suite (`/24`, see `report.md` for what h1–h3 test):
 
 | Build | h1 | h2 | h3 | Total |
 | --- | ---: | ---: | ---: | ---: |
-| granite-4.1-3b Q4_K_M *(reference)* | 6/6 | 7/8 | 10/10 | **23/24** |
-| granite-4.1-3b IQ2_M | 6/6 | 5/8 | 8/10 | 19/24 |
-| Qwen3-1.7B Q2_K | 6/6 | 4/8 | 6/10 | 16/24 |
-| granite-4.1-3b Q2_K_XL | 6/6 | 4/8 | 4/10 | 14/24 |
-| Qwen3-0.6B Q4_K_M | 0/6 | 4/8 | 2/10 | 6/24 |
+| granite-4.1-3b Q4_K_M *(reference)* | 6/6 | 8/8 | 10/10 | **24/24** |
+| granite-4.1-3b IQ2_M | 6/6 | 6/8 | 8/10 | 20/24 |
+| Qwen3-1.7B Q2_K | 6/6 | 5/8 | 6/10 | 17/24 |
+| granite-4.1-3b Q2_K_XL | 6/6 | 5/8 | 4/10 | 15/24 |
+| Qwen3-0.6B Q4_K_M | 0/6 | 5/8 | 2/10 | 7/24 |
 | Qwen3-1.7B IQ1_S | 2/6 | 1/8 | 0/10 | 3/24 |
+
+<sub>Scored with the widened h2 patterns described in
+[`guards.md`](guards.md) — one point higher per row than first published, same
+outputs, same order.</sub>
 
 The failure modes matter more than the totals:
 
@@ -62,27 +66,21 @@ The failure modes matter more than the totals:
 
 ## Can prompt guards fix it?
 
-Partly, and only above a capacity threshold.
+Partly, and only above a capacity threshold. A first pass here found that guards
+recover most of the quantization damage at 3B and none of it at 0.6B, where they
+only converted over-claiming into blanket refusal.
 
-**At 3B, guards work.** Adding an explicit rule set plus one worked example to
-the extraction prompt took granite `Q2_K_XL` from **4/10 to 8/10** on the
-ambiguous-task probe: the export went back to unowned with its blocker intact,
-and Emily returned to the migration script. The residue is that it still emits a
-"Kevin is out" item despite a rule saying availability is not an action item.
+That result was re-run properly — one shared system prompt, unchanged user
+prompts, saved outputs, and control probes whose answers *are* present — and it
+half survives. The refusal trade is avoidable: a guard that also says "if the
+answer is present, answer it" lifts Q2_K_XL from 15/24 to **21/24** with no
+control loss, and lifts the 0.6B from 7/24 to 16/24. What does not change is the
+conclusion for this file: guarded, the low quant still turns "Kevin is out until
+the 14th" into a task, and it is the build most easily confused by a richer
+prompt — adding a worked example *lowers* its score to 19/24 and leaks the
+refusal phrase into JSON as `"due": "NOT IN TICKET"`.
 
-**At 0.6B, guards only move the failure.** The same few-shot treatment made
-Qwen3-0.6B answer `NOT IN TICKET` to the unanswerable question — but it then
-answered `NOT IN TICKET` to an *answerable* control question too (the sample
-delivery ID, which it answers correctly without the few-shot example). It did
-not learn to check whether the answer is present; it learned to refuse. On the
-extraction probe the same guard produced `[]` — nothing extracted at all.
-
-So guards trade over-claiming for under-claiming. That is arguably the safer
-direction, but it is not grounding, and a task organizer that silently drops
-every task is no more useful than one that invents owners.
-
-**Practical rule:** budget prompt guards to recover quantization damage at 3B,
-not to lift a 0.6B into a role it cannot do.
+Full experiment, including where guards backfire at ≤2B: [`guards.md`](guards.md).
 
 ## Reproducing the failures
 

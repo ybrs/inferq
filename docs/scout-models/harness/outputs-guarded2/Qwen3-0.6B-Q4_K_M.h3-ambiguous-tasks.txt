@@ -1,0 +1,8 @@
+[elapsed 3.2s, completion_tokens 96, prompt_tokens 821]
+```json
+[
+  {"title": "Fix invoice export", "assignee": null, "due": null, "blocked_by": "legal signs off on the data retention question"},
+  {"title": "Take migration script", "assignee": "Emily", "due": null, "blocked_by": null},
+  {"title": "Bump Postgres version", "assignee": null, "due": null, "blocked_by": null}
+]
+```

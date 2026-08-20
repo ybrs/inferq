@@ -1,0 +1,32 @@
+[elapsed 10.8s, completion_tokens 187, prompt_tokens 456]
+```python
+import sys
+import csv
+from collections import defaultdict
+
+def main():
+    if len(sys.argv) != 2:
+        print("Usage: python script.py <csv_file>")
+        sys.exit(1)
+
+    csv_file = sys.argv[1]
+    try:
+        with open(csv_file, 'r') as f:
+            reader = csv.DictReader(f)
+            statuses = defaultdict(int)
+            for row in reader:
+                status = row['status']
+                if status:
+                    statuses[status] += 1
+            for status, count in sorted(statuses.items(), key=lambda x: -x[1]):
+                print(f"{status}: {count}")
+    except FileNotFoundError:
+        print("File not found.")
+        sys.exit(1)
+    except KeyError:
+        print("Missing 'status' column.")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
+```

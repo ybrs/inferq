@@ -1,0 +1,4 @@
+[elapsed 7.4s, completion_tokens 110, prompt_tokens 555]
+- The customer reported that their API started returning 500s at 10:00 UTC, and no deployment was done that day.  
+- The support team noted that the deployment log shows release v4.812 was rolled out at 09:58 UTC, which is before the customer's reported issue time.  
+- The customer confirmed that their staging environment on the same API version works fine, and the support team reported an error rate of 4% limited to POST /v2/invoices.

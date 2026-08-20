@@ -1,0 +1,2 @@
+[elapsed 12.1s, completion_tokens 93, prompt_tokens 533]
+The customer reported that the API began returning 500 errors at 10:00 UTC, despite no deployments having been made that day. Internal notes indicate that release v4.812 was deployed at 09:58 UTC, and the customer confirmed that their staging environment on the same version functions correctly. Support noted an overall 4% error rate, confined to the POST /v2/invoices endpoint, with the root cause still unidentified.

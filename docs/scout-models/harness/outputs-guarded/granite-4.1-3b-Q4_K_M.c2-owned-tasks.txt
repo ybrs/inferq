@@ -1,0 +1,6 @@
+[elapsed 11.7s, completion_tokens 92, prompt_tokens 488]
+[
+  {"title": "fix checkout timeout", "assignee": "Dana", "due": "Friday", "blocked_by": null},
+  {"title": "S3 bucket cleanup", "assignee": "Marcus", "due": "March 3", "blocked_by": null},
+  {"title": "staging redeploy", "assignee": null, "due": null, "blocked_by": "new certificate"}
+]

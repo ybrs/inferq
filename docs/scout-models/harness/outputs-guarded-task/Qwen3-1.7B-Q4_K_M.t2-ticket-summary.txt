@@ -1,0 +1,4 @@
+[elapsed 5.1s, completion_tokens 67, prompt_tokens 572]
+- The customer reported webhook failures to https://hooks.acme.example/orders since 06:30 UTC, with 100% failure rate.  
+- The support team noted TLS handshake timeouts and retries exhausted after 5 attempts on all delivery attempts.  
+- The customer confirmed no changes were made on their side.

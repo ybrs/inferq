@@ -1,2 +1,2 @@
-outputs/*.server.log
+outputs*/*.server.log
 serve.log

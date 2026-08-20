@@ -1,0 +1,21 @@
+[elapsed 10.4s, completion_tokens 131, prompt_tokens 521]
+[
+  {
+    "title": "Fix invoice export",
+    "assignee": "Emily",
+    "due": "pending",
+    "blocked_by": "legal"
+  },
+  {
+    "title": "Bump Postgres version",
+    "assignee": "pending",
+    "due": "pending",
+    "blocked_by": "pending"
+  },
+  {
+    "title": "Kevin unavailable",
+    "assignee": "Kevin",
+    "due": "pending",
+    "blocked_by": "pending"
+  }
+]

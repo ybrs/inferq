@@ -1,0 +1,4 @@
+[elapsed 5.9s, completion_tokens 74, prompt_tokens 869]
+{"title": "Customer API issue", "assignee": null, "due": null, "blocked_by": null},
+{"title": "Deploy log", "assignee": null, "due": null, "blocked_by": null},
+{"title": "Error rate", "assignee": null, "due": null, "blocked_by": null}
