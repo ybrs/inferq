@@ -1,0 +1,4 @@
+[elapsed 1.0s, completion_tokens 9, prompt_tokens 1617]
+[
+    "task_to_issue"
+]

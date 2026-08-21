@@ -1,0 +1,10 @@
+[elapsed 2.2s, completion_tokens 42, prompt_tokens 1617]
+[
+  {
+    "name": "create_task",
+    "arguments": {
+      "project": "inferq",
+      "title": "Wire granite into the scout role"
+    }
+  }
+]

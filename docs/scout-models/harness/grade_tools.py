@@ -30,7 +30,10 @@ SIDE_EFFECTS = {"create_task", "delete_task", "delete_comment", "delete_document
                 "create_project", "create_document", "set_handoff", "link_nodes"}
 
 PROBES = {
+    # w1 asks for two things — change the status AND record a note — so it
+    # carries a second requirement. Dropping the note is as wrong as an extra call.
     "w1": dict(suf="w1-tool-update", need={"set_task_status", "update_task"},
+               need2={"add_comment"},
                ok={"set_task_status", "update_task", "add_comment", "get_task",
                    "list_comments", "set_task_summary"}),
     "w2": dict(suf="w2-tool-search", need={"search_taskq"},
@@ -48,7 +51,7 @@ def unfence(t):
     m = re.search(r"```(?:json)?\s*(.*?)```", t, re.S)
     return m.group(1).strip() if m else t
 
-def score(txt, need, ok):
+def score(txt, need, ok, need2=None):
     b = unfence(strip(txt)); n = []; s = 0
     if not b: return 0, ["NO ANSWER EMITTED"]
     try: picks = json.loads(b)
@@ -59,8 +62,12 @@ def score(txt, need, ok):
     ghosts = [p for p in picks if p not in LISTING]
     if ghosts: n.append(f"FABRICATED TOOL: {ghosts} (fails closed — server rejects it)")
     else: s += 2
-    if set(picks) & need: s += 2; n.append(f"found {sorted(set(picks) & need)[0]}")
+    pts = 1 if need2 else 2
+    if set(picks) & need: s += pts; n.append(f"found {sorted(set(picks) & need)[0]}")
     else: n.append(f"MISSES the tool for the job ({'/'.join(sorted(need))})")
+    if need2:
+        if set(picks) & need2: s += 1; n.append(f"found {sorted(set(picks) & need2)[0]}")
+        else: n.append(f"MISSES the second half of the request ({'/'.join(sorted(need2))})")
     stray = [p for p in picks if p in LISTING and p not in ok]
     danger = [p for p in stray if p in SIDE_EFFECTS]
     if danger: n.append(f"UNREQUESTED SIDE EFFECT: {danger} (fails open — it runs)")
@@ -75,7 +82,7 @@ for f in sorted(glob.glob(os.path.join(QDIR, "*.w1-tool-update.txt"))):
     for key, cfg in PROBES.items():
         p = os.path.join(QDIR, f"{name}.{cfg['suf']}.txt")
         if not os.path.exists(p): r["s"][key] = None; continue
-        sc, nn = score(open(p).read(), cfg["need"], cfg["ok"])
+        sc, nn = score(open(p).read(), cfg["need"], cfg["ok"], cfg.get("need2"))
         r["s"][key] = f"{sc}/6"; r["n"][key] = nn; tot += sc
     r["total"] = tot; ROWS.append(r)
 
