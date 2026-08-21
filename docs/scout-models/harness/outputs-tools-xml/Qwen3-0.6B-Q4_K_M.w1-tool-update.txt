@@ -1,0 +1,22 @@
+[elapsed 8.7s, completion_tokens 100, prompt_tokens 1620]
+[
+  "create_task",
+  "claim_task",
+  "task_queue",
+  "task_summaries",
+  "task_to_issue",
+  "add_comment",
+  "delete_comment",
+  "delete_task",
+  "delete_document",
+  "delete_task",
+  "delete_document",
+  "delete_comment",
+  "delete_task",
+  "delete_document",
+  "delete_comment",
+  "delete_task",
+  "delete_document",
+  "delete_comment",
+  "delete_task"
+]

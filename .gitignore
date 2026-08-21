@@ -17,3 +17,4 @@ kernel-run-logs/*.json
 kernel-run-logs/*.log
 expert-run-logs/*.json
 expert-run-logs/*.log
+tq.conf

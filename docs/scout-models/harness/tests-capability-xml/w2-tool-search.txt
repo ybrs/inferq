@@ -1,0 +1,193 @@
+You have the tools below. Answer with ONLY a JSON array of the tool names you would call, in the order you would call them, using the exact names from the list. No prose, no fences.
+
+<tools>
+<tool>
+<name>add_comment</name>
+<description>Leave a comment on a task. This is how progress and findings are recorded.</description>
+</tool>
+<tool>
+<name>agent_connections</name>
+<description>The connection log: every attempt to connect, accepted or refused.</description>
+</tool>
+<tool>
+<name>assign_task</name>
+<description>Say who a task is for; omit assignee to clear it. Not the same as claiming it.</description>
+</tool>
+<tool>
+<name>claim_task</name>
+<description>Take a task so another agent will not pick it up, moving it to in_progress.</description>
+</tool>
+<tool>
+<name>create_document</name>
+<description>Create an adr/prd/technical_design/proposal from a body or a repo file.</description>
+</tool>
+<tool>
+<name>create_project</name>
+<description>Create a project. repo_root is the checkout its documents live in.</description>
+</tool>
+<tool>
+<name>create_pull_request</name>
+<description>Push the current branch and open a pull request, returning its URL.</description>
+</tool>
+<tool>
+<name>create_task</name>
+<description>Create a task, optionally as a subtask of parent.</description>
+</tool>
+<tool>
+<name>delete_comment</name>
+<description>Delete one comment. Nothing cascades; restore_comment brings it back.</description>
+</tool>
+<tool>
+<name>delete_document</name>
+<description>Delete one document. Nothing cascades; restore_document brings it back.</description>
+</tool>
+<tool>
+<name>delete_task</name>
+<description>Delete a task together with its subtasks and their comments.</description>
+</tool>
+<tool>
+<name>get_document</name>
+<description>Show one document with its body (or repo file reference) and relations.</description>
+</tool>
+<tool>
+<name>get_handoff</name>
+<description>A project's current handoff, and the tasks it points at.</description>
+</tool>
+<tool>
+<name>get_project</name>
+<description>Show one project (by name or id) and its top-level tasks.</description>
+</tool>
+<tool>
+<name>get_task</name>
+<description>Show one task with its subtasks, relations, comments, and recent events.</description>
+</tool>
+<tool>
+<name>git_push</name>
+<description>Push the project's current branch, setting upstream on first push.</description>
+</tool>
+<tool>
+<name>git_push_all</name>
+<description>Push every branch of the project's repo to its remote.</description>
+</tool>
+<tool>
+<name>git_status</name>
+<description>The git state of every repo in a project: branch, tracking, working-tree changes.</description>
+</tool>
+<tool>
+<name>link_nodes</name>
+<description>Record a relation: blocked_by, requires, documented_by, or references.</description>
+</tool>
+<tool>
+<name>list_agents</name>
+<description>List the tq agents that have ever connected, most recently seen first.</description>
+</tool>
+<tool>
+<name>list_comments</name>
+<description>List a task's comments, oldest first.</description>
+</tool>
+<tool>
+<name>list_deleted</name>
+<description>List what has been deleted: the trash, most recently deleted first.</description>
+</tool>
+<tool>
+<name>list_documents</name>
+<description>List documents, optionally by project or type.</description>
+</tool>
+<tool>
+<name>list_events</name>
+<description>Read the append-only event history, newest first.</description>
+</tool>
+<tool>
+<name>list_projects</name>
+<description>List every project with its task count.</description>
+</tool>
+<tool>
+<name>list_tasks</name>
+<description>List tasks as a flat array; nest them yourself via parent_id. Filters by status, parent, assignee.</description>
+</tool>
+<tool>
+<name>pr_status</name>
+<description>The pull request for the current branch: state, review decision, merge status, and URL.</description>
+</tool>
+<tool>
+<name>project_status</name>
+<description>A project's status: what is in progress, recently closed, and next up.</description>
+</tool>
+<tool>
+<name>release_task</name>
+<description>Release a task's claim, leaving its status alone.</description>
+</tool>
+<tool>
+<name>restart_agent</name>
+<description>Restart one connected agent, named by id or by unambiguous name.</description>
+</tool>
+<tool>
+<name>restart_server</name>
+<description>Restart the taskq frontends so code changes on the host take effect.</description>
+</tool>
+<tool>
+<name>restore_comment</name>
+<description>Restore a deleted comment.</description>
+</tool>
+<tool>
+<name>restore_document</name>
+<description>Restore a deleted document.</description>
+</tool>
+<tool>
+<name>restore_task</name>
+<description>Restore a deleted task, undoing exactly what its own delete hid.</description>
+</tool>
+<tool>
+<name>search_taskq</name>
+<description>Find tasks, comments, and documents by describing them. Use this when the user refers to work by what it is about instead of by id.</description>
+</tool>
+<tool>
+<name>server_status</name>
+<description>Show the running taskq serve: pids, port, uptime and restart count.</description>
+</tool>
+<tool>
+<name>set_handoff</name>
+<description>Replace a project's handoff with where things stand right now.</description>
+</tool>
+<tool>
+<name>set_task_status</name>
+<description>Move a task to todo/in_progress/blocked/done/cancelled. Takes an optional comment explaining the transition.</description>
+</tool>
+<tool>
+<name>set_task_summary</name>
+<description>Set a task's short summary; omit summary to clear it.</description>
+</tool>
+<tool>
+<name>task_queue</name>
+<description>What to pick up next: unclaimed todo tasks, highest priority first.</description>
+</tool>
+<tool>
+<name>task_summaries</name>
+<description>Open tasks with their summaries, highest priority first.</description>
+</tool>
+<tool>
+<name>task_to_issue</name>
+<description>Open a GitHub issue for a task and record the issue number+URL on it.</description>
+</tool>
+<tool>
+<name>unlink_nodes</name>
+<description>Remove a relation previously recorded by link_nodes.</description>
+</tool>
+<tool>
+<name>update_document</name>
+<description>Update a document. Setting body clears file_path and vice versa.</description>
+</tool>
+<tool>
+<name>update_project</name>
+<description>Update a project's description, repo_root or parent.</description>
+</tool>
+<tool>
+<name>update_task</name>
+<description>Update a task's fields (title, description, priority, severity, branch, parent, project). Omitted fields are left alone.</description>
+</tool>
+</tools>
+
+REQUEST
+Find the ticket about slow page loads. I do not know its number.
+
+JSON:
