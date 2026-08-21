@@ -1,3 +1,6 @@
 # server logs and scratch from runs; results/ is committed, these are not
 *.log
 __pycache__/
+outputs*/*.server.log
+serve.log
+*.png
