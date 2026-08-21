@@ -1,0 +1,113 @@
+[
+ {
+  "file": "Qwen3-0.6B-Q4_K_M.gguf",
+  "arch": "qwen3",
+  "size_bytes": 396705472,
+  "fa": "0",
+  "reps": "2",
+  "host": {
+   "governors": {
+    "cpu0": {
+     "scaling_governor": "powersave",
+     "scaling_min_freq": "800000",
+     "scaling_max_freq": "4600000",
+     "scaling_cur_freq": "2600124"
+    },
+    "cpu1": {
+     "scaling_governor": "powersave",
+     "scaling_min_freq": "800000",
+     "scaling_max_freq": "4600000",
+     "scaling_cur_freq": "2601202"
+    },
+    "cpu2": {
+     "scaling_governor": "powersave",
+     "scaling_min_freq": "800000",
+     "scaling_max_freq": "4600000",
+     "scaling_cur_freq": "3511928"
+    },
+    "cpu3": {
+     "scaling_governor": "powersave",
+     "scaling_min_freq": "800000",
+     "scaling_max_freq": "4600000",
+     "scaling_cur_freq": "1949143"
+    },
+    "cpu4": {
+     "scaling_governor": "powersave",
+     "scaling_min_freq": "800000",
+     "scaling_max_freq": "4600000",
+     "scaling_cur_freq": "2316416"
+    },
+    "cpu5": {
+     "scaling_governor": "powersave",
+     "scaling_min_freq": "800000",
+     "scaling_max_freq": "4600000",
+     "scaling_cur_freq": "2669528"
+    },
+    "no_turbo": "0"
+   },
+   "cpuset_effective": "0-11",
+   "cpu_busy_pinned": {
+    "0": 0.041,
+    "1": 0.015,
+    "2": 0.02,
+    "3": 0.09,
+    "4": 0.01,
+    "5": 0.198
+   },
+   "cpu_busy_siblings": {
+    "6": 0.025,
+    "7": 0.181,
+    "8": 0.02,
+    "9": 0.191,
+    "10": 0.051,
+    "11": 0.04
+   },
+   "cpu_mhz_mean": 2456.6,
+   "coretemp_c": 54.0,
+   "swap": {
+    "pswpin": 316615,
+    "pswpout": 1960868
+   },
+   "disk_busy": {},
+   "loadavg": [
+    2.98,
+    3.55,
+    3.9
+   ],
+   "wall_time": 1787311896.7799807
+  },
+  "prefill_raw": {
+   "ok": true,
+   "returncode": 0,
+   "stdout": "| model                          |       size |     params | backend    | threads |  fa |            test |                  t/s |\n| ------------------------------ | ---------: | ---------: | ---------- | ------: | --: | --------------: | -------------------: |\n| qwen3 0.6B Q4_K - Medium       | 372.65 MiB |   596.05 M | CPU        |       6 |   0 |           pp128 |        420.10 \u00b1 2.40 |\n| qwen3 0.6B Q4_K - Medium       | 372.65 MiB |   596.05 M | CPU        |       6 |   0 |           pp901 |        333.80 \u00b1 5.53 |\n| qwen3 0.6B Q4_K - Medium       | 372.65 MiB |   596.05 M | CPU        |       6 |   0 |          pp7427 |        145.59 \u00b1 0.48 |\n\nbuild: a3b1eff (1)\n",
+   "cmd": "taskset -c 0-5 /models/llamacpp-main/build/bin/llama-bench -m /models/small-models/Qwen3-0.6B-Q4_K_M.gguf -t 6 -fa 0 -r 2 -p 128,901,7427 -n 0"
+  },
+  "decode_raw": {
+   "ok": false,
+   "returncode": -9,
+   "stdout": "| model                          |       size |     params | backend    | threads |  fa |            test |                  t/s |\n| ------------------------------ | ---------: | ---------: | ---------- | ------: | --: | --------------: | -------------------: |\n| qwen3 0.6B Q4_K - Medium       | 372.65 MiB |   596.05 M | CPU        |       6 |   0 |            tg64 |         47.23 \u00b1 2.75 |\n| qwen3 0.6B Q4_K - Medium       | 372.65 MiB |   596.05 M | CPU        |       6 |   0 |     tg64 @ d128 |         49.83 \u00b1 0.05 |\n| qwen3 0.6B Q4_K - Medium       | 372.65 MiB |   596.05 M | CPU        |       6 |   0 |     tg64 @ d901 |         40.84 \u00b1 0.33 |\n",
+   "cmd": "taskset -c 0-5 /models/llamacpp-main/build/bin/llama-bench -m /models/small-models/Qwen3-0.6B-Q4_K_M.gguf -t 6 -fa 0 -r 2 -p 0 -n 64 -d 0,128,901,7427"
+  },
+  "prefill": {
+   "pp128": [
+    420.1,
+    2.4
+   ],
+   "pp901": [
+    333.8,
+    5.53
+   ],
+   "pp7427": [
+    145.59,
+    0.48
+   ]
+  },
+  "decode": {
+   "tg64": [
+    47.23,
+    2.75
+   ]
+  },
+  "decode_state": "FAILED"
+ }
+]

@@ -1,0 +1,16 @@
+PRE-FLIGHT
+  cpu_busy_now               0.08
+  loadavg_1m                 5.56
+  loadavg_5m                 4.86
+  mem_available_gb           106.4
+  cgroup_cpu_quota           None
+  pinned_cpus                [0, 1, 2, 3, 4, 5]
+  distinct_physical_cores    6
+  governor powersave, turbo on, 1600.2 MHz, 53.0C
+  flash-attn = off
+
+[1/17] Qwen3-0.6B-Q4_K_M.gguf
+    renders_tools=True think_kwarg=enable_thinking/True tool_call=set_task_status prefill=134.2 decode=14.51 fmt=None
+[2/17] Qwen3.5-0.8B-Q4_K_M.gguf
+    renders_tools=True think_kwarg=enable_thinking/True tool_call=update_task prefill=199.5 decode=25.44 fmt=None
+[3/17] Qwen3-1.7B-UD-IQ1_S.gguf

@@ -1,0 +1,79 @@
+{
+ "_why": "Known-answer probes injected anonymously into every grading batch (FAILURE-MODES 47). If a grader does not score the FULL probe at full credit and the ZERO probe at zero, that batch's grading is not trustworthy and is discarded rather than published. Stripped before aggregation. q3 has no probe because its rubric depends on execution output, which a synthetic answer cannot honestly carry; q3 relies on the double-grading agreement check instead.",
+ "s01-status-and-note": {
+  "full": {"tool_calls": [{"name": "set_task_status", "arguments": {"task_id": 405, "status": "done", "comment": "Benchmark is committed on branch scout-models."}}], "content": ""},
+  "zero": {"tool_calls": [{"name": "create_task", "arguments": {"project": "inferq", "title": "Ticket 405 finished"}}], "content": ""}
+ },
+ "s02-semantic-search": {
+  "full": {"tool_calls": [{"name": "search_taskq", "arguments": {"query": "ternary model too slow on this CPU"}}], "content": ""},
+  "zero": {"tool_calls": [{"name": "add_comment", "arguments": {"task_id": 1, "body": "looking for the ternary ticket"}}], "content": ""}
+ },
+ "s03-restraint-explain": {
+  "full": {"tool_calls": [], "content": "Claiming a task takes it for yourself right now and moves it to in_progress, so another agent will not pick it up. Assigning says who the task is for; it does not move the task or claim it."},
+  "zero": {"tool_calls": [{"name": "claim_task", "arguments": {"task_id": 1}}], "content": ""}
+ },
+ "s04-enum-blocked": {
+  "full": {"tool_calls": [{"name": "set_task_status", "arguments": {"task_id": 412, "status": "blocked", "comment": "Waiting on the upstream fix."}}], "content": ""},
+  "zero": {"tool_calls": [{"name": "set_task_status", "arguments": {"task_id": 412, "status": "on_hold"}}], "content": ""}
+ },
+ "s05-create-subtask": {
+  "full": {"tool_calls": [{"name": "create_task", "arguments": {"project": "inferq", "title": "Rebuild the quality suite with LLM grading", "parent": 406}}], "content": ""},
+  "zero": {"tool_calls": [{"name": "update_task", "arguments": {"task_id": 406, "description": "Rebuild the quality suite with LLM grading"}}], "content": ""}
+ },
+ "s06-assign-not-claim": {
+  "full": {"tool_calls": [{"name": "assign_task", "arguments": {"task_id": 419, "assignee": "Dana"}}], "content": ""},
+  "zero": {"tool_calls": [{"name": "claim_task", "arguments": {"task_id": 419}}], "content": ""}
+ },
+ "s07-cancel-not-delete": {
+  "full": {"tool_calls": [{"name": "set_task_status", "arguments": {"task_id": 431, "status": "cancelled", "comment": "Approach was wrong; not proceeding."}}], "content": ""},
+  "zero": {"tool_calls": [{"name": "delete_task", "arguments": {"task_id": 431, "reason": "approach was wrong"}}], "content": ""}
+ },
+ "s08-multiturn-followup": {
+  "full": {"tool_calls": [{"name": "set_task_status", "arguments": {"task_id": 388, "status": "done", "comment": "DeltaNet parallelism landed."}}], "content": ""},
+  "zero": {"tool_calls": [{"name": "search_taskq", "arguments": {"query": "DeltaNet recurrence parallelism"}}], "content": ""}
+ },
+ "s09-summary-not-comment": {
+  "full": {"tool_calls": [{"name": "set_task_summary", "arguments": {"task_id": 406, "summary": "Redo of the small-model scout evaluation using real MCP tool calls."}}], "content": ""},
+  "zero": {"tool_calls": [{"name": "set_task_summary", "arguments": {"task_id": 406}}], "content": ""}
+ },
+ "s10-project-overview": {
+  "full": {"tool_calls": [{"name": "project_status", "arguments": {"project": "inferq"}}], "content": ""},
+  "zero": {"tool_calls": [{"name": "git_status", "arguments": {"project": "inferq"}}], "content": ""}
+ },
+ "s11-relation-args": {
+  "full": {"tool_calls": [{"name": "link_nodes", "arguments": {"from_id": 406, "to_id": 405, "relation": "references"}}], "content": ""},
+  "zero": {"tool_calls": [{"name": "link_nodes", "arguments": {"from_id": 406, "to_id": 405, "relation": "replaces"}}], "content": ""}
+ },
+ "s12-restraint-no-capability": {
+  "full": {"tool_calls": [], "content": "taskq has no tool that sends email, so I cannot do that. If it helps I can leave a comment on ticket 419 saying it is ready for review - say the word and I will."},
+  "zero": {"tool_calls": [{"name": "task_to_issue", "arguments": {"task_id": 419}}], "content": ""}
+ },
+ "s13-pick-next": {
+  "full": {"tool_calls": [{"name": "task_queue", "arguments": {"project": "inferq"}}], "content": ""},
+  "zero": {"tool_calls": [{"name": "project_status", "arguments": {"project": "inferq"}}], "content": ""}
+ },
+ "s14-read-not-create": {
+  "full": {"tool_calls": [{"name": "get_task", "arguments": {"task_id": 405}}], "content": ""},
+  "zero": {"tool_calls": [{"name": "task_to_issue", "arguments": {"task_id": 405}}], "content": ""}
+ },
+ "q1-extract-tasks": {
+  "full": {"content": "[{\"title\": \"Fix the login redirect loop\", \"assignee\": \"Priya\", \"priority\": null, \"due\": \"Thursday\"}, {\"title\": \"Rotate the DB credentials\", \"assignee\": \"Tom\", \"priority\": \"high\", \"due\": \"Wednesday\"}, {\"title\": \"Update the changelog for 2.4\", \"assignee\": null, \"priority\": \"low\", \"due\": null}, {\"title\": \"Investigate the flaky integration test on CI\", \"assignee\": \"Priya\", \"priority\": null, \"due\": null}]"},
+  "zero": {"content": "[{\"title\": \"Fix the login redirect loop\", \"assignee\": \"Priya\", \"priority\": \"high\", \"due\": \"Thursday\"}, {\"title\": \"Rotate the DB credentials\", \"assignee\": \"Tom\", \"priority\": \"high\", \"due\": \"Wednesday\"}, {\"title\": \"Update the changelog for 2.4\", \"assignee\": \"Marcus\", \"priority\": \"low\", \"due\": null}, {\"title\": \"Marcus is out sick\", \"assignee\": \"Marcus\", \"priority\": \"low\", \"due\": null}, {\"title\": \"Flaky integration test\", \"assignee\": \"Priya\", \"priority\": null, \"due\": null}]"}
+ },
+ "q2-grounded-summary": {
+  "full": {"content": "Since 06:30 UTC every multipart upload from Northwind's account has failed with a 504 after about 30 seconds. Packet capture shows the TLS handshake completing and then no application data until we time out; no other customer is affected. The cause is not yet known and Northwind's network team has not replied."},
+  "zero": {"content": "Northwind's uploads are failing because their TLS certificate has expired, causing the handshake to break down after 30 seconds. We have asked them to renew it. Service will resume once the new certificate is installed."}
+ },
+ "q4-code-reading": {
+  "full": {"content": "It maps a query-head index to the KV-head that serves it under grouped-query attention, by integer-dividing the query head by the ratio of query heads to KV heads. The final clamp is the guard: if q_head is out of range, or n_head is not an exact multiple of n_kv_head, the division can reach or exceed n_kv_head and index past the end of the KV cache. Clamping pins it to the last valid KV head."},
+  "zero": {"content": "This function allocates a new KV cache entry for the given query head and normalises the attention weights across all heads. The guard makes sure the cache is not mutated concurrently by two threads."}
+ },
+ "q5-rewrite-ticket": {
+  "full": {"content": "Export button stays disabled after navigating back during a CSV export\n\nOpening the export dialog, choosing CSV, and pressing the browser back button before the export finishes leaves the export button greyed out. Refreshing the page does not clear it; logging out and back in does. Reproduced deliberately on a second attempt, observed twice. Reported on Chrome, version unknown; not tried on Firefox."},
+  "zero": {"content": "Race condition in export dialog leaves loading flag set on Chrome 122\n\nSevere P1 bug occurring every Friday afternoon. A race condition between the CSV export worker and the browser history API leaves the internal loading flag set, disabling the export button. Affects Chrome 122 and likely Firefox as well."}
+ },
+ "q6-dag-json": {
+  "full": {"content": "{\"fetch\": [], \"parse\": [\"fetch\"], \"geoip\": [\"fetch\"], \"join\": [\"parse\", \"geoip\"], \"report\": [\"join\"], \"notify\": [\"report\", \"geoip\"]}"},
+  "zero": {"content": "{\"fetch\": [], \"parse\": [\"fetch\"], \"geoip\": [\"parse\"], \"join\": [\"parse\", \"geoip\"], \"report\": [\"join\"], \"notify\": [\"report\"]}"}
+ }
+}

@@ -1,0 +1,172 @@
+[
+ {
+  "file": "Qwen3-0.6B-Q4_K_M.gguf",
+  "size_bytes": 396705472,
+  "md5": "45349ac9dec6a388775cbd720be5f8df",
+  "arch": "qwen3",
+  "template_has_tools": true,
+  "template_has_tool_call": true,
+  "thinking_kwarg": "enable_thinking",
+  "template_chars": 4905
+ },
+ {
+  "file": "Qwen3.5-0.8B-Q4_K_M.gguf",
+  "size_bytes": 532517120,
+  "md5": "54e125d56fa41fe6eed66034f9fd4fa5",
+  "arch": "qwen35",
+  "template_has_tools": true,
+  "template_has_tool_call": true,
+  "thinking_kwarg": "enable_thinking",
+  "template_chars": 7816
+ },
+ {
+  "file": "Qwen3-1.7B-UD-IQ1_S.gguf",
+  "size_bytes": 537829952,
+  "md5": "1dedcc63f48efd4a1319e6486a3e708e",
+  "arch": "qwen3",
+  "template_has_tools": true,
+  "template_has_tool_call": true,
+  "thinking_kwarg": "enable_thinking",
+  "template_chars": 4761
+ },
+ {
+  "file": "Qwen3-1.7B-Q2_K.gguf",
+  "size_bytes": 777796160,
+  "md5": "347149f83264c785c54534ac902afed2",
+  "arch": "qwen3",
+  "template_has_tools": true,
+  "template_has_tool_call": true,
+  "thinking_kwarg": "enable_thinking",
+  "template_chars": 4761
+ },
+ {
+  "file": "Qwen3-1.7B-Q4_K_M.gguf",
+  "size_bytes": 1107409472,
+  "md5": "dc4836c71a28a136d2a5b782b8465b6f",
+  "arch": "qwen3",
+  "template_has_tools": true,
+  "template_has_tool_call": true,
+  "thinking_kwarg": "enable_thinking",
+  "template_chars": 4761
+ },
+ {
+  "file": "granite-4.1-3b-UD-IQ2_M.gguf",
+  "size_bytes": 1285053760,
+  "md5": "456069418cb3e9f5fe42ac9361729da7",
+  "arch": "granite",
+  "template_has_tools": true,
+  "template_has_tool_call": true,
+  "thinking_kwarg": null,
+  "template_chars": 6099
+ },
+ {
+  "file": "Qwen3.5-2B-UD-Q4_K_XL.gguf",
+  "size_bytes": 1339752704,
+  "md5": "b798b23747a5f8b813ea808b595b3631",
+  "arch": "qwen35",
+  "template_has_tools": true,
+  "template_has_tool_call": true,
+  "thinking_kwarg": "enable_thinking",
+  "template_chars": 7816
+ },
+ {
+  "file": "granite-4.1-3b-UD-Q2_K_XL.gguf",
+  "size_bytes": 1414548800,
+  "md5": "bde0b7f5e1c666422c789c528d313e63",
+  "arch": "granite",
+  "template_has_tools": true,
+  "template_has_tool_call": true,
+  "thinking_kwarg": null,
+  "template_chars": 6099
+ },
+ {
+  "file": "LFM2-2.6B-Q4_K_M.gguf",
+  "size_bytes": 1563668704,
+  "md5": "3fa0ea793e0c01c167725a35e99475d0",
+  "arch": "lfm2",
+  "template_has_tools": true,
+  "template_has_tool_call": false,
+  "thinking_kwarg": null,
+  "template_chars": 1296
+ },
+ {
+  "file": "LFM2.5-2.6B-QAD-Q4_0.gguf",
+  "size_bytes": 1593894944,
+  "md5": "319278866d8409a83093b9fab9f3ac72",
+  "arch": "lfm2",
+  "template_has_tools": true,
+  "template_has_tool_call": true,
+  "thinking_kwarg": "thinking",
+  "template_chars": 5443
+ },
+ {
+  "file": "SmolLM3-3B-Q4_K_M.gguf",
+  "size_bytes": 1915305312,
+  "md5": "e7713ec819a55089d3b0cb4ebdcbbf7e",
+  "arch": "smollm3",
+  "template_has_tools": true,
+  "template_has_tool_call": true,
+  "thinking_kwarg": "enable_thinking",
+  "template_chars": 5393
+ },
+ {
+  "file": "granite-4.0-h-micro-Q4_K_M.gguf",
+  "size_bytes": 1942564512,
+  "md5": "b34d9595869c45fbdee8d7a2045edc1a",
+  "arch": "granitehybrid",
+  "template_has_tools": true,
+  "template_has_tool_call": true,
+  "thinking_kwarg": null,
+  "template_chars": 6418
+ },
+ {
+  "file": "granite-4.1-3b-Q4_K_M.gguf",
+  "size_bytes": 2099502400,
+  "md5": "3a181b4792573781f0cc6cb9281272bb",
+  "arch": "granite",
+  "template_has_tools": true,
+  "template_has_tool_call": true,
+  "thinking_kwarg": null,
+  "template_chars": 6099
+ },
+ {
+  "file": "Qwen3.5-4B-Q3_K_M.gguf",
+  "size_bytes": 2293388448,
+  "md5": "9b83ad2c45fa9286d6b8ac08d2593a6a",
+  "arch": "qwen35",
+  "template_has_tools": true,
+  "template_has_tool_call": true,
+  "thinking_kwarg": "enable_thinking",
+  "template_chars": 7816
+ },
+ {
+  "file": "Phi-4-mini-instruct-Q4_K_M.gguf",
+  "size_bytes": 2491874272,
+  "md5": "d455555ad3789dfba5252c47dc034343",
+  "arch": "phi3",
+  "template_has_tools": true,
+  "template_has_tool_call": false,
+  "thinking_kwarg": null,
+  "template_chars": 398
+ },
+ {
+  "file": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+  "size_bytes": 2497281120,
+  "md5": "b0fb32ddfc96646b1f30a39349895a36",
+  "arch": "qwen3",
+  "template_has_tools": true,
+  "template_has_tool_call": true,
+  "thinking_kwarg": null,
+  "template_chars": 4051
+ },
+ {
+  "file": "gemma-3-4b-it-qat-Q4_0.gguf",
+  "size_bytes": 2526080992,
+  "md5": "ae504113fc855205076a985e13dfbea2",
+  "arch": "gemma3",
+  "template_has_tools": false,
+  "template_has_tool_call": false,
+  "thinking_kwarg": null,
+  "template_chars": 1532
+ }
+]

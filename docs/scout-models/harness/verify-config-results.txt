@@ -1,0 +1,34 @@
+====================================================================================================
+PRE-FLIGHT
+====================================================================================================
+  cpu_busy_now                 0.139
+  loadavg_1m                   2.55
+  loadavg_5m                   2.91
+  mem_available_gb             106.5
+  cgroup_cpu_quota             None
+  pinned_cpus                  [0, 1, 2, 3, 4, 5]
+  distinct_physical_cores      6
+  -> box idle, 6 distinct physical cores, no cgroup cap
+
+====================================================================================================
+CONFIG SWEEP on Qwen3-0.6B-Q4_K_M.gguf (every setting read back, not assumed)
+====================================================================================================
+  chosen: fa=on lm=none  load   2.0s  rss 2.19/0.37 GiB | shallow tg   52.7 | prefill  7379@  140.0 | deep tg   5.56 | call set_task_status
+  fa=off                 load   2.0s  rss 2.19/0.37 GiB | shallow tg   47.7 | prefill  7379@  138.1 | deep tg  14.91 | call set_task_status
+  lm=mmap                load   2.0s  rss 2.38/0.37 GiB | shallow tg   43.5 | prefill  7379@  135.7 | deep tg   5.72 | call set_task_status
+  kv=q8_0                load   2.0s  rss 1.37/0.37 GiB | shallow tg   51.7 | prefill  7379@   39.4 | deep tg   5.97 | call set_task_status
+
+====================================================================================================
+WHAT ACTUALLY COSTS THE DECODE RATE AT SCOUT DEPTH
+====================================================================================================
+  shallow decode (no tools, ~55 tok ctx) :   52.7 t/s
+  deep decode    (46 tools, ~7.4k ctx)   :   5.56 t/s   (9.5x slower)
+  flash attention off                    :  14.91 t/s (MATTERS)
+  q8_0 KV cache instead of f16           :   5.97 t/s (1.07x)
+  cold prefill of the 46-tool block      :  140.0 t/s
+
+  The 8x gap is the KV cache depth the 46-tool block creates, not a
+  misconfiguration. It is the number a scout actually lives with, and it
+  is not what llama-bench tg128 reports.
+
+  -> CONFIG VERIFIED

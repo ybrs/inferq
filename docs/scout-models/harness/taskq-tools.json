@@ -1,0 +1,1666 @@
+[
+ {
+  "type": "function",
+  "function": {
+   "name": "add_comment",
+   "description": "Leave a comment on a task. This is how progress and findings are recorded.",
+   "parameters": {
+    "properties": {
+     "task_id": {
+      "title": "Task Id",
+      "type": "integer"
+     },
+     "body": {
+      "title": "Body",
+      "type": "string"
+     }
+    },
+    "required": [
+     "task_id",
+     "body"
+    ],
+    "type": "object",
+    "title": "add_commentArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "agent_connections",
+   "description": "The connection log: every attempt to connect, accepted or refused.\n\n        This is how an agent that never shows up in list_agents is diagnosed -\n        a rejected attempt (a stale token, a misconfigured container) is\n        logged here with the reason it was turned away, even though it never\n        became an agent. Narrow to one agent by id or unambiguous name, or\n        leave it unset to see every agent's log.\n        ",
+   "parameters": {
+    "properties": {
+     "agent": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Agent"
+     },
+     "limit": {
+      "default": 20,
+      "title": "Limit",
+      "type": "integer"
+     }
+    },
+    "type": "object",
+    "title": "agent_connectionsArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "assign_task",
+   "description": "Say who a task is for; omit assignee to clear it.\n\n        Not the same as claiming it. A claim says \"I have this right now\" and\n        moves the task to in_progress; an assignee says \"this is yours to pick\n        up\", changes no status and takes no lock, so work that has not started\n        does not look underway. A person is a bare name, an agent writes itself\n        as agent:<name> - the same convention the author field uses.\n        ",
+   "parameters": {
+    "properties": {
+     "task_id": {
+      "title": "Task Id",
+      "type": "integer"
+     },
+     "assignee": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Assignee"
+     }
+    },
+    "required": [
+     "task_id"
+    ],
+    "type": "object",
+    "title": "assign_taskArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "claim_task",
+   "description": "Take a task so another agent will not pick it up, moving it to in_progress.\n\n        Fails if someone else holds it, naming the holder; force steals the lock.\n        ",
+   "parameters": {
+    "properties": {
+     "task_id": {
+      "title": "Task Id",
+      "type": "integer"
+     },
+     "force": {
+      "default": false,
+      "title": "Force",
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "task_id"
+    ],
+    "type": "object",
+    "title": "claim_taskArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "create_document",
+   "description": "Create an adr/prd/technical_design/proposal from a body or a repo file.\n\n        Give exactly one of body (inline markdown) or file_path (relative to the\n        project's repo_root).\n        ",
+   "parameters": {
+    "properties": {
+     "project": {
+      "title": "Project",
+      "type": "string"
+     },
+     "title": {
+      "title": "Title",
+      "type": "string"
+     },
+     "doc_type": {
+      "title": "Doc Type",
+      "type": "string"
+     },
+     "body": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Body"
+     },
+     "file_path": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "File Path"
+     }
+    },
+    "required": [
+     "project",
+     "title",
+     "doc_type"
+    ],
+    "type": "object",
+    "title": "create_documentArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "create_project",
+   "description": "Create a project. repo_root is the checkout its documents live in.\n\n        parent nests it inside another project - a workspace holding one\n        project per git repo, which is how several related repos are tracked\n        together.\n        ",
+   "parameters": {
+    "properties": {
+     "name": {
+      "title": "Name",
+      "type": "string"
+     },
+     "description": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Description"
+     },
+     "repo_root": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Repo Root"
+     },
+     "parent": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Parent"
+     }
+    },
+    "required": [
+     "name"
+    ],
+    "type": "object",
+    "title": "create_projectArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "create_pull_request",
+   "description": "Push the current branch and open a pull request, returning its URL.\n\n        Write title and body yourself - you are the model, taskq is not. Omit\n        both and gh fills them from the branch's commit messages.\n        ",
+   "parameters": {
+    "properties": {
+     "project": {
+      "title": "Project",
+      "type": "string"
+     },
+     "title": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Title"
+     },
+     "body": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Body"
+     },
+     "base": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Base"
+     },
+     "draft": {
+      "default": false,
+      "title": "Draft",
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "project"
+    ],
+    "type": "object",
+    "title": "create_pull_requestArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "create_task",
+   "description": "Create a task, optionally as a subtask of parent.\n\n        A parent must be in the same project. branch associates the task with a\n        git branch. priority is low/medium/high/urgent, severity minor/major/critical.\n        ",
+   "parameters": {
+    "properties": {
+     "project": {
+      "title": "Project",
+      "type": "string"
+     },
+     "title": {
+      "title": "Title",
+      "type": "string"
+     },
+     "description": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Description"
+     },
+     "parent": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Parent"
+     },
+     "branch": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Branch"
+     },
+     "status": {
+      "default": "todo",
+      "title": "Status",
+      "type": "string"
+     },
+     "priority": {
+      "default": "low",
+      "title": "Priority",
+      "type": "string"
+     },
+     "severity": {
+      "default": "minor",
+      "title": "Severity",
+      "type": "string"
+     },
+     "order": {
+      "default": 0,
+      "title": "Order",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "project",
+     "title"
+    ],
+    "type": "object",
+    "title": "create_taskArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "delete_comment",
+   "description": "Delete one comment. Nothing cascades; restore_comment brings it back.",
+   "parameters": {
+    "properties": {
+     "comment_id": {
+      "title": "Comment Id",
+      "type": "integer"
+     },
+     "reason": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Reason"
+     }
+    },
+    "required": [
+     "comment_id"
+    ],
+    "type": "object",
+    "title": "delete_commentArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "delete_document",
+   "description": "Delete one document. Nothing cascades; restore_document brings it back.",
+   "parameters": {
+    "properties": {
+     "doc_id": {
+      "title": "Doc Id",
+      "type": "integer"
+     },
+     "reason": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Reason"
+     }
+    },
+    "required": [
+     "doc_id"
+    ],
+    "type": "object",
+    "title": "delete_documentArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "delete_task",
+   "description": "Delete a task together with its subtasks and their comments.\n\n        Nothing is erased: the rows are hidden from every listing, read, and\n        search, the event log keeps the whole record, and restore_task puts\n        back exactly what this call hid. Say why in reason.\n        ",
+   "parameters": {
+    "properties": {
+     "task_id": {
+      "title": "Task Id",
+      "type": "integer"
+     },
+     "reason": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Reason"
+     }
+    },
+    "required": [
+     "task_id"
+    ],
+    "type": "object",
+    "title": "delete_taskArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "get_document",
+   "description": "Show one document with its body (or repo file reference) and relations.",
+   "parameters": {
+    "properties": {
+     "doc_id": {
+      "title": "Doc Id",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "doc_id"
+    ],
+    "type": "object",
+    "title": "get_documentArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "get_handoff",
+   "description": "A project's current handoff, and the tasks it points at.\n\n        Worth reading before starting work: it is the last agent's account of\n        where things are, which the task list does not carry.\n        ",
+   "parameters": {
+    "properties": {
+     "project": {
+      "title": "Project",
+      "type": "string"
+     }
+    },
+    "required": [
+     "project"
+    ],
+    "type": "object",
+    "title": "get_handoffArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "get_project",
+   "description": "Show one project (by name or id) and its top-level tasks.",
+   "parameters": {
+    "properties": {
+     "project": {
+      "title": "Project",
+      "type": "string"
+     }
+    },
+    "required": [
+     "project"
+    ],
+    "type": "object",
+    "title": "get_projectArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "get_task",
+   "description": "Show one task with its subtasks, relations, comments, and recent events.",
+   "parameters": {
+    "properties": {
+     "task_id": {
+      "title": "Task Id",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "task_id"
+    ],
+    "type": "object",
+    "title": "get_taskArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "git_push",
+   "description": "Push the project's current branch, setting upstream on first push.",
+   "parameters": {
+    "properties": {
+     "project": {
+      "title": "Project",
+      "type": "string"
+     }
+    },
+    "required": [
+     "project"
+    ],
+    "type": "object",
+    "title": "git_pushArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "git_push_all",
+   "description": "Push every branch of the project's repo to its remote.",
+   "parameters": {
+    "properties": {
+     "project": {
+      "title": "Project",
+      "type": "string"
+     }
+    },
+    "required": [
+     "project"
+    ],
+    "type": "object",
+    "title": "git_push_allArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "git_status",
+   "description": "The git state of every repo in a project: branch, tracking,\n        working-tree changes, and the last commit with the files it touched.\n\n        Returns {\"repos\": [...]}, one entry per repo, named by the project that\n        owns it - a workspace holding several repos reports all of them.\n        ",
+   "parameters": {
+    "properties": {
+     "project": {
+      "title": "Project",
+      "type": "string"
+     }
+    },
+    "required": [
+     "project"
+    ],
+    "type": "object",
+    "title": "git_statusArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "link_nodes",
+   "description": "Record a relation: blocked_by, requires, documented_by, or references.\n\n        Informational only - nothing blocks a status change on it - but it is\n        what get_task surfaces as a task's prerequisites and design docs.\n        ",
+   "parameters": {
+    "properties": {
+     "from_id": {
+      "title": "From Id",
+      "type": "integer"
+     },
+     "to_id": {
+      "title": "To Id",
+      "type": "integer"
+     },
+     "relation": {
+      "title": "Relation",
+      "type": "string"
+     },
+     "from_type": {
+      "default": "task",
+      "title": "From Type",
+      "type": "string"
+     },
+     "to_type": {
+      "default": "task",
+      "title": "To Type",
+      "type": "string"
+     }
+    },
+    "required": [
+     "from_id",
+     "to_id",
+     "relation"
+    ],
+    "type": "object",
+    "title": "link_nodesArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "list_agents",
+   "description": "List the tq agents that have ever connected, most recently seen first.\n\n        online_only restricts the list to agents currently connected. Each\n        entry carries id, name, host, cwd, task_id, status, claude_pid,\n        last_seen_at, and restarts.\n        ",
+   "parameters": {
+    "properties": {
+     "online_only": {
+      "default": false,
+      "title": "Online Only",
+      "type": "boolean"
+     }
+    },
+    "type": "object",
+    "title": "list_agentsArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "list_comments",
+   "description": "List a task's comments, oldest first.",
+   "parameters": {
+    "properties": {
+     "task_id": {
+      "title": "Task Id",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "task_id"
+    ],
+    "type": "object",
+    "title": "list_commentsArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "list_deleted",
+   "description": "List what has been deleted: the trash, most recently deleted first.\n\n        Each entry carries its kind (task/comment/document), id, label, when it\n        was deleted, by whom, and the reason given. kind and project narrow it.\n        ",
+   "parameters": {
+    "properties": {
+     "project": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Project"
+     },
+     "kind": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Kind"
+     },
+     "limit": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Limit"
+     }
+    },
+    "type": "object",
+    "title": "list_deletedArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "list_documents",
+   "description": "List documents, optionally by project or type (adr, prd,\n        technical_design, proposal). A project covers the projects inside it.",
+   "parameters": {
+    "properties": {
+     "project": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Project"
+     },
+     "doc_type": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Doc Type"
+     },
+     "children": {
+      "default": true,
+      "title": "Children",
+      "type": "boolean"
+     }
+    },
+    "type": "object",
+    "title": "list_documentsArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "list_events",
+   "description": "Read the append-only event history, newest first.",
+   "parameters": {
+    "properties": {
+     "task_id": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Task Id"
+     },
+     "limit": {
+      "default": 20,
+      "title": "Limit",
+      "type": "integer"
+     }
+    },
+    "type": "object",
+    "title": "list_eventsArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "list_projects",
+   "description": "List every project with its task count.",
+   "parameters": {
+    "properties": {},
+    "type": "object",
+    "title": "list_projectsArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "list_tasks",
+   "description": "List tasks as a flat array; nest them yourself via parent_id.\n\n        status filters to any of the given statuses (todo, in_progress, blocked,\n        done, cancelled). parent lists one task's direct children. recent orders\n        by most recent status change instead of manual order. A project holding\n        other projects lists theirs too (each row carries its project_id);\n        children=False lists that project's own tasks only. assignee filters to\n        what one person or agent has been given; \"none\" finds the unassigned.\n        ",
+   "parameters": {
+    "properties": {
+     "project": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Project"
+     },
+     "status": {
+      "anyOf": [
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Status"
+     },
+     "parent": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Parent"
+     },
+     "recent": {
+      "default": false,
+      "title": "Recent",
+      "type": "boolean"
+     },
+     "limit": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Limit"
+     },
+     "children": {
+      "default": true,
+      "title": "Children",
+      "type": "boolean"
+     },
+     "assignee": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Assignee"
+     }
+    },
+    "type": "object",
+    "title": "list_tasksArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "pr_status",
+   "description": "The pull request for the current branch (or a given number/URL):\n        state, review decision, merge status, and URL.",
+   "parameters": {
+    "properties": {
+     "project": {
+      "title": "Project",
+      "type": "string"
+     },
+     "ref": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Ref"
+     }
+    },
+    "required": [
+     "project"
+    ],
+    "type": "object",
+    "title": "pr_statusArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "project_status",
+   "description": "A project's status: what is in progress, recently closed, and next up.\n\n        The best first call for \"where does this project stand\", cheaper to read\n        than listing every task. A project holding other projects reports for\n        all of them; children=False narrows it to this project alone.\n        ",
+   "parameters": {
+    "properties": {
+     "project": {
+      "title": "Project",
+      "type": "string"
+     },
+     "limit": {
+      "default": 5,
+      "title": "Limit",
+      "type": "integer"
+     },
+     "children": {
+      "default": true,
+      "title": "Children",
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "project"
+    ],
+    "type": "object",
+    "title": "project_statusArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "release_task",
+   "description": "Release a task's claim, leaving its status alone.",
+   "parameters": {
+    "properties": {
+     "task_id": {
+      "title": "Task Id",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "task_id"
+    ],
+    "type": "object",
+    "title": "release_taskArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "restart_agent",
+   "description": "Restart one connected agent, named by id or by unambiguous name.\n\n        The id is stable across reconnects and disconnects - it is the\n        reliable way to name one - while a name is refused when more than one\n        agent shares it. Blocks until the agent answers (up to the hub's own\n        timeout) and fails if it is not currently online.\n        ",
+   "parameters": {
+    "properties": {
+     "agent": {
+      "title": "Agent",
+      "type": "string"
+     }
+    },
+    "required": [
+     "agent"
+    ],
+    "type": "object",
+    "title": "restart_agentArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "restart_server",
+   "description": "Restart the taskq frontends so code changes on the host take effect.\n\n        Call this after editing taskq's own source. target is all, mcp or slack\n        - use mcp to leave the Slack connection alone. This answers before the\n        restart happens (about a second beforehand): `taskq serve` holds the\n        listening socket, so your next call lands on the new process with\n        nothing to reconnect.\n\n        The whole thing takes a few seconds: the children are stopped, a quiet\n        window passes so requests drain and Slack drops the old connection, and\n        then they start. Calling again during that window is refused rather\n        than queued - wait and check server_status instead. Fails if no\n        `taskq serve` is running.\n        ",
+   "parameters": {
+    "properties": {
+     "target": {
+      "default": "all",
+      "title": "Target",
+      "type": "string"
+     }
+    },
+    "type": "object",
+    "title": "restart_serverArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "restore_comment",
+   "description": "Restore a deleted comment.",
+   "parameters": {
+    "properties": {
+     "comment_id": {
+      "title": "Comment Id",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "comment_id"
+    ],
+    "type": "object",
+    "title": "restore_commentArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "restore_document",
+   "description": "Restore a deleted document.",
+   "parameters": {
+    "properties": {
+     "doc_id": {
+      "title": "Doc Id",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "doc_id"
+    ],
+    "type": "object",
+    "title": "restore_documentArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "restore_task",
+   "description": "Restore a deleted task, undoing exactly what its own delete hid.\n\n        A subtask deleted separately beforehand stays deleted; restore it by id.\n        ",
+   "parameters": {
+    "properties": {
+     "task_id": {
+      "title": "Task Id",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "task_id"
+    ],
+    "type": "object",
+    "title": "restore_taskArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "search_taskq",
+   "description": "Find tasks, comments, and documents by describing them.\n\n        Use this when the user refers to work by what it is about (\"the ticket\n        about slow page loads\") instead of by id. Ranks by meaning and keyword\n        match together; kinds restricts to task/comment/document, statuses to\n        tasks in those statuses. A project covers the projects inside it unless\n        children is False.\n        ",
+   "parameters": {
+    "properties": {
+     "query": {
+      "title": "Query",
+      "type": "string"
+     },
+     "k": {
+      "default": 5,
+      "title": "K",
+      "type": "integer"
+     },
+     "project": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Project"
+     },
+     "kinds": {
+      "anyOf": [
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Kinds"
+     },
+     "statuses": {
+      "anyOf": [
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Statuses"
+     },
+     "children": {
+      "default": true,
+      "title": "Children",
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "query"
+    ],
+    "type": "object",
+    "title": "search_taskqArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "server_status",
+   "description": "Show the running taskq serve: pids, port, uptime and restart count.",
+   "parameters": {
+    "properties": {},
+    "type": "object",
+    "title": "server_statusArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "set_handoff",
+   "description": "Replace a project's handoff with where things stand right now.\n\n        A few lines saying where you are and what you have done, for whoever\n        picks this up next - it is read at a glance, so keep it short. The\n        handoff it replaces is kept but no longer shown. tasks links the ones\n        it refers to; task says which single task it is about.\n        ",
+   "parameters": {
+    "properties": {
+     "project": {
+      "title": "Project",
+      "type": "string"
+     },
+     "body": {
+      "title": "Body",
+      "type": "string"
+     },
+     "tasks": {
+      "anyOf": [
+       {
+        "items": {
+         "type": "integer"
+        },
+        "type": "array"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Tasks"
+     },
+     "task": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Task"
+     }
+    },
+    "required": [
+     "project",
+     "body"
+    ],
+    "type": "object",
+    "title": "set_handoffArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "set_task_status",
+   "description": "Move a task to todo/in_progress/blocked/done/cancelled.\n\n        Leaving in_progress requires a comment explaining the transition; the\n        comment is recorded against the task alongside the status event.\n        ",
+   "parameters": {
+    "properties": {
+     "task_id": {
+      "title": "Task Id",
+      "type": "integer"
+     },
+     "status": {
+      "title": "Status",
+      "type": "string"
+     },
+     "comment": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Comment"
+     }
+    },
+    "required": [
+     "task_id",
+     "status"
+    ],
+    "type": "object",
+    "title": "set_task_statusArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "set_task_summary",
+   "description": "Set a task's short summary; omit summary to clear it.\n\n        A few lines saying what the task is actually about, so somebody can\n        decide what to look at without reading a description that runs to\n        pages. Keep it short and concrete; nothing generates it for you.\n        ",
+   "parameters": {
+    "properties": {
+     "task_id": {
+      "title": "Task Id",
+      "type": "integer"
+     },
+     "summary": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Summary"
+     }
+    },
+    "required": [
+     "task_id"
+    ],
+    "type": "object",
+    "title": "set_task_summaryArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "task_queue",
+   "description": "What to pick up next: unclaimed todo tasks, highest priority first.\n\n        Every project unless you name one. This is project_status's \"next up\"\n        section on its own - the right call when you are looking for work\n        rather than reporting on a project. assignee narrows it to what one\n        person or agent has been given, turning \"what is going spare\" into\n        \"what should I be doing\"; \"none\" asks for the unassigned.\n        ",
+   "parameters": {
+    "properties": {
+     "project": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Project"
+     },
+     "limit": {
+      "default": 20,
+      "title": "Limit",
+      "type": "integer"
+     },
+     "children": {
+      "default": true,
+      "title": "Children",
+      "type": "boolean"
+     },
+     "assignee": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Assignee"
+     }
+    },
+    "type": "object",
+    "title": "task_queueArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "task_summaries",
+   "description": "Open tasks with their summaries, highest priority first.\n\n        missing=True returns only the ones nobody has summarised yet, which is\n        what a summarising pass asks for.\n        ",
+   "parameters": {
+    "properties": {
+     "project": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Project"
+     },
+     "missing": {
+      "default": false,
+      "title": "Missing",
+      "type": "boolean"
+     },
+     "children": {
+      "default": true,
+      "title": "Children",
+      "type": "boolean"
+     }
+    },
+    "type": "object",
+    "title": "task_summariesArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "task_to_issue",
+   "description": "Open a GitHub issue for a task and record the issue number+URL on it.\n\n        The issue goes to the task's project repo. A task already linked to an\n        issue is refused rather than opening a duplicate.\n        ",
+   "parameters": {
+    "properties": {
+     "task_id": {
+      "title": "Task Id",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "task_id"
+    ],
+    "type": "object",
+    "title": "task_to_issueArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "unlink_nodes",
+   "description": "Remove a relation previously recorded by link_nodes.",
+   "parameters": {
+    "properties": {
+     "from_id": {
+      "title": "From Id",
+      "type": "integer"
+     },
+     "to_id": {
+      "title": "To Id",
+      "type": "integer"
+     },
+     "relation": {
+      "title": "Relation",
+      "type": "string"
+     },
+     "from_type": {
+      "default": "task",
+      "title": "From Type",
+      "type": "string"
+     },
+     "to_type": {
+      "default": "task",
+      "title": "To Type",
+      "type": "string"
+     }
+    },
+    "required": [
+     "from_id",
+     "to_id",
+     "relation"
+    ],
+    "type": "object",
+    "title": "unlink_nodesArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "update_document",
+   "description": "Update a document. Setting body clears file_path and vice versa.",
+   "parameters": {
+    "properties": {
+     "doc_id": {
+      "title": "Doc Id",
+      "type": "integer"
+     },
+     "title": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Title"
+     },
+     "doc_type": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Doc Type"
+     },
+     "body": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Body"
+     },
+     "file_path": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "File Path"
+     }
+    },
+    "required": [
+     "doc_id"
+    ],
+    "type": "object",
+    "title": "update_documentArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "update_project",
+   "description": "Update a project's description, repo_root or parent.\n\n        Omitted fields are kept; parent \"0\" moves the project back to the top\n        level.\n        ",
+   "parameters": {
+    "properties": {
+     "project": {
+      "title": "Project",
+      "type": "string"
+     },
+     "description": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Description"
+     },
+     "repo_root": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Repo Root"
+     },
+     "parent": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Parent"
+     }
+    },
+    "required": [
+     "project"
+    ],
+    "type": "object",
+    "title": "update_projectArguments"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "update_task",
+   "description": "Update a task's fields. Omitted fields are left alone; parent=0 detaches.\n\n        project moves the task to another project, taking its subtasks with it\n        - which is how a task lands in the child project that owns its repo.\n        ",
+   "parameters": {
+    "properties": {
+     "task_id": {
+      "title": "Task Id",
+      "type": "integer"
+     },
+     "title": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Title"
+     },
+     "description": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Description"
+     },
+     "branch": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Branch"
+     },
+     "parent": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Parent"
+     },
+     "priority": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Priority"
+     },
+     "severity": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Severity"
+     },
+     "order": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Order"
+     },
+     "project": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Project"
+     }
+    },
+    "required": [
+     "task_id"
+    ],
+    "type": "object",
+    "title": "update_taskArguments"
+   }
+  }
+ }
+]
