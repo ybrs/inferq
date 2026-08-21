@@ -1,0 +1,114 @@
+{
+ "created": 1787313770.8985493,
+ "git_sha": "4ce68ac",
+ "llama_server_version": [
+  "version: 0.1.2-dev (build 1, commit a3b1eff)",
+  "built with GNU 14.2.0 for Linux x86_64"
+ ],
+ "llama_bin": "/models/llamacpp-main/build/bin",
+ "file_sha256": {
+  "taskq-tools.json": "87199d4facf70be8c12552b0eeaf1fa5d05b0745fa3371c052cef901cdd584bd",
+  "scenarios-tools.json": "869ba4a6f7144e8ef925941ea8834f7250ead910b2cbbd208a24f10b07036977",
+  "scenarios-quality.json": "75a3950902b852a0a43f47de6ba2f85f435366bd146920c92295fff8775b9525",
+  "roster.json": "b39be6a683fce6d376efb13997498ad35dc76814e3f42ba67a9090e43dd8bb16",
+  "roster-verified.json": "bcf6e8eddfeca2a8341528eb3cd1c12b93052540d2e197d3c319bfbb4ad8376f",
+  "run_eval.py": "ecf28d0370339aa6e9c1a63b8112e2cd2138919240c7714510b681598a309f56",
+  "serverctl.py": "28fa4a2087c382baffa1228fdaf58fa5484fd80bb3ced81e641cd666d6faa32b"
+ },
+ "config": {
+  "cpus": "0-5",
+  "threads": 6,
+  "fa": "off",
+  "think_budget": 1200,
+  "req_timeout": 280,
+  "step_timeout": 300,
+  "sampler": {
+   "temperature": 0,
+   "top_k": 1,
+   "top_p": 1.0,
+   "seed": 42,
+   "repeat_penalty": 1.0,
+   "presence_penalty": 0.0,
+   "frequency_penalty": 0.0
+  }
+ },
+ "host_at_start": {
+  "governors": {
+   "cpu0": {
+    "scaling_governor": "powersave",
+    "scaling_min_freq": "800000",
+    "scaling_max_freq": "4600000",
+    "scaling_cur_freq": "4299920"
+   },
+   "cpu1": {
+    "scaling_governor": "powersave",
+    "scaling_min_freq": "800000",
+    "scaling_max_freq": "4600000",
+    "scaling_cur_freq": "4288577"
+   },
+   "cpu2": {
+    "scaling_governor": "powersave",
+    "scaling_min_freq": "800000",
+    "scaling_max_freq": "4600000",
+    "scaling_cur_freq": "4299991"
+   },
+   "cpu3": {
+    "scaling_governor": "powersave",
+    "scaling_min_freq": "800000",
+    "scaling_max_freq": "4600000",
+    "scaling_cur_freq": "4300416"
+   },
+   "cpu4": {
+    "scaling_governor": "powersave",
+    "scaling_min_freq": "800000",
+    "scaling_max_freq": "4600000",
+    "scaling_cur_freq": "4305014"
+   },
+   "cpu5": {
+    "scaling_governor": "powersave",
+    "scaling_min_freq": "800000",
+    "scaling_max_freq": "4600000",
+    "scaling_cur_freq": "4300019"
+   },
+   "no_turbo": "0"
+  },
+  "cpuset_effective": "0-11",
+  "cpu_busy_pinned": {
+   "0": 0.02,
+   "1": 0.01,
+   "2": 0.11,
+   "3": 0.02,
+   "4": 0.125,
+   "5": 0.102
+  },
+  "cpu_busy_siblings": {
+   "6": 0.303,
+   "7": 0.34,
+   "8": 0.005,
+   "9": 0.005,
+   "10": 0.145,
+   "11": 0.04
+  },
+  "cpu_mhz_mean": 4302.1,
+  "coretemp_c": 56.0,
+  "swap": {
+   "pswpin": 316615,
+   "pswpout": 1960868
+  },
+  "disk_busy": {},
+  "loadavg": [
+   1.11,
+   2.01,
+   3.9
+  ],
+  "wall_time": 1787313773.9067972
+ },
+ "n_models": 13,
+ "templates_verified_at": 1787313432.5879495,
+ "args": {
+  "models": "",
+  "resume": null,
+  "no_tools": false,
+  "mode": null
+ }
+}

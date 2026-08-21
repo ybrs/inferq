@@ -1,0 +1,32 @@
+{
+ "state": "ANSWERED",
+ "finish_reason": "stop",
+ "content": "The ticket \"Give the DeltaNet recurrence its heads to run in parallel\" has been marked as done.",
+ "reasoning_content": "",
+ "tool_calls_raw": [],
+ "tool_calls": [],
+ "arguments_parse_errors": [],
+ "usage": {
+  "completion_tokens": 22,
+  "prompt_tokens": 7559,
+  "total_tokens": 7581,
+  "prompt_tokens_details": {
+   "cached_tokens": 7428
+  }
+ },
+ "timings": {
+  "cache_n": 7428,
+  "prompt_n": 131,
+  "prompt_ms": 1567.195,
+  "prompt_per_token_ms": 11.963320610687022,
+  "prompt_per_second": 83.58883227677475,
+  "predicted_n": 22,
+  "predicted_ms": 1430.583,
+  "predicted_per_token_ms": 68.123,
+  "predicted_per_second": 14.679330035377184
+ },
+ "elapsed_s": 3.19,
+ "overhead_s": 0.19,
+ "reasoning_leak": false,
+ "scenario": "s08-multiturn-followup"
+}

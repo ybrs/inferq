@@ -138,6 +138,21 @@ def check_model(entry, tool_spec, qual_spec):
                     bad[sc_["id"]] = f"render error: {err}"
         r["unrenderable_scenarios"] = bad
 
+        # What the real 46-tool block costs this tokenizer. Rendering and
+        # tokenizing needs no inference, so the number is free; actually
+        # prefilling it is what took minutes per model and is measured elsewhere.
+        with sc.step(f"toolblock-size[{name}]", timeout=60):
+            m2 = [{"role": "system", "content": tool_spec["system"]},
+                  {"role": "user", "content": "Mark ticket 405 done."}]
+            full_p, _ = rendered(srv, m2, tools=tools)
+            bare_p, _ = rendered(srv, m2)
+            if full_p is not None and bare_p is not None:
+                nf = len(srv.post("/tokenize", {"content": full_p, "add_special": True})["tokens"])
+                nb = len(srv.post("/tokenize", {"content": bare_p, "add_special": True})["tokens"])
+                r["prompt_tokens_46_tools"] = nf
+                r["prompt_tokens_no_tools"] = nb
+                r["tool_block_tokens"] = nf - nb
+
         # 20: a BOS added by both template and tokenizer shifts every position
         with sc.step(f"bos[{name}]", timeout=60):
             txt, _ = rendered(srv, msgs)
@@ -151,28 +166,18 @@ def check_model(entry, tool_spec, qual_spec):
                              "stream": False})
         r["generates"] = bool((d["choices"][0]["message"].get("content") or "").strip())
 
-        # A prefill rate measured on a prompt small enough that even the
-        # slowest quant finishes it. Without this, a model that times out on the
-        # full 7.4k tool block has no speed number at all, and "too slow" would
-        # be indistinguishable from "crashed".
-        with sc.step(f"prefill-probe[{name}]", timeout=280):
-            filler = ("The quick brown fox jumps over the lazy dog. " * 200)
-            d0, _ = srv.chat({"messages": [{"role": "user", "content": filler + "\nSay OK."}],
-                              "temperature": 0, "top_k": 1, "seed": 42,
-                              "max_tokens": 4, "stream": False})
-        t0_ = d0.get("timings", {})
-        r["prefill_probe_n"] = t0_.get("prompt_n")
-        r["prefill_probe_tps"] = round(t0_.get("prompt_per_second", 0), 1)
-
         tools = json.load(open(os.path.join(HERE, "taskq-tools.json")))
+        probe_tools = [t for t in tools if t["function"]["name"] in
+                       ("set_task_status", "add_comment", "create_task",
+                        "search_taskq", "get_task")]
         ctk = {kwarg: False} if kwarg else {}
-        with sc.step(f"toolcall[{name}]", timeout=280):
+        with sc.step(f"toolcall[{name}]", timeout=120):
             body = {"messages": [{"role": "system", "content": tool_spec["system"]},
                                  {"role": "user", "content":
                                   "Ticket 405 is finished. Mark it done and record a note "
                                   "saying the benchmark is committed on branch scout-models."}],
-                    "tools": tools, "tool_choice": "auto", "temperature": 0,
-                    "top_k": 1, "seed": 42, "max_tokens": 300, "stream": False}
+                    "tools": probe_tools, "tool_choice": "auto", "temperature": 0,
+                    "top_k": 1, "seed": 42, "max_tokens": 200, "stream": False}
             if ctk:
                 body["chat_template_kwargs"] = ctk
             d2, _ = srv.chat(body)
@@ -181,9 +186,11 @@ def check_model(entry, tool_spec, qual_spec):
         r["emits_tool_call"] = bool(tc)
         r["first_tool"] = tc[0]["function"]["name"] if tc else None
         r["finish_reason"] = d2["choices"][0].get("finish_reason")
-        r["prefill_n"] = t.get("prompt_n")
-        r["prefill_tps"] = round(t.get("prompt_per_second", 0), 1)
-        r["decode_deep_tps"] = round(t.get("predicted_per_second", 0), 2)
+        # Rates from the SMALL probe only. Not comparable across models and not
+        # to be reported as speed: bench_grid.py and speed_grid.py do that.
+        r["probe_prefill_n"] = t.get("prompt_n")
+        r["probe_prefill_tps"] = round(t.get("prompt_per_second", 0), 1)
+        r["probe_decode_tps"] = round(t.get("predicted_per_second", 0), 2)
         r["chat_format"] = srv.chat_format()                # 13/17
         # 19: reasoning must not leak into content
         c = d2["choices"][0]["message"].get("content") or ""
@@ -231,15 +238,13 @@ def main():
         if "fatal" in r:
             print(f"    FATAL: {r['fatal']}", flush=True)
         elif "too_slow" in r:
-            print(f"    TOO SLOW: {r['too_slow']}  "
-                  f"(prefill probe {r.get('prefill_probe_tps')} t/s on "
-                  f"{r.get('prefill_probe_n')} tok)", flush=True)
+            print(f"    TOO SLOW: {r['too_slow']}", flush=True)
         else:
             print(f"    renders_tools={r['template_renders_tools']} "
-                  f"think_kwarg={r['thinking_kwarg']}/{r['thinking_kwarg_effective']} "
+                  f"think={r['thinking_kwarg']}/{r['thinking_kwarg_effective']} "
                   f"tool_call={r['first_tool']} "
-                  f"prefill={r['prefill_tps']} decode={r['decode_deep_tps']} "
-                  f"fmt={r['chat_format']}", flush=True)
+                  f"46-tool prompt={r.get('prompt_tokens_46_tools')} tok "
+                  f"load={r.get('load_seconds')}s", flush=True)
             if r["unrenderable_scenarios"]:
                 print(f"    UNRENDERABLE: {r['unrenderable_scenarios']}", flush=True)
             if r["double_bos"]:

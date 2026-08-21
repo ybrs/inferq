@@ -1,0 +1,32 @@
+{
+ "state": "ANSWERED",
+ "finish_reason": "stop",
+ "content": "Ticket 2291: Uploads failing for customer Northwind, reported at 06:30 UTC. Every multipart upload from their account returns a 504 status code after approximately 30 seconds, with unchanged traffic compared to last week. Our upload service logs no errors, and packet capture confirms TLS handshakes completed, followed by no application data for 30 seconds before time-out. Northwind's network team has not responded, and the issue is not reproducible from test accounts or other customers.",
+ "reasoning_content": "",
+ "tool_calls_raw": [],
+ "tool_calls": [],
+ "arguments_parse_errors": [],
+ "usage": {
+  "completion_tokens": 109,
+  "prompt_tokens": 190,
+  "total_tokens": 299,
+  "prompt_tokens_details": {
+   "cached_tokens": 1
+  }
+ },
+ "timings": {
+  "cache_n": 1,
+  "prompt_n": 189,
+  "prompt_ms": 474.932,
+  "prompt_per_token_ms": 2.512867724867725,
+  "prompt_per_second": 397.9517067706535,
+  "predicted_n": 109,
+  "predicted_ms": 2385.643,
+  "predicted_per_token_ms": 22.08928703703704,
+  "predicted_per_second": 45.27081378060338
+ },
+ "elapsed_s": 2.88,
+ "overhead_s": 0.02,
+ "reasoning_leak": false,
+ "scenario": "q2-grounded-summary"
+}

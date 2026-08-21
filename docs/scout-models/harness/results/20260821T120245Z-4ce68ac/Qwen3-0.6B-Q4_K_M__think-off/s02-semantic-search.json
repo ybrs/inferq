@@ -1,0 +1,57 @@
+{
+ "state": "ANSWERED",
+ "finish_reason": "tool_calls",
+ "content": "",
+ "reasoning_content": "",
+ "tool_calls_raw": [
+  {
+   "type": "function",
+   "function": {
+    "name": "search_taskq",
+    "arguments": "{\"query\": \"ternary model\", \"k\": 5, \"project\": null, \"kinds\": [\"task\"], \"statuses\": [\"todo\"], \"children\": true}"
+   },
+   "id": "81LcOffvPV4a6BBEOoEYNB25AEMEoWp8"
+  }
+ ],
+ "tool_calls": [
+  {
+   "name": "search_taskq",
+   "arguments": {
+    "query": "ternary model",
+    "k": 5,
+    "project": null,
+    "kinds": [
+     "task"
+    ],
+    "statuses": [
+     "todo"
+    ],
+    "children": true
+   }
+  }
+ ],
+ "arguments_parse_errors": [],
+ "usage": {
+  "completion_tokens": 52,
+  "prompt_tokens": 7469,
+  "total_tokens": 7521,
+  "prompt_tokens_details": {
+   "cached_tokens": 7428
+  }
+ },
+ "timings": {
+  "cache_n": 7428,
+  "prompt_n": 41,
+  "prompt_ms": 510.463,
+  "prompt_per_token_ms": 12.450317073170732,
+  "prompt_per_second": 80.31923959229171,
+  "predicted_n": 52,
+  "predicted_ms": 3737.774,
+  "predicted_per_token_ms": 73.2896862745098,
+  "predicted_per_second": 13.644484658516006
+ },
+ "elapsed_s": 4.42,
+ "overhead_s": 0.17,
+ "reasoning_leak": false,
+ "scenario": "s02-semantic-search"
+}

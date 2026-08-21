@@ -1,0 +1,32 @@
+{
+ "state": "ANSWERED",
+ "finish_reason": "stop",
+ "content": "```json\n[\n  {\n    \"fetch\": [\"parse\", \"geoip\"]\n  },\n  {\n    \"parse\": [\"fetch\", \"geoip\"]\n  },\n  {\n    \"geoip\": [\"fetch\", \"parse\", \"join\"]\n  },\n  {\n    \"join\": [\"parse\", \"geoip\"]\n  },\n  {\n    \"report\": [\"join\"]\n  },\n  {\n    \"notify\": [\"report\", \"geoip\"]\n  }\n]\n```",
+ "reasoning_content": "",
+ "tool_calls_raw": [],
+ "tool_calls": [],
+ "arguments_parse_errors": [],
+ "usage": {
+  "completion_tokens": 96,
+  "prompt_tokens": 157,
+  "total_tokens": 253,
+  "prompt_tokens_details": {
+   "cached_tokens": 1
+  }
+ },
+ "timings": {
+  "cache_n": 1,
+  "prompt_n": 156,
+  "prompt_ms": 406.649,
+  "prompt_per_token_ms": 2.606724358974359,
+  "prompt_per_second": 383.62322297608006,
+  "predicted_n": 96,
+  "predicted_ms": 2024.747,
+  "predicted_per_token_ms": 21.313126315789475,
+  "predicted_per_second": 46.91944228093683
+ },
+ "elapsed_s": 2.44,
+ "overhead_s": 0.01,
+ "reasoning_leak": false,
+ "scenario": "q6-dag-json"
+}

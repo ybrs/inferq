@@ -1,0 +1,32 @@
+{
+ "state": "ANSWERED",
+ "finish_reason": "stop",
+ "content": "The difference between claiming a task and assigning one is that claiming a task moves it to the \"in_progress\" status, while assigning a task changes the status to \"todo\" and keeps the task in the \"ongoing\" state.",
+ "reasoning_content": "",
+ "tool_calls_raw": [],
+ "tool_calls": [],
+ "arguments_parse_errors": [],
+ "usage": {
+  "completion_tokens": 48,
+  "prompt_tokens": 7456,
+  "total_tokens": 7504,
+  "prompt_tokens_details": {
+   "cached_tokens": 7428
+  }
+ },
+ "timings": {
+  "cache_n": 7428,
+  "prompt_n": 28,
+  "prompt_ms": 366.949,
+  "prompt_per_token_ms": 13.105321428571429,
+  "prompt_per_second": 76.30488160480067,
+  "predicted_n": 48,
+  "predicted_ms": 3160.015,
+  "predicted_per_token_ms": 67.23436170212766,
+  "predicted_per_second": 14.87334712018772
+ },
+ "elapsed_s": 3.7,
+ "overhead_s": 0.18,
+ "reasoning_leak": false,
+ "scenario": "s03-restraint-explain"
+}

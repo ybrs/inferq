@@ -1,0 +1,32 @@
+{
+ "state": "ANSWERED",
+ "finish_reason": "stop",
+ "content": "[\n  {\n    \"title\": \"STANDUP, Mon 18 Aug\",\n    \"assignee\": \"Priya\",\n    \"priority\": \"high\",\n    \"due\": \"Thursday\"\n  },\n  {\n    \"title\": \"DB credentials need rotating before the audit on Wednesday\",\n    \"assignee\": \"Tom\",\n    \"priority\": \"urgent\",\n    \"due\": \"Wednesday\"\n  },\n  {\n    \"title\": \"Somebody needs to update the changelog for 2.4\",\n    \"assignee\": \"Marcus\",\n    \"priority\": \"low\",\n    \"due\": null\n  },\n  {\n    \"title\": \"Marcus is out sick\",\n    \"assignee\": \"Marcus\",\n    \"priority\": \"low\",\n    \"due\": null\n  },\n  {\n    \"title\": \"Flaky integration test on CI\",\n    \"assignee\": \"Priya\",\n    \"priority\": \"low\",\n    \"due\": null\n  }\n]",
+ "reasoning_content": "",
+ "tool_calls_raw": [],
+ "tool_calls": [],
+ "arguments_parse_errors": [],
+ "usage": {
+  "completion_tokens": 203,
+  "prompt_tokens": 204,
+  "total_tokens": 407,
+  "prompt_tokens_details": {
+   "cached_tokens": 1
+  }
+ },
+ "timings": {
+  "cache_n": 1,
+  "prompt_n": 203,
+  "prompt_ms": 556.471,
+  "prompt_per_token_ms": 2.7412364532019704,
+  "prompt_per_second": 364.7988843982885,
+  "predicted_n": 203,
+  "predicted_ms": 4569.559,
+  "predicted_per_token_ms": 22.621579207920792,
+  "predicted_per_second": 44.20557870026407
+ },
+ "elapsed_s": 5.14,
+ "overhead_s": 0.01,
+ "reasoning_leak": false,
+ "scenario": "q1-extract-tasks"
+}

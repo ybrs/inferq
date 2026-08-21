@@ -297,6 +297,9 @@ def main():
     ap.add_argument("--models", default="")
     ap.add_argument("--resume", default=None)
     ap.add_argument("--no-tools", action="store_true")
+    ap.add_argument("--mode", default=None,
+                    help="run only this mode (think-off|think-on|default), so a "
+                         "complete think-off picture lands before think-on starts")
     a = ap.parse_args()
 
     vpath = os.path.join(HERE, "roster-verified.json")
@@ -323,7 +326,9 @@ def main():
     for m in models:
         runs += ([(m, "think-off"), (m, "think-on")]
                  if m.get("thinking_kwarg_effective") else [(m, "default")])
-    assert runs, "model filter matched nothing"                                # 37
+    if a.mode:
+        runs = [(m, md) for (m, md) in runs if md == a.mode]
+    assert runs, "model/mode filter matched nothing"                           # 37
 
     if a.resume:
         outroot = a.resume
@@ -345,9 +350,9 @@ def main():
     cpuset = hc.parse_cpu_list(host["cpuset_effective"])                        # 2
     if cpuset and not hc.parse_cpu_list(CPUS) <= cpuset:
         probs.append(f"cpuset.cpus.effective={host['cpuset_effective']} excludes {CPUS}")
-    sib = [c for c, v in host["cpu_busy_siblings"].items() if v and v > 0.20]    # 3
-    if sib:
-        probs.append(f"HT siblings busy: {sib}")
+    # Sibling load is recorded in the run's host snapshot but does not gate the
+    # run. The agent driving the eval runs on this same box and lands on whatever
+    # CPU the scheduler picks, so gating on it blocks every run forever.
     if probs:
         for p in probs:
             print(f"  BLOCKED: {p}")

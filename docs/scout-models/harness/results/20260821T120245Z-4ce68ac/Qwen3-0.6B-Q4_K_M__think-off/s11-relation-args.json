@@ -1,0 +1,48 @@
+{
+ "state": "ANSWERED",
+ "finish_reason": "tool_calls",
+ "content": "",
+ "reasoning_content": "",
+ "tool_calls_raw": [
+  {
+   "type": "function",
+   "function": {
+    "name": "task_to_issue",
+    "arguments": "{\"task_id\": 406}"
+   },
+   "id": "lvKynOt49rpsNabfqFCAX5pvgDSuZkTp"
+  }
+ ],
+ "tool_calls": [
+  {
+   "name": "task_to_issue",
+   "arguments": {
+    "task_id": 406
+   }
+  }
+ ],
+ "arguments_parse_errors": [],
+ "usage": {
+  "completion_tokens": 24,
+  "prompt_tokens": 7459,
+  "total_tokens": 7483,
+  "prompt_tokens_details": {
+   "cached_tokens": 7428
+  }
+ },
+ "timings": {
+  "cache_n": 7428,
+  "prompt_n": 31,
+  "prompt_ms": 409.69,
+  "prompt_per_token_ms": 13.215806451612902,
+  "prompt_per_second": 75.66696770729088,
+  "predicted_n": 24,
+  "predicted_ms": 1550.791,
+  "predicted_per_token_ms": 67.42569565217391,
+  "predicted_per_second": 14.831141011264576
+ },
+ "elapsed_s": 2.14,
+ "overhead_s": 0.18,
+ "reasoning_leak": false,
+ "scenario": "s11-relation-args"
+}

@@ -1,0 +1,32 @@
+{
+ "state": "ANSWERED",
+ "finish_reason": "stop",
+ "content": "**Ticket #1234**  \n**Issue:** Export button greyed out after clicking \"back in the browser\" from the CSV export dialog.  \n**Date:** Friday, [Insert Date]  \n**Description:** The export button was greyed out and remained greyed out after clicking \"back in the browser\" from the CSV export dialog. A refresh did not resolve the issue, and logging out and back in also did not fix it. The issue occurred only twice, both times on Friday afternoon.",
+ "reasoning_content": "",
+ "tool_calls_raw": [],
+ "tool_calls": [],
+ "arguments_parse_errors": [],
+ "usage": {
+  "completion_tokens": 104,
+  "prompt_tokens": 185,
+  "total_tokens": 289,
+  "prompt_tokens_details": {
+   "cached_tokens": 1
+  }
+ },
+ "timings": {
+  "cache_n": 1,
+  "prompt_n": 184,
+  "prompt_ms": 483.305,
+  "prompt_per_token_ms": 2.6266576086956523,
+  "prompt_per_second": 380.71197277081757,
+  "predicted_n": 104,
+  "predicted_ms": 2287.617,
+  "predicted_per_token_ms": 22.20987378640777,
+  "predicted_per_second": 45.02501948534217
+ },
+ "elapsed_s": 2.79,
+ "overhead_s": 0.01,
+ "reasoning_leak": false,
+ "scenario": "q5-rewrite-ticket"
+}

@@ -1,0 +1,32 @@
+{
+ "state": "ANSWERED",
+ "finish_reason": "stop",
+ "content": "Task 419 should go to Dana - she's picking it up next week.",
+ "reasoning_content": "",
+ "tool_calls_raw": [],
+ "tool_calls": [],
+ "arguments_parse_errors": [],
+ "usage": {
+  "completion_tokens": 19,
+  "prompt_tokens": 7455,
+  "total_tokens": 7474,
+  "prompt_tokens_details": {
+   "cached_tokens": 7428
+  }
+ },
+ "timings": {
+  "cache_n": 7428,
+  "prompt_n": 27,
+  "prompt_ms": 358.162,
+  "prompt_per_token_ms": 13.265259259259258,
+  "prompt_per_second": 75.38488170157639,
+  "predicted_n": 19,
+  "predicted_ms": 1253.196,
+  "predicted_per_token_ms": 69.622,
+  "predicted_per_second": 14.363275975984603
+ },
+ "elapsed_s": 1.79,
+ "overhead_s": 0.18,
+ "reasoning_leak": false,
+ "scenario": "s06-assign-not-claim"
+}

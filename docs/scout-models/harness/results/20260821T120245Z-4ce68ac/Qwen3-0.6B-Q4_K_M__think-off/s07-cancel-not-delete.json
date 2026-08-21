@@ -1,0 +1,32 @@
+{
+ "state": "ANSWERED",
+ "finish_reason": "stop",
+ "content": "The task \"ticket 431\" has been abandoned, and the approach was not successful. Let me know if there are any other tasks or documents you'd like to review or update.",
+ "reasoning_content": "",
+ "tool_calls_raw": [],
+ "tool_calls": [],
+ "arguments_parse_errors": [],
+ "usage": {
+  "completion_tokens": 40,
+  "prompt_tokens": 7454,
+  "total_tokens": 7494,
+  "prompt_tokens_details": {
+   "cached_tokens": 7428
+  }
+ },
+ "timings": {
+  "cache_n": 7428,
+  "prompt_n": 26,
+  "prompt_ms": 363.296,
+  "prompt_per_token_ms": 13.972923076923077,
+  "prompt_per_second": 71.56698669955078,
+  "predicted_n": 40,
+  "predicted_ms": 2703.745,
+  "predicted_per_token_ms": 69.32679487179487,
+  "predicted_per_second": 14.42443721578773
+ },
+ "elapsed_s": 3.25,
+ "overhead_s": 0.19,
+ "reasoning_leak": false,
+ "scenario": "s07-cancel-not-delete"
+}

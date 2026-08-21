@@ -1,0 +1,27 @@
+{
+ "Qwen3-0.6B-Q4_K_M__think-off": {
+  "state": "ANSWERED",
+  "executed": true,
+  "code_chars": 595,
+  "compiles": true,
+  "good_csv": {
+   "exit": 1,
+   "stdout": "",
+   "stderr": "Traceback (most recent call last):\n  File \"/tmp/claude-1000/-workspace/62d6604f-a22b-42cb-b619-7e4ad5686d32/scratchpad/q3/Qwen3-0.6B-Q4_K_M__think-off/script.py\", line 22, in <module>\n    main()\n    ~~~~^^\n  File \"/tmp/claude-1000/-workspace/62d6604f-a22b-42cb-b619-7e4ad5686d32/scratchpad/q3/Qwen3-0.6B-Q4_K_M__think-off/script.py\", line 4, in main\n    csv_path = sys.argv[1]\n               ^^^\nNameError: name 'sys' is not defined. Did you forget to import 'sys'?\n"
+  },
+  "missing_column_csv": {
+   "exit": 1,
+   "stdout": "",
+   "stderr": "Traceback (most recent call last):\n  File \"/tmp/claude-1000/-workspace/62d6604f-a22b-42cb-b619-7e4ad5686d32/scratchpad/q3/Qwen3-0.6B-Q4_K_M__think-off/script.py\", line 22, in <module>\n    main()\n    ~~~~^^\n  File \"/tmp/claude-1000/-workspace/62d6604f-a22b-42cb-b619-7e4ad5686d32/scratchpad/q3/Qwen3-0.6B-Q4_K_M__think-off/script.py\", line 4, in main\n    csv_path = sys.argv[1]\n               ^^^\nNameError: name 'sys' is not defined. Did you forget to import 'sys'?\n"
+  },
+  "no_args": {
+   "exit": 1,
+   "stdout": "",
+   "stderr": "Traceback (most recent call last):\n  File \"/tmp/claude-1000/-workspace/62d6604f-a22b-42cb-b619-7e4ad5686d32/scratchpad/q3/Qwen3-0.6B-Q4_K_M__think-off/script.py\", line 22, in <module>\n    main()\n    ~~~~^^\n  File \"/tmp/claude-1000/-workspace/62d6604f-a22b-42cb-b619-7e4ad5686d32/scratchpad/q3/Qwen3-0.6B-Q4_K_M__think-off/script.py\", line 4, in main\n    csv_path = sys.argv[1]\n               ^^^\nNameError: name 'sys' is not defined. Did you forget to import 'sys'?\n"
+  },
+  "good_exact_match": false,
+  "good_counts_present": false,
+  "missing_column_exit_1": true,
+  "missing_column_stderr": true
+ }
+}

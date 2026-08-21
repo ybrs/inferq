@@ -1,0 +1,48 @@
+{
+ "state": "ANSWERED",
+ "finish_reason": "tool_calls",
+ "content": "",
+ "reasoning_content": "",
+ "tool_calls_raw": [
+  {
+   "type": "function",
+   "function": {
+    "name": "release_task",
+    "arguments": "{\"task_id\": 412}"
+   },
+   "id": "lon8HiVvfmz3zbJj2RwkA4ZLti59w8IM"
+  }
+ ],
+ "tool_calls": [
+  {
+   "name": "release_task",
+   "arguments": {
+    "task_id": 412
+   }
+  }
+ ],
+ "arguments_parse_errors": [],
+ "usage": {
+  "completion_tokens": 23,
+  "prompt_tokens": 7456,
+  "total_tokens": 7479,
+  "prompt_tokens_details": {
+   "cached_tokens": 7428
+  }
+ },
+ "timings": {
+  "cache_n": 7428,
+  "prompt_n": 28,
+  "prompt_ms": 373.532,
+  "prompt_per_token_ms": 13.340428571428571,
+  "prompt_per_second": 74.96011051262008,
+  "predicted_n": 23,
+  "predicted_ms": 1494.22,
+  "predicted_per_token_ms": 67.91909090909091,
+  "predicted_per_second": 14.723400837895358
+ },
+ "elapsed_s": 2.05,
+ "overhead_s": 0.18,
+ "reasoning_leak": false,
+ "scenario": "s04-enum-blocked"
+}

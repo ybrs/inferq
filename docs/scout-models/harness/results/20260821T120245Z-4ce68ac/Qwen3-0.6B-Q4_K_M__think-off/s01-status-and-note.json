@@ -1,0 +1,50 @@
+{
+ "state": "ANSWERED",
+ "finish_reason": "tool_calls",
+ "content": "",
+ "reasoning_content": "",
+ "tool_calls_raw": [
+  {
+   "type": "function",
+   "function": {
+    "name": "set_task_status",
+    "arguments": "{\"task_id\": 405, \"status\": \"done\", \"comment\": \"Benchmark is committed on branch scout-models\"}"
+   },
+   "id": "ewV6jy2osMUyaant51LBW43INdQjfq5b"
+  }
+ ],
+ "tool_calls": [
+  {
+   "name": "set_task_status",
+   "arguments": {
+    "task_id": 405,
+    "status": "done",
+    "comment": "Benchmark is committed on branch scout-models"
+   }
+  }
+ ],
+ "arguments_parse_errors": [],
+ "usage": {
+  "completion_tokens": 43,
+  "prompt_tokens": 7463,
+  "total_tokens": 7506,
+  "prompt_tokens_details": {
+   "cached_tokens": 7428
+  }
+ },
+ "timings": {
+  "cache_n": 7428,
+  "prompt_n": 35,
+  "prompt_ms": 447.703,
+  "prompt_per_token_ms": 12.791514285714285,
+  "prompt_per_second": 78.17682704828871,
+  "predicted_n": 43,
+  "predicted_ms": 2826.757,
+  "predicted_per_token_ms": 67.3037380952381,
+  "predicted_per_second": 14.858015740298866
+ },
+ "elapsed_s": 3.33,
+ "overhead_s": 0.05,
+ "reasoning_leak": false,
+ "scenario": "s01-status-and-note"
+}
